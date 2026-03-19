@@ -94,8 +94,19 @@ pub async fn get_row_data(
         .map(|(i, col)| format!("{}::text = ${}", quote_ident(col), i + 1))
         .collect();
 
+    // First get column names, then build a query that casts all to text
+    let col_info_query = "SELECT column_name FROM information_schema.columns WHERE table_schema = $1 AND table_name = $2 ORDER BY ordinal_position".to_string();
+    let col_rows = client.query(&col_info_query, &[&schema, &table]).await?;
+    let col_names: Vec<String> = col_rows.iter().map(|r| r.get::<_, String>("column_name")).collect();
+
+    // Build SELECT with ::text cast for every column
+    let select_exprs: Vec<String> = col_names.iter()
+        .map(|c| format!("{}::text", quote_ident(c)))
+        .collect();
+
     let query = format!(
-        "SELECT * FROM {}.{} WHERE {}",
+        "SELECT {} FROM {}.{} WHERE {}",
+        select_exprs.join(", "),
         quote_ident(schema),
         quote_ident(table),
         where_clauses.join(" AND "),
@@ -111,12 +122,11 @@ pub async fn get_row_data(
     }
 
     let row = &rows[0];
-    let columns = row.columns();
-    let mut result = Vec::with_capacity(columns.len());
+    let mut result = Vec::with_capacity(col_names.len());
 
-    for (i, col) in columns.iter().enumerate() {
-        let value = column_to_option_string(row, i);
-        result.push((col.name().to_string(), value));
+    for (i, col_name) in col_names.iter().enumerate() {
+        let value: Option<String> = row.get(i);
+        result.push((col_name.clone(), value));
     }
 
     Ok(result)
@@ -148,7 +158,7 @@ pub async fn get_column_value(
         .collect();
 
     let query = format!(
-        "SELECT {} FROM {}.{} WHERE {}",
+        "SELECT {}::text FROM {}.{} WHERE {}",
         quote_ident(column),
         quote_ident(schema),
         quote_ident(table),
@@ -164,7 +174,7 @@ pub async fn get_column_value(
         return Err(FsError::NotFound);
     }
 
-    let value = column_to_option_string(&rows[0], 0);
+    let value: Option<String> = rows[0].get(0);
     Ok(value)
 }
 
@@ -209,42 +219,3 @@ fn column_to_string(row: &tokio_postgres::Row, idx: usize) -> String {
     "NULL".to_string()
 }
 
-/// Convert a column value to an Option<String>, returning None for SQL NULL values.
-fn column_to_option_string(row: &tokio_postgres::Row, idx: usize) -> Option<String> {
-    // First check for NULL by trying Option<String>
-    if let Ok(v) = row.try_get::<_, Option<String>>(idx) {
-        return v;
-    }
-    if let Ok(v) = row.try_get::<_, Option<i32>>(idx) {
-        return v.map(|x| x.to_string());
-    }
-    if let Ok(v) = row.try_get::<_, Option<i64>>(idx) {
-        return v.map(|x| x.to_string());
-    }
-    if let Ok(v) = row.try_get::<_, Option<i16>>(idx) {
-        return v.map(|x| x.to_string());
-    }
-    if let Ok(v) = row.try_get::<_, Option<f32>>(idx) {
-        return v.map(|x| x.to_string());
-    }
-    if let Ok(v) = row.try_get::<_, Option<f64>>(idx) {
-        return v.map(|x| x.to_string());
-    }
-    if let Ok(v) = row.try_get::<_, Option<bool>>(idx) {
-        return v.map(|x| x.to_string());
-    }
-    if let Ok(v) = row.try_get::<_, Option<chrono::NaiveDateTime>>(idx) {
-        return v.map(|x| x.to_string());
-    }
-    if let Ok(v) = row.try_get::<_, Option<chrono::NaiveDate>>(idx) {
-        return v.map(|x| x.to_string());
-    }
-    if let Ok(v) = row.try_get::<_, Option<chrono::DateTime<chrono::Utc>>>(idx) {
-        return v.map(|x| x.to_string());
-    }
-    if let Ok(v) = row.try_get::<_, Option<serde_json::Value>>(idx) {
-        return v.map(|x| x.to_string());
-    }
-    // If we can't determine the type, return None
-    None
-}

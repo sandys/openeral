@@ -45,11 +45,36 @@ pub async fn read(
 
 /// Parse a pk_display string back into individual PK values.
 /// For single-column PKs: "value"
-/// For composite PKs: "val1,val2"
+/// For composite PKs: "col1=val1,col2=val2" — strip the "col=" prefix
 pub fn parse_pk_display(display: &str, pk_columns: &[String]) -> Vec<String> {
     if pk_columns.len() == 1 {
         vec![display.to_string()]
     } else {
-        display.split(',').map(|s| s.to_string()).collect()
+        // Composite PK display format: "col1=val1,col2=val2"
+        // We need to split by the known column names to handle values that contain commas
+        let mut values = Vec::new();
+        let mut remaining = display;
+        for (i, col) in pk_columns.iter().enumerate() {
+            let prefix = format!("{}=", col);
+            if let Some(rest) = remaining.strip_prefix(&prefix) {
+                // Find the next column boundary (next "colN=" pattern)
+                if i + 1 < pk_columns.len() {
+                    let next_prefix = format!(",{}=", pk_columns[i + 1]);
+                    if let Some(pos) = rest.find(&next_prefix) {
+                        values.push(rest[..pos].to_string());
+                        remaining = &rest[pos + 1..]; // skip the comma
+                    } else {
+                        values.push(rest.to_string());
+                        remaining = "";
+                    }
+                } else {
+                    values.push(rest.to_string());
+                }
+            } else {
+                // Fallback: simple comma split
+                values.push(remaining.to_string());
+            }
+        }
+        values
     }
 }
