@@ -77,9 +77,6 @@ jobs:
         run: cargo test -p pgmount-core
 
       - name: FUSE mount integration tests
-        # FUSE requires /dev/fuse — available on GitHub runners but not in
-        # Docker-based environments like nektos/act.
-        if: ${{ !env.ACT }}
         env:
           PGPASSWORD: pgmount
           DB_CONN: "host=localhost user=pgmount password=pgmount dbname=testdb"
