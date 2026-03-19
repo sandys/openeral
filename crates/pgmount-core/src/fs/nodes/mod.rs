@@ -9,6 +9,7 @@ pub mod export;
 pub mod indexes;
 pub mod filter;
 pub mod order;
+pub mod page;
 
 use crate::config::types::MountConfig;
 use crate::error::FsError;
@@ -54,12 +55,15 @@ pub async fn node_getattr(
         | NodeIdentity::ByIndexDir { .. }
         | NodeIdentity::IndexDir { .. }
         | NodeIdentity::ViewsDir { .. }
-        | NodeIdentity::View { .. } => Ok(attr::dir_attr(ino)),
+        | NodeIdentity::View { .. }
+        | NodeIdentity::PageDir { .. }
+        | NodeIdentity::ExportDir { .. } => Ok(attr::dir_attr(ino)),
 
         NodeIdentity::Column { .. }
         | NodeIdentity::RowFile { .. }
         | NodeIdentity::InfoFile { .. }
         | NodeIdentity::ExportFile { .. }
+        | NodeIdentity::ExportPageFile { .. }
         | NodeIdentity::IndexFile { .. } => Ok(attr::file_attr(ino, 4096)),
     }
 }
@@ -133,6 +137,16 @@ pub async fn node_lookup(
             indexes::lookup(schema, table, name, ctx).await
         }
 
+        // Page directory (page_N/) contains row dirs
+        NodeIdentity::PageDir { schema, table, page } => {
+            page::lookup(schema, table, *page, name, ctx).await
+        }
+
+        // Export format directory (data.json/) contains page files
+        NodeIdentity::ExportDir { schema, table, format } => {
+            export::lookup_export_dir(schema, table, format, name, ctx).await
+        }
+
         _ => Err(FsError::NotFound),
     }
 }
@@ -201,6 +215,16 @@ pub async fn node_readdir(
             indexes::readdir(schema, table, offset, ctx).await
         }
 
+        // Page directory (page_N/) lists rows
+        NodeIdentity::PageDir { schema, table, page } => {
+            page::readdir(schema, table, *page, offset, ctx).await
+        }
+
+        // Export format directory (data.json/) lists page files
+        NodeIdentity::ExportDir { schema, table, format } => {
+            export::readdir_export_dir(schema, table, format, offset, ctx).await
+        }
+
         _ => Ok(vec![]),
     }
 }
@@ -233,7 +257,13 @@ pub async fn node_read(
             schema,
             table,
             format,
-        } => export::read(schema, table, format, offset, size, ctx).await,
+        } => export::read_export_page(schema, table, format, 1, offset, size, ctx).await,
+        NodeIdentity::ExportPageFile {
+            schema,
+            table,
+            format,
+            page,
+        } => export::read_export_page(schema, table, format, *page, offset, size, ctx).await,
         NodeIdentity::IndexFile {
             schema,
             table,
@@ -258,5 +288,7 @@ pub fn is_directory(identity: &NodeIdentity) -> bool {
             | NodeIdentity::ByIndexDir { .. }
             | NodeIdentity::IndexDir { .. }
             | NodeIdentity::ViewsDir { .. }
+            | NodeIdentity::PageDir { .. }
+            | NodeIdentity::ExportDir { .. }
     )
 }

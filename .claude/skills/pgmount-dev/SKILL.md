@@ -33,16 +33,16 @@ pgmount/
 │       │   │   └── version.rs          # Prints CARGO_PKG_VERSION
 │       │   ├── config/                 # Connection resolution
 │       │   │   ├── mod.rs
-│       │   │   ├── types.rs            # MountConfig, PgmountConfig, ConnectionConfig
+│       │   │   ├── types.rs            # MountConfig (incl. page_size, statement_timeout_secs)
 │       │   │   └── connection.rs       # CLI arg > env var > ~/.pgmount/config.yml
 │       │   ├── db/                     # PostgreSQL layer
 │       │   │   ├── mod.rs
-│       │   │   ├── pool.rs             # deadpool-postgres pool (max 16)
+│       │   │   ├── pool.rs             # deadpool-postgres pool (max 16, statement timeout)
 │       │   │   ├── types.rs            # SchemaInfo, TableInfo, ColumnInfo, etc.
 │       │   │   └── queries/
-│       │   │       ├── mod.rs          # Public quote_ident()
+│       │   │       ├── mod.rs          # Public quote_ident(), get_client()
 │       │   │       ├── introspection.rs # list_schemas/tables/columns, get_primary_key
-│       │   │       ├── rows.rs         # list_rows, get_row_data, get_column_value
+│       │   │       ├── rows.rs         # query_rows, list_rows, get_row_data, get_all_rows_as_text
 │       │   │       ├── indexes.rs      # list_indexes from pg_class/pg_index
 │       │   │       └── stats.rs        # Row count estimate + exact
 │       │   ├── fs/                     # FUSE filesystem
@@ -54,16 +54,17 @@ pgmount/
 │       │   │       ├── mod.rs          # Dispatch: node_lookup/readdir/read/getattr
 │       │   │       ├── root.rs         # / → lists schemas
 │       │   │       ├── schema.rs       # /public/ → lists tables
-│       │   │       ├── table.rs        # /public/users/ → rows + special dirs
-│       │   │       ├── row.rs          # /public/users/1/ → columns + format files
-│       │   │       ├── column.rs       # /public/users/1/name → column value text
-│       │   │       ├── row_file.rs     # row.json / row.csv / row.yaml
+│       │   │       ├── table.rs        # /public/users/ → special dirs + page_N/ dirs
+│       │   │       ├── page.rs         # /public/users/page_1/ → rows for that page
+│       │   │       ├── row.rs          # /public/users/page_1/1/ → columns + format files
+│       │   │       ├── column.rs       # column value as text file + parse_pk_display
+│       │   │       ├── row_file.rs     # row.json / row.csv / row.yaml (delegates to format/)
 │       │   │       ├── info.rs         # .info/ → columns.json, schema.sql, count, primary_key
-│       │   │       ├── export.rs       # .export/ → data.json, data.csv, data.yaml
+│       │   │       ├── export.rs       # .export/ → data.json/, data.csv/, data.yaml/ (paginated)
 │       │   │       ├── indexes.rs      # .indexes/ → index metadata files
 │       │   │       ├── filter.rs       # .filter/<col>/<val>/ → filtered rows
 │       │   │       └── order.rs        # .order/<col>/asc|desc/ → sorted rows
-│       │   ├── format/                 # Serializers
+│       │   ├── format/                 # Serializers (single source of truth)
 │       │   │   ├── mod.rs
 │       │   │   ├── json.rs            # format_row / format_rows (smart type inference)
 │       │   │   ├── csv.rs             # CSV with headers
@@ -72,12 +73,24 @@ pgmount/
 │       │       ├── mod.rs
 │       │       └── registry.rs         # MountRegistry (DashMap tracking)
 │       └── tests/
-│           └── integration.rs          # 22 Rust integration tests
+│           └── integration.rs          # 35 Rust integration tests
 └── tests/
-    └── test_fuse_mount.sh              # 105-assertion FUSE mount test suite
+    └── test_fuse_mount.sh              # 119-assertion FUSE mount test suite
 ```
 
 ## Key Architecture
+
+### Pagination
+Rows are grouped into `page_N/` directories (configurable via `--page-size`, default 1000). This bounds memory and directory listing size. Export files are similarly paginated (`data.json/page_1.json`). Use `.filter/` for targeted access to specific rows without browsing pages.
+
+**One-liner alternatives to direct row access:**
+```bash
+# Instead of: cat /mnt/db/public/users/42/name
+# Use filter for targeted lookup:
+cat /mnt/db/public/users/.filter/id/42/42/name
+# Or glob across pages:
+cat /mnt/db/public/users/page_*/42/name 2>/dev/null
+```
 
 ### Async Bridge
 fuser callbacks are sync (OS threads). Database calls use tokio-postgres (async). Each FUSE callback calls `handle.block_on(async_fn)` to bridge them.
@@ -88,11 +101,20 @@ fuser callbacks are sync (OS threads). Database calls use tokio-postgres (async)
 ### Node Dispatch
 `fs/nodes/mod.rs` has four dispatch functions: `node_getattr`, `node_lookup`, `node_readdir`, `node_read`. Each matches on `NodeIdentity` and delegates to the appropriate node module.
 
+### Shared Query Function
+`db/queries/rows.rs::query_rows()` is the single row-fetching function used by table listing, filter, and order nodes. It accepts optional WHERE and ORDER BY clauses to avoid code duplication. The `get_client()` helper in `db/queries/mod.rs` centralizes connection acquisition.
+
 ### File Content Strategy
-`getattr` reports estimated size 4096. On `open`, content is generated and cached in an `OpenFileHandle` map. `read` slices from this cache.
+`getattr` reports estimated size 4096. On `open`, content is generated and cached in an `OpenFileHandle` map. `read` slices from this cache. If `open` fails (e.g., nonexistent row), ENOENT is returned.
 
 ### SQL Type Handling
 All values cast to `::text` in SQL queries. This avoids Rust type-mapping issues with NUMERIC, MONEY, custom domains, etc.
+
+### PK Encoding
+Primary key values are percent-encoded in directory names using the `percent-encoding` crate. Characters `/`, `,`, `=`, `%` are encoded. Integer PKs appear as-is. Decoded on read via `parse_pk_display()`.
+
+### Statement Timeout
+Configured via `--statement-timeout` (default 30s). Set at the PostgreSQL connection level via `-c statement_timeout=Ns` in connection options. Prevents runaway queries from hanging the FUSE filesystem.
 
 ## Development Workflow
 
@@ -105,10 +127,10 @@ docker compose up -d
 # Build
 docker compose exec dev cargo build
 
-# Run Rust tests (22 tests, uses dedicated rust_test schema)
+# Run Rust tests (35 tests, uses dedicated rust_test schema)
 docker compose exec dev cargo test -p pgmount-core
 
-# Run FUSE mount integration tests (105 assertions)
+# Run FUSE mount integration tests (119 assertions)
 docker compose exec -e PGPASSWORD=pgmount dev bash tests/test_fuse_mount.sh
 
 # Lint
@@ -118,8 +140,10 @@ docker compose exec dev cargo clippy
 docker compose exec dev mkdir -p /mnt/db
 docker compose exec -d dev /workspace/target/debug/pgmount mount \
   -c "host=postgres user=pgmount password=pgmount dbname=testdb" /mnt/db
-docker compose exec dev ls /mnt/db/public/
-docker compose exec dev cat /mnt/db/public/users/1/row.json
+docker compose exec dev ls /mnt/db/public/users/
+docker compose exec dev ls /mnt/db/public/users/page_1/
+docker compose exec dev cat /mnt/db/public/users/page_1/1/row.json
+docker compose exec dev cat /mnt/db/public/users/.filter/id/1/1/row.json
 docker compose exec dev fusermount -u /mnt/db
 ```
 
@@ -137,16 +161,18 @@ To add a new virtual directory/file type (e.g., `.sample/`):
    - `node_readdir` — list children
    - `node_read` — return file content (for leaf files)
    - `node_getattr` — return dir or file attrs
+   - `is_directory` — add to the match if it's a directory
 5. If it's a special dir under tables, add to `SPECIAL_DIRS` in `fs/nodes/table.rs`
-6. Add tests to `tests/test_fuse_mount.sh`
+6. Add tests to `tests/test_fuse_mount.sh` and `tests/integration.rs`
 
 ## Adding a New SQL Query
 
 1. Add the function to the appropriate file in `db/queries/`
-2. Use `pool.get().await` for a connection
+2. Use `super::get_client(pool).await?` for a connection
 3. Use parameterized queries (`$1`, `$2`, etc.)
-4. Use `quote_ident()` from `db::queries` for dynamic identifiers
+4. Use `super::quote_ident()` for dynamic identifiers
 5. Cast results to `::text` when returning user-facing string data
+6. For row-listing queries, use `query_rows()` with extra_where/extra_order params
 
 ## NodeIdentity Enum (Complete)
 
@@ -155,6 +181,7 @@ Root
 Schema { name }
 Table { schema, table }
 SpecialDir { schema, table, kind: Info|Export|Filter|Order|Indexes|... }
+PageDir { schema, table, page }          # page_N/ under table
 Row { schema, table, pk_display }
 Column { schema, table, pk_display, column }
 RowFile { schema, table, pk_display, format: json|csv|yaml }
@@ -163,7 +190,9 @@ OrderDir { schema, table, stage: Root|Column|Direction }
 LimitDir { schema, table, kind: First|Last, n }
 ByIndexDir { schema, table, stage: Root|Column|Value }
 InfoFile { schema, table, filename }
-ExportFile { schema, table, format }
+ExportDir { schema, table, format }      # data.json/ directory
+ExportFile { schema, table, format }     # (legacy, kept for compat)
+ExportPageFile { schema, table, format, page }  # page_N.json file
 IndexDir { schema, table }
 IndexFile { schema, table, index_name }
 ViewsDir { schema }
@@ -186,4 +215,5 @@ View { schema, view_name }
 | thiserror | 2 | Error type derivation |
 | tracing | 0.1 | Structured logging |
 | chrono | 0.4 | Date/time types |
+| percent-encoding | 2 | PK value encoding for safe directory names |
 | libc | 0.2 | System call constants |

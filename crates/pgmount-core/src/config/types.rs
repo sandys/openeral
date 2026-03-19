@@ -23,6 +23,7 @@ pub struct MountConfig {
     pub read_only: bool,
     pub cache_ttl: Duration,
     pub page_size: usize,
+    pub statement_timeout_secs: u64,
 }
 
 impl Default for MountConfig {
@@ -34,6 +35,7 @@ impl Default for MountConfig {
             read_only: true,
             cache_ttl: Duration::from_secs(30),
             page_size: 1000,
+            statement_timeout_secs: 30,
         }
     }
 }

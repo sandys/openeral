@@ -2,6 +2,8 @@ use deadpool_postgres::Pool;
 
 use crate::error::FsError;
 
+use super::quote_ident;
+
 /// Returns an estimated row count from pg_class.reltuples.
 /// This is fast but may be stale if ANALYZE hasn't been run recently.
 pub async fn get_row_count_estimate(
@@ -9,10 +11,7 @@ pub async fn get_row_count_estimate(
     schema: &str,
     table: &str,
 ) -> Result<i64, FsError> {
-    let client = pool
-        .get()
-        .await
-        .map_err(|e| FsError::DatabaseError(format!("Failed to get connection: {}", e)))?;
+    let client = super::get_client(pool).await?;
 
     let rows = client
         .query(
@@ -39,10 +38,7 @@ pub async fn get_exact_row_count(
     schema: &str,
     table: &str,
 ) -> Result<i64, FsError> {
-    let client = pool
-        .get()
-        .await
-        .map_err(|e| FsError::DatabaseError(format!("Failed to get connection: {}", e)))?;
+    let client = super::get_client(pool).await?;
 
     let query = format!(
         "SELECT COUNT(*) as count FROM {}.{}",
@@ -60,9 +56,4 @@ pub async fn get_exact_row_count(
 
     let count: i64 = rows[0].get("count");
     Ok(count)
-}
-
-/// Wraps an identifier in double quotes, escaping any internal double quotes by doubling them.
-fn quote_ident(s: &str) -> String {
-    format!("\"{}\"", s.replace('"', "\"\""))
 }

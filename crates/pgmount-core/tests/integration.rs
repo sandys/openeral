@@ -47,7 +47,7 @@ async fn setup_db(pool: &deadpool_postgres::Pool) {
 }
 
 async fn get_pool() -> deadpool_postgres::Pool {
-    let pool = create_pool(&connection_string()).unwrap();
+    let pool = create_pool(&connection_string(), 30).unwrap();
     setup_db(&pool).await;
     pool
 }
@@ -314,4 +314,140 @@ async fn test_pk_display_parsing() {
     let pk_cols = vec!["order_id".to_string(), "item_id".to_string()];
     let values = parse_pk_display("order_id=1,item_id=2", &pk_cols);
     assert_eq!(values, vec!["1", "2"]);
+}
+
+#[tokio::test]
+async fn test_pk_display_percent_encoding_roundtrip() {
+    use pgmount_core::db::queries::rows::encode_pk_value;
+    use pgmount_core::fs::nodes::column::parse_pk_display;
+
+    // Value with special chars
+    let encoded = encode_pk_value("hello/world");
+    assert!(!encoded.contains('/'));
+    let pk_cols = vec!["id".to_string()];
+    let decoded = parse_pk_display(&encoded, &pk_cols);
+    assert_eq!(decoded, vec!["hello/world"]);
+
+    // Value with comma and equals
+    let encoded = encode_pk_value("a=b,c");
+    assert!(!encoded.contains(','));
+    assert!(!encoded.contains('='));
+    let decoded = parse_pk_display(&encoded, &pk_cols);
+    assert_eq!(decoded, vec!["a=b,c"]);
+}
+
+// --- Issue 5: query_rows shared function ---
+
+#[tokio::test]
+async fn test_query_rows_with_filter() {
+    let pool = get_pool().await;
+    let pk_columns = vec!["id".to_string()];
+    let where_clause = "\"active\"::text = $1";
+    let filter_val = "true".to_string();
+    let params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = vec![&filter_val];
+    let result = rows::query_rows(&pool, S, T, &pk_columns, 100, 0, Some(where_clause), None, &params).await.unwrap();
+    assert_eq!(result.len(), 2); // Alice and Charlie are active
+}
+
+#[tokio::test]
+async fn test_query_rows_with_order() {
+    let pool = get_pool().await;
+    let pk_columns = vec!["id".to_string()];
+    let result = rows::query_rows(&pool, S, T, &pk_columns, 100, 0, None, Some("\"name\" DESC"), &[]).await.unwrap();
+    assert_eq!(result.len(), 3);
+    // Charlie (id=3) > Bob (id=2) > Alice (id=1) alphabetically desc
+    assert_eq!(result[0].display_name, "3");
+    assert_eq!(result[1].display_name, "2");
+    assert_eq!(result[2].display_name, "1");
+}
+
+#[tokio::test]
+async fn test_query_rows_empty_result() {
+    let pool = get_pool().await;
+    let pk_columns = vec!["id".to_string()];
+    let where_clause = "\"name\"::text = $1";
+    let filter_val = "nonexistent_person".to_string();
+    let params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = vec![&filter_val];
+    let result = rows::query_rows(&pool, S, T, &pk_columns, 100, 0, Some(where_clause), None, &params).await.unwrap();
+    assert!(result.is_empty());
+}
+
+// --- Issue 1: Bulk export query ---
+
+#[tokio::test]
+async fn test_get_all_rows_as_text() {
+    let pool = get_pool().await;
+    let (col_names, data) = rows::get_all_rows_as_text(&pool, S, T, 100, 0).await.unwrap();
+    assert!(col_names.contains(&"id".to_string()));
+    assert!(col_names.contains(&"name".to_string()));
+    assert_eq!(data.len(), 3);
+    // Verify first row has all columns as text
+    let first_row: std::collections::HashMap<&str, Option<&str>> = data[0].iter().map(|(k, v)| (k.as_str(), v.as_deref())).collect();
+    assert!(first_row.contains_key("name"));
+}
+
+#[tokio::test]
+async fn test_get_all_rows_as_text_pagination() {
+    let pool = get_pool().await;
+    let (_cols, page1) = rows::get_all_rows_as_text(&pool, S, T, 2, 0).await.unwrap();
+    assert_eq!(page1.len(), 2);
+    let (_cols, page2) = rows::get_all_rows_as_text(&pool, S, T, 2, 2).await.unwrap();
+    assert_eq!(page2.len(), 1);
+}
+
+// --- Issue 10: Error path tests ---
+
+#[tokio::test]
+async fn test_list_tables_nonexistent_schema() {
+    let pool = get_pool().await;
+    let tables = introspection::list_tables(&pool, "nonexistent_schema_xyz").await.unwrap();
+    assert!(tables.is_empty());
+}
+
+#[tokio::test]
+async fn test_list_columns_nonexistent_table() {
+    let pool = get_pool().await;
+    let columns = introspection::list_columns(&pool, S, "nonexistent_table_xyz").await.unwrap();
+    assert!(columns.is_empty());
+}
+
+#[tokio::test]
+async fn test_get_column_value_nonexistent_column() {
+    let pool = get_pool().await;
+    let pk_columns = vec!["id".to_string()];
+    let pk_values = vec!["1".to_string()];
+    let result = rows::get_column_value(&pool, S, T, "nonexistent_col", &pk_columns, &pk_values).await;
+    assert!(result.is_err());
+}
+
+#[tokio::test]
+async fn test_query_rows_nonexistent_table() {
+    let pool = get_pool().await;
+    let pk_columns = vec!["id".to_string()];
+    let result = rows::query_rows(&pool, S, "nonexistent_xyz", &pk_columns, 100, 0, None, None, &[]).await;
+    assert!(result.is_err());
+}
+
+#[tokio::test]
+async fn test_query_rows_empty_pk_columns() {
+    let pool = get_pool().await;
+    let pk_columns: Vec<String> = vec![];
+    let result = rows::query_rows(&pool, S, T, &pk_columns, 100, 0, None, None, &[]).await;
+    assert!(result.is_err());
+}
+
+#[tokio::test]
+async fn test_get_row_data_pk_mismatch() {
+    let pool = get_pool().await;
+    let pk_columns = vec!["id".to_string()];
+    let pk_values = vec!["1".to_string(), "extra".to_string()]; // mismatch
+    let result = rows::get_row_data(&pool, S, T, &pk_columns, &pk_values).await;
+    assert!(result.is_err());
+}
+
+#[tokio::test]
+async fn test_exact_row_count_nonexistent_table() {
+    let pool = get_pool().await;
+    let result = stats::get_exact_row_count(&pool, S, "nonexistent_xyz").await;
+    assert!(result.is_err());
 }

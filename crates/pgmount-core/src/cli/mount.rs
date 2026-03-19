@@ -32,6 +32,10 @@ pub struct MountArgs {
     #[arg(long, default_value = "true")]
     pub read_only: bool,
 
+    /// Statement timeout in seconds (per query)
+    #[arg(long, default_value = "30")]
+    pub statement_timeout: u64,
+
     /// Run in foreground (don't daemonize)
     #[arg(short, long)]
     pub foreground: bool,
@@ -47,10 +51,11 @@ pub async fn execute(args: MountArgs) -> Result<(), FsError> {
         read_only: args.read_only,
         cache_ttl: std::time::Duration::from_secs(args.cache_ttl),
         page_size: args.page_size,
+        statement_timeout_secs: args.statement_timeout,
     };
 
     info!(mount_point = %config.mount_point, "Creating connection pool");
-    let pool = create_pool(&conn_str)?;
+    let pool = create_pool(&conn_str, config.statement_timeout_secs)?;
 
     // Test the connection
     let client = pool.get().await.map_err(|e| FsError::DatabaseError(format!("Connection failed: {}", e)))?;

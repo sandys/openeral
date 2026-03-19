@@ -1,3 +1,5 @@
+use percent_encoding::percent_decode_str;
+
 use crate::db::queries::{introspection, rows};
 use crate::error::FsError;
 use crate::fs::attr;
@@ -48,31 +50,28 @@ pub async fn read(
 /// For composite PKs: "col1=val1,col2=val2" — strip the "col=" prefix
 pub fn parse_pk_display(display: &str, pk_columns: &[String]) -> Vec<String> {
     if pk_columns.len() == 1 {
-        vec![display.to_string()]
+        vec![percent_decode_str(display).decode_utf8_lossy().to_string()]
     } else {
-        // Composite PK display format: "col1=val1,col2=val2"
-        // We need to split by the known column names to handle values that contain commas
+        // Composite PK display format: "col1=encoded_val1,col2=encoded_val2"
         let mut values = Vec::new();
         let mut remaining = display;
         for (i, col) in pk_columns.iter().enumerate() {
             let prefix = format!("{}=", col);
             if let Some(rest) = remaining.strip_prefix(&prefix) {
-                // Find the next column boundary (next "colN=" pattern)
                 if i + 1 < pk_columns.len() {
                     let next_prefix = format!(",{}=", pk_columns[i + 1]);
                     if let Some(pos) = rest.find(&next_prefix) {
-                        values.push(rest[..pos].to_string());
-                        remaining = &rest[pos + 1..]; // skip the comma
+                        values.push(percent_decode_str(&rest[..pos]).decode_utf8_lossy().to_string());
+                        remaining = &rest[pos + 1..];
                     } else {
-                        values.push(rest.to_string());
+                        values.push(percent_decode_str(rest).decode_utf8_lossy().to_string());
                         remaining = "";
                     }
                 } else {
-                    values.push(rest.to_string());
+                    values.push(percent_decode_str(rest).decode_utf8_lossy().to_string());
                 }
             } else {
-                // Fallback: simple comma split
-                values.push(remaining.to_string());
+                values.push(percent_decode_str(remaining).decode_utf8_lossy().to_string());
             }
         }
         values

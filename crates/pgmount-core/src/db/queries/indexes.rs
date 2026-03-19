@@ -8,10 +8,7 @@ pub async fn list_indexes(
     schema: &str,
     table: &str,
 ) -> Result<Vec<IndexInfo>, FsError> {
-    let client = pool
-        .get()
-        .await
-        .map_err(|e| FsError::DatabaseError(format!("Failed to get connection: {}", e)))?;
+    let client = super::get_client(pool).await?;
 
     let rows = client
         .query(

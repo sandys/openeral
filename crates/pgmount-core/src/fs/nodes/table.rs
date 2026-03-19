@@ -1,4 +1,4 @@
-use crate::db::queries::{introspection, rows};
+use crate::db::queries::introspection;
 use crate::db::types::PrimaryKeyInfo;
 use crate::error::FsError;
 use crate::fs::inode::{NodeIdentity, SpecialDirKind};
@@ -16,7 +16,7 @@ pub async fn lookup(
     schema: &str,
     table: &str,
     name: &str,
-    ctx: &NodeContext<'_>,
+    _ctx: &NodeContext<'_>,
 ) -> Result<NodeIdentity, FsError> {
     // Check special directories first
     for (dir_name, kind) in SPECIAL_DIRS {
@@ -29,69 +29,56 @@ pub async fn lookup(
         }
     }
 
-    // Check if it's a row
-    let pk = get_pk(schema, table, ctx).await?;
-    if pk.column_names.is_empty() {
-        return Err(FsError::NotFound);
+    // Check if it's a page directory (page_N)
+    if let Some(page_str) = name.strip_prefix("page_") {
+        if let Ok(page) = page_str.parse::<u64>() {
+            if page >= 1 {
+                return Ok(NodeIdentity::PageDir {
+                    schema: schema.to_string(),
+                    table: table.to_string(),
+                    page,
+                });
+            }
+        }
     }
 
-    // For single-column PKs, name is the value directly
-    // For composite PKs, name is "v1,v2" format
-    Ok(NodeIdentity::Row {
-        schema: schema.to_string(),
-        table: table.to_string(),
-        pk_display: name.to_string(),
-    })
+    Err(FsError::NotFound)
 }
 
 pub async fn readdir(
     schema: &str,
     table: &str,
-    offset: i64,
+    _offset: i64,
     ctx: &NodeContext<'_>,
 ) -> Result<Vec<DirEntry>, FsError> {
     let mut entries = Vec::new();
 
-    // Add special dirs first (at offset 0)
-    if offset == 0 {
-        for (dir_name, kind) in SPECIAL_DIRS {
-            entries.push(DirEntry {
-                name: dir_name.to_string(),
-                identity: NodeIdentity::SpecialDir {
-                    schema: schema.to_string(),
-                    table: table.to_string(),
-                    kind: kind.clone(),
-                },
-                kind: fuser::FileType::Directory,
-            });
-        }
+    // Add special dirs
+    for (dir_name, kind) in SPECIAL_DIRS {
+        entries.push(DirEntry {
+            name: dir_name.to_string(),
+            identity: NodeIdentity::SpecialDir {
+                schema: schema.to_string(),
+                table: table.to_string(),
+                kind: kind.clone(),
+            },
+            kind: fuser::FileType::Directory,
+        });
     }
 
-    // Add rows
+    // Calculate number of pages
     let pk = get_pk(schema, table, ctx).await?;
     if !pk.column_names.is_empty() {
-        let row_offset = if offset == 0 {
-            0
-        } else {
-            offset - SPECIAL_DIRS.len() as i64
-        };
-        let row_offset = row_offset.max(0);
-        let row_ids = rows::list_rows(
-            ctx.pool,
-            schema,
-            table,
-            &pk.column_names,
-            ctx.config.page_size as i64,
-            row_offset,
-        )
-        .await?;
-        for row_id in row_ids {
+        let count = crate::db::queries::stats::get_exact_row_count(ctx.pool, schema, table).await.unwrap_or(0);
+        let page_size = ctx.config.page_size as i64;
+        let num_pages = if count == 0 { 0 } else { ((count - 1) / page_size) + 1 };
+        for p in 1..=num_pages {
             entries.push(DirEntry {
-                name: row_id.display_name.clone(),
-                identity: NodeIdentity::Row {
+                name: format!("page_{}", p),
+                identity: NodeIdentity::PageDir {
                     schema: schema.to_string(),
                     table: table.to_string(),
-                    pk_display: row_id.display_name,
+                    page: p as u64,
                 },
                 kind: fuser::FileType::Directory,
             });
@@ -101,7 +88,7 @@ pub async fn readdir(
     Ok(entries)
 }
 
-async fn get_pk(schema: &str, table: &str, ctx: &NodeContext<'_>) -> Result<PrimaryKeyInfo, FsError> {
+pub(crate) async fn get_pk(schema: &str, table: &str, ctx: &NodeContext<'_>) -> Result<PrimaryKeyInfo, FsError> {
     if let Some(cached) = ctx.cache.get_primary_key(schema, table) {
         return Ok(cached);
     }

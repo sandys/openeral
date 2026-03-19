@@ -28,6 +28,12 @@ pub enum NodeIdentity {
     InfoFile { schema: String, table: String, filename: String },
     /// Files inside .export/ directory
     ExportFile { schema: String, table: String, format: String },
+    /// Paginated row directory: page_1/, page_2/, etc under a table
+    PageDir { schema: String, table: String, page: u64 },
+    /// Paginated export file: page_1.json etc under .export/data.json/
+    ExportPageFile { schema: String, table: String, format: String, page: u64 },
+    /// Directory for paginated export: .export/data.json/ (is now a dir, not a file)
+    ExportDir { schema: String, table: String, format: String },
     /// .indexes/ directory and children
     IndexDir { schema: String, table: String },
     IndexFile { schema: String, table: String, index_name: String },

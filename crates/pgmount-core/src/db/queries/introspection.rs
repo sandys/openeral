@@ -4,10 +4,7 @@ use crate::db::types::{ColumnInfo, PrimaryKeyInfo, SchemaInfo, TableInfo};
 use crate::error::FsError;
 
 pub async fn list_schemas(pool: &Pool) -> Result<Vec<SchemaInfo>, FsError> {
-    let client = pool
-        .get()
-        .await
-        .map_err(|e| FsError::DatabaseError(format!("Failed to get connection: {}", e)))?;
+    let client = super::get_client(pool).await?;
 
     let rows = client
         .query(
@@ -29,10 +26,7 @@ pub async fn list_schemas(pool: &Pool) -> Result<Vec<SchemaInfo>, FsError> {
 }
 
 pub async fn list_tables(pool: &Pool, schema: &str) -> Result<Vec<TableInfo>, FsError> {
-    let client = pool
-        .get()
-        .await
-        .map_err(|e| FsError::DatabaseError(format!("Failed to get connection: {}", e)))?;
+    let client = super::get_client(pool).await?;
 
     let rows = client
         .query(
@@ -59,10 +53,7 @@ pub async fn list_columns(
     schema: &str,
     table: &str,
 ) -> Result<Vec<ColumnInfo>, FsError> {
-    let client = pool
-        .get()
-        .await
-        .map_err(|e| FsError::DatabaseError(format!("Failed to get connection: {}", e)))?;
+    let client = super::get_client(pool).await?;
 
     let rows = client
         .query(
@@ -97,10 +88,7 @@ pub async fn get_primary_key(
     schema: &str,
     table: &str,
 ) -> Result<PrimaryKeyInfo, FsError> {
-    let client = pool
-        .get()
-        .await
-        .map_err(|e| FsError::DatabaseError(format!("Failed to get connection: {}", e)))?;
+    let client = super::get_client(pool).await?;
 
     let rows = client
         .query(

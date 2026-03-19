@@ -1,10 +1,8 @@
 use crate::error::FsError;
 use crate::fs::inode::{NodeIdentity, OrderStage};
 use crate::fs::nodes::{DirEntry, NodeContext};
-use crate::db::queries::introspection;
-use crate::db::types::PrimaryKeyInfo;
+use crate::db::queries::{introspection, rows};
 
-/// Lookup child of .order/ root -> column names
 pub async fn lookup_root(
     schema: &str,
     table: &str,
@@ -41,7 +39,6 @@ pub async fn readdir_root(
     }).collect())
 }
 
-/// Lookup child of .order/<col>/ -> "asc" or "desc"
 pub async fn lookup_column(
     schema: &str,
     table: &str,
@@ -83,7 +80,6 @@ pub async fn readdir_column(
     }).collect())
 }
 
-/// Lookup in .order/<col>/asc|desc/ -> row directories
 pub async fn lookup_direction(
     schema: &str,
     table: &str,
@@ -99,7 +95,6 @@ pub async fn lookup_direction(
     })
 }
 
-/// readdir for .order/<col>/asc|desc/ -> list rows in that order
 pub async fn readdir_direction(
     schema: &str,
     table: &str,
@@ -108,12 +103,20 @@ pub async fn readdir_direction(
     _offset: i64,
     ctx: &NodeContext<'_>,
 ) -> Result<Vec<DirEntry>, FsError> {
-    let pk = get_pk(schema, table, ctx).await?;
+    let pk = super::table::get_pk(schema, table, ctx).await?;
     if pk.column_names.is_empty() {
         return Ok(vec![]);
     }
 
-    let ordered = query_ordered_rows(ctx.pool, schema, table, column, dir, &pk.column_names, ctx.config.page_size as i64).await?;
+    let dir_sql = if dir == "desc" { "DESC" } else { "ASC" };
+    let order_clause = format!("{} {}", crate::db::queries::quote_ident(column), dir_sql);
+
+    let ordered = rows::query_rows(
+        ctx.pool, schema, table, &pk.column_names,
+        ctx.config.page_size as i64, 0,
+        None, Some(&order_clause),
+        &[],
+    ).await?;
 
     Ok(ordered.iter().map(|row_id| DirEntry {
         name: row_id.display_name.clone(),
@@ -124,68 +127,4 @@ pub async fn readdir_direction(
         },
         kind: fuser::FileType::Directory,
     }).collect())
-}
-
-async fn get_pk(schema: &str, table: &str, ctx: &NodeContext<'_>) -> Result<PrimaryKeyInfo, FsError> {
-    if let Some(cached) = ctx.cache.get_primary_key(schema, table) {
-        return Ok(cached);
-    }
-    let pk = introspection::get_primary_key(ctx.pool, schema, table).await?;
-    ctx.cache.set_primary_key(schema, table, pk.clone());
-    Ok(pk)
-}
-
-async fn query_ordered_rows(
-    pool: &deadpool_postgres::Pool,
-    schema: &str,
-    table: &str,
-    order_column: &str,
-    direction: &str,
-    pk_columns: &[String],
-    limit: i64,
-) -> Result<Vec<crate::db::types::RowIdentifier>, FsError> {
-    let client = pool.get().await
-        .map_err(|e| FsError::DatabaseError(format!("Failed to get connection: {}", e)))?;
-
-    let select_cols: Vec<String> = pk_columns.iter()
-        .map(|c| crate::db::queries::quote_ident(c))
-        .collect();
-
-    let dir_sql = if direction == "desc" { "DESC" } else { "ASC" };
-
-    let query = format!(
-        "SELECT {} FROM {}.{} ORDER BY {} {} LIMIT $1",
-        select_cols.join(", "),
-        crate::db::queries::quote_ident(schema),
-        crate::db::queries::quote_ident(table),
-        crate::db::queries::quote_ident(order_column),
-        dir_sql,
-    );
-
-    let params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = vec![&limit];
-    let rows = client.query(&query, &params).await?;
-
-    let mut result = Vec::new();
-    for row in &rows {
-        let mut pk_values = Vec::new();
-        let mut display_parts = Vec::new();
-        for (i, col_name) in pk_columns.iter().enumerate() {
-            let value_str: String = row.try_get::<_, String>(i)
-                .or_else(|_| row.try_get::<_, i32>(i).map(|v| v.to_string()))
-                .or_else(|_| row.try_get::<_, i64>(i).map(|v| v.to_string()))
-                .unwrap_or_else(|_| "NULL".to_string());
-            if pk_columns.len() == 1 {
-                display_parts.push(value_str.clone());
-            } else {
-                display_parts.push(format!("{}={}", col_name, &value_str));
-            }
-            pk_values.push((col_name.clone(), value_str));
-        }
-        result.push(crate::db::types::RowIdentifier {
-            pk_values,
-            display_name: display_parts.join(","),
-        });
-    }
-
-    Ok(result)
 }

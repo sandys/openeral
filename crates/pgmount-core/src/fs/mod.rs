@@ -11,7 +11,7 @@ use fuser::{
     Errno, FileHandle, FileType, Filesystem, FopenFlags, Generation, INodeNo, OpenFlags,
     ReplyAttr, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyOpen, Request,
 };
-use tracing::{debug, warn};
+use tracing::debug;
 
 use crate::config::types::MountConfig;
 use crate::db::pool::DbPool;
@@ -230,12 +230,8 @@ impl Filesystem for PgmountFilesystem {
                 reply.opened(FileHandle(fh), FopenFlags::empty());
             }
             Err(e) => {
-                warn!("open({}) failed to pre-read: {}", ino_u64, e);
-                // Still open, but with empty content
-                let fh = self.alloc_fh();
-                self.open_files
-                    .insert(fh, OpenFileHandle { content: vec![] });
-                reply.opened(FileHandle(fh), FopenFlags::empty());
+                debug!("open({}) failed: {}", ino_u64, e);
+                reply.error(e.to_errno());
             }
         }
     }

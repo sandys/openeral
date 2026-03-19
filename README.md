@@ -8,12 +8,15 @@ Browse schemas, tables, rows, and columns as directories and files. Filter, sort
 $ pgmount mount -c "host=localhost dbname=myapp" /mnt/db
 
 $ ls /mnt/db/public/users/
-.export  .filter  .indexes  .info  .order  1  2  3
+.export  .filter  .indexes  .info  .order  page_1
 
-$ cat /mnt/db/public/users/1/name
+$ ls /mnt/db/public/users/page_1/
+1  2  3
+
+$ cat /mnt/db/public/users/page_1/1/name
 Alice
 
-$ cat /mnt/db/public/users/1/row.json
+$ cat /mnt/db/public/users/page_1/1/row.json
 {
   "id": 1,
   "name": "Alice",
@@ -25,7 +28,7 @@ $ cat /mnt/db/public/users/1/row.json
 $ ls /mnt/db/public/users/.filter/active/true/
 1  3
 
-$ cat /mnt/db/public/users/.export/data.csv
+$ cat /mnt/db/public/users/.export/data.csv/page_1.csv
 id,name,email,age,active
 1,Alice,alice@example.com,30,true
 2,Bob,bob@example.com,25,false
@@ -35,52 +38,65 @@ id,name,email,age,active
 ## Features
 
 - **Browse database structure** as a directory tree: schemas / tables / rows / columns
+- **Paginated row listing** — rows grouped into `page_N/` directories (configurable page size, default 1000)
 - **Read column values** as plain text files
 - **Row serialization** in JSON, CSV, and YAML (`row.json`, `row.csv`, `row.yaml`)
-- **Bulk export** via `.export/data.json`, `.export/data.csv`, `.export/data.yaml`
+- **Paginated bulk export** via `.export/data.json/page_N.json`, `.export/data.csv/page_N.csv`, etc.
 - **Filter rows** with `.filter/<column>/<value>/` directories
 - **Sort rows** with `.order/<column>/asc/` or `.order/<column>/desc/`
 - **Inspect metadata** via `.info/columns.json`, `.info/schema.sql`, `.info/count`, `.info/primary_key`
 - **View indexes** via `.indexes/<index_name>` files
 - **Composite primary keys** displayed as `col1=val1,col2=val2` directories
-- **NULL handling** -- NULL values read as `NULL`
+- **Percent-encoded PK values** — special characters (`/`, `,`, `=`, `%`) in PK values are safely encoded
+- **NULL handling** — NULL values read as `NULL`
 - **Tables/columns with special characters** (spaces, quotes) handled correctly
 - **Metadata caching** with configurable TTL
 - **Connection pooling** via deadpool-postgres (16 connections)
-- **Multiple schemas** -- all non-system schemas mounted, or filter with `--schemas`
+- **Statement timeout** — configurable per-query timeout prevents hung filesystems (default 30s)
+- **Multiple schemas** — all non-system schemas mounted, or filter with `--schemas`
 
 ## Filesystem Layout
 
 ```
 /mnt/db/
-  <schema>/                          # e.g. public/
-    <table>/                         # e.g. users/
+  <schema>/                              # e.g. public/
+    <table>/                             # e.g. users/
       .info/
-        columns.json                 # column metadata as JSON array
-        schema.sql                   # approximate CREATE TABLE DDL
-        count                        # exact row count
-        primary_key                  # PK column name(s)
+        columns.json                     # column metadata as JSON array
+        schema.sql                       # approximate CREATE TABLE DDL
+        count                            # exact row count
+        primary_key                      # PK column name(s)
       .export/
-        data.json                    # all rows as JSON array
-        data.csv                     # all rows as CSV
-        data.yaml                    # all rows as YAML
+        data.json/                       # export directory (paginated)
+          page_1.json                    # rows 1-1000 as JSON array
+          page_2.json                    # rows 1001-2000
+          ...
+        data.csv/
+          page_1.csv
+          ...
+        data.yaml/
+          page_1.yaml
+          ...
       .filter/
-        <column>/                    # e.g. active/
-          <value>/                   # e.g. true/
-            <pk>/...                 # matching row directories
+        <column>/                        # e.g. active/
+          <value>/                       # e.g. true/
+            <pk>/...                     # matching row directories
       .order/
-        <column>/                    # e.g. name/
-          asc/                       # rows sorted ascending
+        <column>/                        # e.g. name/
+          asc/                           # rows sorted ascending
             <pk>/...
-          desc/                      # rows sorted descending
+          desc/                          # rows sorted descending
             <pk>/...
       .indexes/
-        <index_name>                 # index metadata file
-      <pk_value>/                    # row directory (e.g. 1/ or col1=a,col2=b/)
-        <column_name>               # column value as text file
-        row.json                     # full row as JSON
-        row.csv                      # full row as CSV
-        row.yaml                     # full row as YAML
+        <index_name>                     # index metadata file
+      page_1/                            # rows 1-1000
+        <pk_value>/                      # e.g. 1/ or col1=val1,col2=val2/
+          <column_name>                  # column value as text file
+          row.json                       # full row as JSON
+          row.csv                        # full row as CSV
+          row.yaml                       # full row as YAML
+      page_2/                            # rows 1001-2000
+        ...
 ```
 
 ## Installation
@@ -123,12 +139,13 @@ Arguments:
   <MOUNT_POINT>    Path where the filesystem will be mounted
 
 Options:
-  -c, --connection <CONNECTION>    PostgreSQL connection string
-  -s, --schemas <SCHEMAS>          Only show these schemas (comma-separated)
-      --cache-ttl <SECONDS>        Metadata cache TTL [default: 30]
-      --page-size <N>              Max rows per directory listing [default: 1000]
-      --read-only <BOOL>           Mount read-only [default: true]
-  -f, --foreground                 Run in foreground
+  -c, --connection <CONNECTION>         PostgreSQL connection string
+  -s, --schemas <SCHEMAS>               Only show these schemas (comma-separated)
+      --cache-ttl <SECONDS>             Metadata cache TTL [default: 30]
+      --page-size <N>                   Max rows per page directory [default: 1000]
+      --statement-timeout <SECONDS>     SQL statement timeout [default: 30]
+      --read-only <BOOL>                Mount read-only [default: true]
+  -f, --foreground                      Run in foreground
 ```
 
 ### Unmount
@@ -147,6 +164,8 @@ pgmount list
 
 ### Browsing examples
 
+Rows are organized into paginated `page_N/` directories under each table. Use `.filter/` for targeted access to specific rows.
+
 ```bash
 # List schemas
 ls /mnt/db/
@@ -154,31 +173,60 @@ ls /mnt/db/
 # List tables in a schema
 ls /mnt/db/public/
 
-# List rows in a table (shown as PK-value directories)
+# List pages in a table
 ls /mnt/db/public/users/
+# output: .export  .filter  .indexes  .info  .order  page_1  page_2
 
-# Read a single column value
-cat /mnt/db/public/users/42/email
+# List rows in page 1
+ls /mnt/db/public/users/page_1/
+
+# Read a column value
+cat /mnt/db/public/users/page_1/42/email
 
 # Get full row as JSON
-cat /mnt/db/public/users/42/row.json
+cat /mnt/db/public/users/page_1/42/row.json
+```
 
-# Export entire table as CSV
-cat /mnt/db/public/users/.export/data.csv > users_backup.csv
+**Accessing a specific row directly** — use `.filter/` instead of browsing pages:
 
+```bash
+# Find user with id=42 (targeted DB query, no pagination needed)
+cat /mnt/db/public/users/.filter/id/42/42/row.json
+
+# Find all active users
+ls /mnt/db/public/users/.filter/active/true/
+
+# Find across all pages with shell globbing
+cat /mnt/db/public/users/page_*/42/row.json 2>/dev/null
+```
+
+**Exporting data:**
+
+```bash
+# Export page 1 as CSV
+cat /mnt/db/public/users/.export/data.csv/page_1.csv > users_page1.csv
+
+# Export all pages (concatenate)
+cat /mnt/db/public/users/.export/data.json/page_*.json
+
+# Export as a single stream with jq
+cat /mnt/db/public/users/.export/data.json/page_*.json | jq -s 'add'
+```
+
+**Metadata and indexes:**
+
+```bash
 # View table metadata
 cat /mnt/db/public/users/.info/count
 cat /mnt/db/public/users/.info/primary_key
 cat /mnt/db/public/users/.info/schema.sql
+cat /mnt/db/public/users/.info/columns.json
 
-# Filter rows by column value
-ls /mnt/db/public/users/.filter/active/true/
-
-# Sort rows
+# Sort rows by column
 ls /mnt/db/public/users/.order/name/asc/
 
-# Read data through a filtered view
-cat /mnt/db/public/users/.filter/active/true/1/row.json
+# Read sorted row data
+cat /mnt/db/public/users/.order/name/asc/1/row.json
 
 # View indexes
 ls /mnt/db/public/users/.indexes/
@@ -198,7 +246,7 @@ pgmount/
         db/            # Connection pool and SQL queries
           queries/     # Introspection, row access, indexes, stats
         fs/            # FUSE filesystem implementation
-          nodes/       # Node types: root, schema, table, row, column,
+          nodes/       # Node types: root, schema, table, page, row, column,
                        #   info, export, indexes, filter, order
         format/        # JSON, CSV, YAML serializers
         mount/         # Mount registry
@@ -217,13 +265,19 @@ pgmount/
 
 ### Key design decisions
 
+**Pagination**: Rows are grouped into `page_N/` directories to bound memory usage and directory listing size. Each page contains up to `page_size` rows (default 1000). Export files are similarly paginated. Use `.filter/` for targeted access to specific rows without browsing pages.
+
 **Async bridge**: `fuser` callbacks run on OS threads; database calls are async. Each FUSE callback uses `tokio::runtime::Handle::block_on()` to execute async queries.
 
 **Inode allocation**: Lazy and deterministic within a mount session. A `NodeIdentity` enum describes every virtual node type. A `DashMap` ensures the same identity always maps to the same inode number.
 
-**File content**: `getattr` reports an estimated size (4096). On `open`, the full content is generated and cached in a file-handle map. `read` slices from this cache.
+**File content**: `getattr` reports an estimated size (4096). On `open`, the full content is generated and cached in a file-handle map. `read` slices from this cache. If the file doesn't exist (e.g., nonexistent row), `open` returns ENOENT.
 
 **Type handling**: All column values are cast to `::text` in SQL, avoiding Rust type-mapping issues with PostgreSQL types like NUMERIC, MONEY, or custom domains.
+
+**PK encoding**: Primary key values are percent-encoded in directory names so that characters like `/`, `,`, `=` don't break filesystem paths. Integer PKs appear as-is (no special characters to encode).
+
+**Statement timeout**: A configurable timeout (default 30s) prevents runaway queries from hanging the filesystem. Set via `--statement-timeout`.
 
 ## Development
 
@@ -236,10 +290,10 @@ docker compose up -d
 # Build inside the container
 docker compose exec dev cargo build
 
-# Run Rust unit/integration tests (22 tests)
+# Run Rust unit/integration tests (35 tests)
 docker compose exec dev cargo test -p pgmount-core
 
-# Run FUSE mount integration tests (105 assertions)
+# Run FUSE mount integration tests (119 assertions)
 docker compose exec -e PGPASSWORD=pgmount dev bash tests/test_fuse_mount.sh
 
 # Run clippy

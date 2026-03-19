@@ -83,8 +83,31 @@ assert_is_file() {
     fi
 }
 
+# Issue #7: open() returns ENOENT for nonexistent rows
+assert_enoent() {
+    local path="$1"
+    local msg="$2"
+    if cat "$path" 2>/dev/null; then
+        fail "$msg (expected ENOENT but got content)"
+    else
+        pass "$msg"
+    fi
+}
+
 MNT="/mnt/pgtest"
 DB_CONN="host=postgres user=pgmount password=pgmount dbname=testdb"
+
+# Issue #11: reliable cleanup via trap
+cleanup() {
+    echo ""
+    echo "--- Cleanup ---"
+    fusermount -u "$MNT" 2>/dev/null || true
+    if [ -n "${MOUNT_PID:-}" ]; then
+        wait "$MOUNT_PID" 2>/dev/null || true
+    fi
+    echo "Unmounted"
+}
+trap cleanup EXIT
 
 echo "=== pgmount FUSE Integration Tests ==="
 echo ""
@@ -227,21 +250,32 @@ assert_contains "$TS_LS" "nullable_test" "test_schema lists 'nullable_test'"
 assert_contains "$TS_LS" "empty_table" "test_schema lists 'empty_table'"
 echo ""
 
-echo "--- 3. Table Directory (Rows + Special Dirs) ---"
+echo "--- 3. Table Directory (Pagination + Special Dirs) ---"
+# Table directories now contain page_N/ subdirectories instead of direct row dirs
 TABLE_LS=$(ls -a "$MNT/test_schema/products")
 assert_contains "$TABLE_LS" ".info" "Table has .info directory"
 assert_contains "$TABLE_LS" ".export" "Table has .export directory"
 assert_contains "$TABLE_LS" ".filter" "Table has .filter directory"
 assert_contains "$TABLE_LS" ".order" "Table has .order directory"
 assert_contains "$TABLE_LS" ".indexes" "Table has .indexes directory"
-assert_contains "$TABLE_LS" "1" "Table has row '1'"
-assert_contains "$TABLE_LS" "5" "Table has row '5'"
-assert_is_dir "$MNT/test_schema/products/1" "Row 1 is a directory"
+assert_contains "$TABLE_LS" "page_1" "Table has page_1 subdirectory"
+# Row directories are NOT directly under the table anymore
+assert_not_contains "$(ls "$MNT/test_schema/products")" "^1$" "Table does NOT list row '1' directly"
+assert_is_dir "$MNT/test_schema/products/page_1" "page_1 is a directory"
 assert_is_dir "$MNT/test_schema/products/.info" ".info is a directory"
 echo ""
 
+echo "--- 3b. Page Directory (Row Listing) ---"
+# Rows live inside page_N/ directories
+PAGE_LS=$(ls "$MNT/test_schema/products/page_1")
+assert_contains "$PAGE_LS" "1" "page_1 has row '1'"
+assert_contains "$PAGE_LS" "5" "page_1 has row '5'"
+assert_is_dir "$MNT/test_schema/products/page_1/1" "Row 1 inside page_1 is a directory"
+echo ""
+
 echo "--- 4. Row Directory (Columns + Format Files) ---"
-ROW_LS=$(ls "$MNT/test_schema/products/1")
+# Rows are now accessed via page_N/row_pk path
+ROW_LS=$(ls "$MNT/test_schema/products/page_1/1")
 assert_contains "$ROW_LS" "id" "Row has 'id' column"
 assert_contains "$ROW_LS" "name" "Row has 'name' column"
 assert_contains "$ROW_LS" "price" "Row has 'price' column"
@@ -251,41 +285,41 @@ assert_contains "$ROW_LS" "description" "Row has 'description' column"
 assert_contains "$ROW_LS" "row.json" "Row has 'row.json'"
 assert_contains "$ROW_LS" "row.csv" "Row has 'row.csv'"
 assert_contains "$ROW_LS" "row.yaml" "Row has 'row.yaml'"
-assert_is_file "$MNT/test_schema/products/1/name" "Column 'name' is a file"
-assert_is_file "$MNT/test_schema/products/1/row.json" "row.json is a file"
+assert_is_file "$MNT/test_schema/products/page_1/1/name" "Column 'name' is a file"
+assert_is_file "$MNT/test_schema/products/page_1/1/row.json" "row.json is a file"
 echo ""
 
 echo "--- 5. Column Value Reading ---"
-VAL_NAME=$(cat "$MNT/test_schema/products/1/name")
+VAL_NAME=$(cat "$MNT/test_schema/products/page_1/1/name")
 assert_eq "$VAL_NAME" "Widget A" "Column value: name = 'Widget A'"
 
-VAL_PRICE=$(cat "$MNT/test_schema/products/1/price")
+VAL_PRICE=$(cat "$MNT/test_schema/products/page_1/1/price")
 assert_eq "$VAL_PRICE" "9.99" "Column value: price = '9.99'"
 
-VAL_STOCK=$(cat "$MNT/test_schema/products/1/in_stock")
+VAL_STOCK=$(cat "$MNT/test_schema/products/page_1/1/in_stock")
 assert_eq "$VAL_STOCK" "true" "Column value: in_stock = 'true'"
 
-VAL_CAT=$(cat "$MNT/test_schema/products/1/category")
+VAL_CAT=$(cat "$MNT/test_schema/products/page_1/1/category")
 assert_eq "$VAL_CAT" "widgets" "Column value: category = 'widgets'"
 
 # Test different row
-VAL_NAME3=$(cat "$MNT/test_schema/products/3/name")
+VAL_NAME3=$(cat "$MNT/test_schema/products/page_1/3/name")
 assert_eq "$VAL_NAME3" "Gadget X" "Row 3 name = 'Gadget X'"
 
-VAL_STOCK3=$(cat "$MNT/test_schema/products/3/in_stock")
+VAL_STOCK3=$(cat "$MNT/test_schema/products/page_1/3/in_stock")
 assert_eq "$VAL_STOCK3" "false" "Row 3 in_stock = 'false'"
 
 # Test NULL value
-VAL_NULL=$(cat "$MNT/test_schema/nullable_test/2/optional_field")
+VAL_NULL=$(cat "$MNT/test_schema/nullable_test/page_1/2/optional_field")
 assert_eq "$VAL_NULL" "NULL" "NULL column reads as 'NULL'"
 
-VAL_NOTNULL=$(cat "$MNT/test_schema/nullable_test/1/optional_field")
+VAL_NOTNULL=$(cat "$MNT/test_schema/nullable_test/page_1/1/optional_field")
 assert_eq "$VAL_NOTNULL" "present" "Non-null optional field reads correctly"
 echo ""
 
 echo "--- 6. Row Format Files ---"
 # JSON
-ROW_JSON=$(cat "$MNT/test_schema/products/1/row.json")
+ROW_JSON=$(cat "$MNT/test_schema/products/page_1/1/row.json")
 assert_contains "$ROW_JSON" '"name"' "row.json contains column name"
 assert_contains "$ROW_JSON" '"Widget A"' "row.json contains value"
 # Verify it's valid JSON
@@ -296,12 +330,12 @@ else
 fi
 
 # CSV
-ROW_CSV=$(cat "$MNT/test_schema/products/1/row.csv")
+ROW_CSV=$(cat "$MNT/test_schema/products/page_1/1/row.csv")
 assert_contains "$ROW_CSV" "name" "row.csv contains header"
 assert_contains "$ROW_CSV" "Widget A" "row.csv contains value"
 
 # YAML
-ROW_YAML=$(cat "$MNT/test_schema/products/1/row.yaml")
+ROW_YAML=$(cat "$MNT/test_schema/products/page_1/1/row.yaml")
 assert_contains "$ROW_YAML" "name:" "row.yaml contains column"
 assert_contains "$ROW_YAML" "Widget A" "row.yaml contains value"
 echo ""
@@ -342,36 +376,49 @@ EMPTY_COUNT=$(cat "$MNT/test_schema/empty_table/.info/count")
 assert_eq "$EMPTY_COUNT" "0" "empty table count = 0"
 echo ""
 
-echo "--- 8. .export/ Directory ---"
+echo "--- 8. .export/ Directory (Paginated Exports) ---"
 EXPORT_LS=$(ls "$MNT/test_schema/products/.export")
 assert_contains "$EXPORT_LS" "data.json" ".export has data.json"
 assert_contains "$EXPORT_LS" "data.csv" ".export has data.csv"
 assert_contains "$EXPORT_LS" "data.yaml" ".export has data.yaml"
 
-# data.json
-EXPORT_JSON=$(cat "$MNT/test_schema/products/.export/data.json")
-if echo "$EXPORT_JSON" | python3 -m json.tool >/dev/null 2>&1; then
-    pass "export data.json is valid JSON"
-else
-    fail "export data.json is NOT valid JSON"
-fi
-assert_contains "$EXPORT_JSON" "Widget A" "export data.json contains Widget A"
-assert_contains "$EXPORT_JSON" "Gadget X" "export data.json contains Gadget X"
-assert_contains "$EXPORT_JSON" "Tool Z" "export data.json contains Tool Z"
+# data.json is now a DIRECTORY containing page_N.json files
+assert_is_dir "$MNT/test_schema/products/.export/data.json" "data.json is a directory (paginated)"
+EXPORT_JSON_LS=$(ls "$MNT/test_schema/products/.export/data.json")
+assert_contains "$EXPORT_JSON_LS" "page_1.json" "data.json/ has page_1.json"
 
-# data.csv
-EXPORT_CSV=$(cat "$MNT/test_schema/products/.export/data.csv")
+# Read paginated export
+EXPORT_JSON=$(cat "$MNT/test_schema/products/.export/data.json/page_1.json")
+if echo "$EXPORT_JSON" | python3 -m json.tool >/dev/null 2>&1; then
+    pass "export data.json/page_1.json is valid JSON"
+else
+    fail "export data.json/page_1.json is NOT valid JSON"
+fi
+assert_contains "$EXPORT_JSON" "Widget A" "export data.json/page_1.json contains Widget A"
+assert_contains "$EXPORT_JSON" "Gadget X" "export data.json/page_1.json contains Gadget X"
+assert_contains "$EXPORT_JSON" "Tool Z" "export data.json/page_1.json contains Tool Z"
+
+# data.csv is now a DIRECTORY containing page_N.csv files
+assert_is_dir "$MNT/test_schema/products/.export/data.csv" "data.csv is a directory (paginated)"
+EXPORT_CSV_LS=$(ls "$MNT/test_schema/products/.export/data.csv")
+assert_contains "$EXPORT_CSV_LS" "page_1.csv" "data.csv/ has page_1.csv"
+
+EXPORT_CSV=$(cat "$MNT/test_schema/products/.export/data.csv/page_1.csv")
 CSV_LINES=$(echo "$EXPORT_CSV" | wc -l)
 # Should have header + 5 rows = 6 lines
 if [ "$CSV_LINES" -ge 6 ]; then
-    pass "export data.csv has >= 6 lines (header + 5 rows)"
+    pass "export data.csv/page_1.csv has >= 6 lines (header + 5 rows)"
 else
-    fail "export data.csv has $CSV_LINES lines, expected >= 6"
+    fail "export data.csv/page_1.csv has $CSV_LINES lines, expected >= 6"
 fi
 
-# data.yaml
-EXPORT_YAML=$(cat "$MNT/test_schema/products/.export/data.yaml")
-assert_contains "$EXPORT_YAML" "Widget A" "export data.yaml contains Widget A"
+# data.yaml is now a DIRECTORY containing page_N.yaml files
+assert_is_dir "$MNT/test_schema/products/.export/data.yaml" "data.yaml is a directory (paginated)"
+EXPORT_YAML_LS=$(ls "$MNT/test_schema/products/.export/data.yaml")
+assert_contains "$EXPORT_YAML_LS" "page_1.yaml" "data.yaml/ has page_1.yaml"
+
+EXPORT_YAML=$(cat "$MNT/test_schema/products/.export/data.yaml/page_1.yaml")
+assert_contains "$EXPORT_YAML" "Widget A" "export data.yaml/page_1.yaml contains Widget A"
 echo ""
 
 echo "--- 9. .indexes/ Directory ---"
@@ -396,6 +443,7 @@ assert_contains "$FILTER_LS" "name" ".filter lists 'name' column"
 assert_contains "$FILTER_LS" "in_stock" ".filter lists 'in_stock' column"
 
 # Navigate into filter: .filter/category/widgets/
+# Filter/order results show rows directly (no pagination)
 assert_is_dir "$MNT/test_schema/products/.filter/category" ".filter/category is a directory"
 
 FILTERED=$(ls "$MNT/test_schema/products/.filter/category/widgets")
@@ -426,6 +474,7 @@ assert_contains "$ORDER_NAME" "asc" ".order/name has 'asc'"
 assert_contains "$ORDER_NAME" "desc" ".order/name has 'desc'"
 
 # Verify ordered rows exist — all 5 should appear
+# Filter/order results show rows directly (no pagination)
 ORDERED_ASC=$(ls "$MNT/test_schema/products/.order/name/asc")
 ORDERED_ASC_COUNT=$(echo "$ORDERED_ASC" | wc -l)
 if [ "$ORDERED_ASC_COUNT" -eq 5 ]; then
@@ -448,44 +497,46 @@ else
 fi
 echo ""
 
-echo "--- 12. Composite Primary Key ---"
-COMP_LS=$(ls "$MNT/test_schema/order_items")
+echo "--- 12. Composite Primary Key (Percent-Encoded) ---"
+# Composite PKs use percent-encoding; for integer keys no special chars to encode
+# so the format stays order_id=1,item_id=1
+COMP_LS=$(ls "$MNT/test_schema/order_items/page_1")
 assert_contains "$COMP_LS" "order_id=1,item_id=1" "Composite PK: order_id=1,item_id=1"
 assert_contains "$COMP_LS" "order_id=1,item_id=2" "Composite PK: order_id=1,item_id=2"
 assert_contains "$COMP_LS" "order_id=2,item_id=1" "Composite PK: order_id=2,item_id=1"
 
-# Read composite PK row
-COMP_QTY=$(cat "$MNT/test_schema/order_items/order_id=1,item_id=1/quantity")
+# Read composite PK row (via page_1)
+COMP_QTY=$(cat "$MNT/test_schema/order_items/page_1/order_id=1,item_id=1/quantity")
 assert_eq "$COMP_QTY" "2" "Composite PK row: quantity = 2"
 
-COMP_PRICE=$(cat "$MNT/test_schema/order_items/order_id=2,item_id=3/unit_price")
+COMP_PRICE=$(cat "$MNT/test_schema/order_items/page_1/order_id=2,item_id=3/unit_price")
 assert_eq "$COMP_PRICE" "49.99" "Composite PK row: unit_price = 49.99"
 echo ""
 
 echo "--- 13. Empty Table ---"
 EMPTY_LS=$(ls -a "$MNT/test_schema/empty_table")
-# Should only have special dirs, no rows
+# Should have special dirs but no page dirs (no rows)
 assert_contains "$EMPTY_LS" ".info" "Empty table has .info"
-# ls output for empty table should be just special dirs (no non-dot entries)
-EMPTY_ROW_COUNT=$(ls "$MNT/test_schema/empty_table" 2>/dev/null | wc -l)
-assert_eq "$EMPTY_ROW_COUNT" "0" "Empty table has 0 rows"
+# ls output for empty table should be just special dirs (no page_N entries)
+EMPTY_PAGE_COUNT=$(ls "$MNT/test_schema/empty_table" 2>/dev/null | grep -c '^page_' || true)
+assert_eq "$EMPTY_PAGE_COUNT" "0" "Empty table has 0 page directories"
 echo ""
 
 echo "--- 14. Multiple Schema Browsing ---"
-# Verify we can browse across schemas
-PUB_USER_NAME=$(cat "$MNT/public/users/1/name")
+# Verify we can browse across schemas (via page_1 for row access)
+PUB_USER_NAME=$(cat "$MNT/public/users/page_1/1/name")
 assert_eq "$PUB_USER_NAME" "Alice" "public.users row 1 name = 'Alice'"
 
-TS_PROD_NAME=$(cat "$MNT/test_schema/products/1/name")
+TS_PROD_NAME=$(cat "$MNT/test_schema/products/page_1/1/name")
 assert_eq "$TS_PROD_NAME" "Widget A" "test_schema.products row 1 name = 'Widget A'"
 echo ""
 
 echo "--- 15. NULL Description Column ---"
 # Tool Z (row 5) has NULL description
-NULL_DESC=$(cat "$MNT/test_schema/products/5/description")
+NULL_DESC=$(cat "$MNT/test_schema/products/page_1/5/description")
 assert_eq "$NULL_DESC" "NULL" "Row 5 NULL description reads as 'NULL'"
 
-NOTNULL_DESC=$(cat "$MNT/test_schema/products/1/description")
+NOTNULL_DESC=$(cat "$MNT/test_schema/products/page_1/1/description")
 assert_eq "$NOTNULL_DESC" "A basic widget" "Row 1 description = 'A basic widget'"
 echo ""
 
@@ -493,20 +544,30 @@ echo "--- 16. Table with Spaces in Names ---"
 # This tests quote_ident handling
 if ls "$MNT/test_schema/table with spaces" >/dev/null 2>&1; then
     pass "Can access table with spaces in name"
-    SPACE_VAL=$(cat "$MNT/test_schema/table with spaces/1/column with spaces" 2>/dev/null || echo "ERROR")
+    SPACE_VAL=$(cat "$MNT/test_schema/table with spaces/page_1/1/column with spaces" 2>/dev/null || echo "ERROR")
     assert_eq "$SPACE_VAL" "hello world" "Read column with spaces = 'hello world'"
 else
     fail "Cannot access table with spaces in name"
 fi
 echo ""
 
-# ---- Cleanup ----
-echo "--- Cleanup ---"
-fusermount -u "$MNT" 2>/dev/null || true
-wait $MOUNT_PID 2>/dev/null || true
-echo "Unmounted"
+echo "--- 17. Nonexistent Row Returns ENOENT (Issue #7) ---"
+# open() now returns ENOENT for nonexistent rows, not empty content
+assert_enoent "$MNT/test_schema/products/page_1/9999/name" "Nonexistent row 9999 returns ENOENT"
+assert_enoent "$MNT/test_schema/products/page_1/0/name" "Nonexistent row 0 returns ENOENT"
+echo ""
+
+echo "--- 18. Percent-Encoding of PK Values ---"
+# For integer PKs, no special chars to encode — directory names are plain numbers
+# Verify normal integer PKs still work through page directories
+assert_is_dir "$MNT/test_schema/products/page_1/1" "Integer PK '1' accessible in page_1"
+assert_is_dir "$MNT/test_schema/products/page_1/5" "Integer PK '5' accessible in page_1"
+# Composite integer PKs also have no special chars to encode
+assert_is_dir "$MNT/test_schema/order_items/page_1/order_id=1,item_id=1" "Composite integer PK accessible in page_1"
+echo ""
 
 # ---- Summary ----
+# (Cleanup happens via the EXIT trap handler — Issue #11)
 echo ""
 echo "========================================="
 echo "  RESULTS: $PASS passed, $FAIL failed"
