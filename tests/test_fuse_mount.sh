@@ -94,8 +94,9 @@ assert_enoent() {
     fi
 }
 
-MNT="/mnt/pgtest"
-DB_CONN="host=postgres user=pgmount password=pgmount dbname=testdb"
+MNT="${PGMOUNT_TEST_MNT:-/mnt/pgtest}"
+DB_CONN="${DB_CONN:-host=postgres user=pgmount password=pgmount dbname=testdb}"
+DB_HOST="${DB_HOST:-$(echo "$DB_CONN" | grep -oP 'host=\K\S+')}"
 
 # Issue #11: reliable cleanup via trap
 cleanup() {
@@ -117,7 +118,7 @@ echo "--- Setup ---"
 
 # Create test schema and tables
 export PGPASSWORD=pgmount
-psql -h postgres -U pgmount -d testdb -q <<'SQL'
+psql -h "$DB_HOST" -U pgmount -d testdb -q <<'SQL'
 -- Clean slate
 DROP SCHEMA IF EXISTS test_schema CASCADE;
 CREATE SCHEMA test_schema;
