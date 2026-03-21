@@ -28,9 +28,9 @@ services:
         condition: service_healthy
     environment:
       DATABASE_URL: "host=postgres user=openeral password=openeral dbname=openeral"
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       # WORKSPACE_ID: my-agent
       # WORKSPACE_CONFIG: '{"auto_dirs":[".claude",".claude/memory"]}'
-      # ANTHROPIC_API_KEY: sk-ant-...
     stdin_open: true
     tty: true
 
