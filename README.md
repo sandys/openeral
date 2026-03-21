@@ -33,6 +33,18 @@ openeral also provides **writable workspaces** — a read-write FUSE filesystem 
 
 ## Installation
 
+### Quick start with openeral-shell (no Rust needed)
+
+```bash
+cd openeral-shell
+docker compose up -d
+docker compose exec openeral-shell bash    # persistent shell with /db and $HOME
+```
+
+Everything is pre-built inside Docker. See [openeral-shell/README.md](openeral-shell/README.md) for details.
+
+### Build from source
+
 **Requirements:** Rust 1.85+, FUSE 3 (`libfuse3-dev`), PostgreSQL client libraries (`libpq-dev`)
 
 ```bash

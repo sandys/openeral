@@ -1,5 +1,7 @@
 # CLAUDE.md
 
+For **using** openeral without developing it, see `openeral-shell/`.
+
 ## Build & Test
 
 **ALL builds, tests, and linting MUST run inside the Docker dev container.** Never install Rust or build on the host.
