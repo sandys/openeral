@@ -1,6 +1,6 @@
 # pgmount OpenShell Sandbox
 
-An OpenShell sandbox that mounts a PostgreSQL database as a read-only filesystem at `/db`, allowing AI agents to explore relational data using standard file tools.
+An OpenShell sandbox that mounts a PostgreSQL database as a read-only filesystem at `/db`, allowing AI agents to explore relational data using standard file tools. Optionally mounts a writable workspace at `/home/agent` for persistent agent state (e.g., `~/.claude/`).
 
 ## Quick Start
 
@@ -25,6 +25,10 @@ openshell sandbox create --from pgmount \
 | `PGMOUNT_CACHE_TTL` | 30 | Metadata cache TTL in seconds |
 | `PGMOUNT_STATEMENT_TIMEOUT` | 30 | SQL query timeout in seconds |
 | `PGMOUNT_TIMEOUT` | 15 | Seconds to wait for mount readiness at startup |
+| `PGMOUNT_WORKSPACE_ID` | *(optional)* | Workspace ID — enables workspace mount at `/home/agent` |
+| `PGMOUNT_WORKSPACE_MOUNT` | `/home/agent` | Where to mount the workspace |
+| `PGMOUNT_WORKSPACE_NAME` | *(workspace ID)* | Display name for the workspace |
+| `PGMOUNT_WORKSPACE_CONFIG` | `{}` | JSON config for auto_dirs/seed_files |
 
 ## Credential Handling
 
@@ -52,10 +56,28 @@ GRANT ALL ON ALL TABLES IN SCHEMA _pgmount TO agent_readonly;
 ALTER DEFAULT PRIVILEGES IN SCHEMA _pgmount GRANT ALL ON TABLES TO agent_readonly;
 ```
 
+## Workspace (Persistent Agent State)
+
+When `PGMOUNT_WORKSPACE_ID` is set, the entrypoint creates and mounts a read-write workspace filesystem at `/home/agent` (configurable via `PGMOUNT_WORKSPACE_MOUNT`). The agent's `HOME` is set to this path, so Claude Code's `~/.claude/` directory persists in PostgreSQL across container restarts.
+
+```bash
+# Create a sandbox with persistent workspace
+openshell sandbox create --from pgmount \
+  -e PGMOUNT_DATABASE_URL="postgres://user:pass@db/myapp" \
+  -e PGMOUNT_WORKSPACE_ID="agent-42" \
+  -e PGMOUNT_WORKSPACE_CONFIG='{"auto_dirs":[".claude",".claude/memory",".claude/sessions"]}' \
+  -- pgmount-start.sh openclaw-start
+```
+
+The workspace config supports:
+- `auto_dirs`: directories to auto-create on first mount
+- `seed_files`: files to pre-populate (path → content mapping)
+
 ## Security Model
 
-- **Read-only FUSE mount**: The filesystem is mounted with `MountOption::RO`. No data mutation is possible through the mount.
-- **Landlock policy**: Filesystem access is restricted via `policy.yaml`. The agent can read `/db` but not write to it.
+- **Read-only FUSE mount**: The database filesystem at `/db` is mounted with `MountOption::RO`. No data mutation is possible through this mount.
+- **Read-write workspace**: The workspace mount at `/home/agent` is read-write, but only stores agent state — it cannot access database tables.
+- **Landlock policy**: Filesystem access is restricted via `policy.yaml`. The agent can read `/db` and read/write `/home/agent`.
 - **FUSE requirements**: The container needs `SYS_ADMIN` capability and `/dev/fuse` device access. These are declared in `policy.yaml`.
 - **Network**: PostgreSQL runs externally. The operator must configure network access (firewall rules, Docker networking) to allow the sandbox to reach the database host.
 

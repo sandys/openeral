@@ -55,7 +55,8 @@ id,name,email,age,active
 - **Statement timeout** — configurable per-query timeout prevents hung filesystems (default 30s)
 - **Multiple schemas** — all non-system schemas mounted, or filter with `--schemas`
 - **Automatic migrations** — creates `_pgmount` internal schema on first mount for audit logging and cache hints (via refinery)
-- **OpenShell sandbox** — pre-built sandbox image for running AI agents with database access at `/db`
+- **Writable workspaces** — mount a read-write FUSE filesystem backed by PostgreSQL for persistent agent state (e.g., `~/.claude/`), with runtime-configurable directory layouts and seed files
+- **OpenShell sandbox** — pre-built sandbox image for running AI agents with database access at `/db` and optional persistent workspace at `/home/agent`
 
 ## Filesystem Layout
 
@@ -151,6 +152,38 @@ Options:
   -f, --foreground                      Run in foreground
 ```
 
+### Workspaces (read-write persistent agent state)
+
+Workspaces store files in PostgreSQL, mounted as a read-write FUSE filesystem. Designed for AI agents that need persistent `~/.claude/` state across container restarts.
+
+```bash
+# Create a workspace with auto-created directories
+pgmount workspace create agent-1 \
+  --display-name "My Agent" \
+  --config '{"auto_dirs":[".claude",".claude/memory",".claude/sessions"]}'
+
+# Mount it
+pgmount workspace mount agent-1 /home/agent
+
+# Use it — files are stored in PostgreSQL
+echo "hello" > /home/agent/.claude/test.txt
+cat /home/agent/.claude/test.txt  # → hello
+
+# Unmount and remount — data persists
+fusermount -u /home/agent
+pgmount workspace mount agent-1 /home/agent
+cat /home/agent/.claude/test.txt  # → hello
+
+# Seed from a local directory
+pgmount workspace seed agent-1 --from /path/to/local/dir
+
+# List all workspaces
+pgmount workspace list
+
+# Delete a workspace and all its files
+pgmount workspace delete agent-1
+```
+
 ### Unmount
 
 ```bash
@@ -241,9 +274,11 @@ cat /mnt/db/public/users/.indexes/users_pkey
 On first mount, pgmount automatically creates an internal `_pgmount` schema in the target database with tables for audit logging and cache hints. Migrations are managed by [refinery](https://github.com/rust-db/refinery) and run before the FUSE mount is created.
 
 ```
-_pgmount.schema_version   — migration tracking
-_pgmount.mount_log        — audit log of mount sessions (mount point, schemas, page size, version)
-_pgmount.cache_hints      — persistent cache hints (per schema/table)
+_pgmount.schema_version      — migration tracking
+_pgmount.mount_log           — audit log of mount sessions (mount point, schemas, page size, version)
+_pgmount.cache_hints         — persistent cache hints (per schema/table)
+_pgmount.workspace_config    — workspace definitions (id, display name, JSONB config)
+_pgmount.workspace_files     — workspace file storage (path, content, metadata)
 ```
 
 Each mount session is recorded in `mount_log`. To skip migrations (e.g., when the database user lacks CREATE privileges), use `--skip-migrations`.
@@ -275,15 +310,17 @@ pgmount/
   crates/
     pgmount/          # CLI binary
     pgmount-core/     # Library
-      migrations/      # Refinery SQL migrations (V1, V2, V3)
+      migrations/      # Refinery SQL migrations (V1–V4)
       src/
-        cli/           # Clap command definitions
+        cli/           # Clap command definitions (mount, workspace, etc.)
         config/        # Connection string resolution, YAML config
         db/            # Connection pool, SQL queries, and migrations
-          queries/     # Introspection, row access, indexes, stats
-        fs/            # FUSE filesystem implementation
-          nodes/       # Node types: root, schema, table, page, row, column,
-                       #   info, export, indexes, filter, order
+          queries/     # Introspection, row access, indexes, stats, workspace
+        fs/            # FUSE filesystem implementations
+          nodes/       # Read-only node types: root, schema, table, page, row,
+                       #   column, info, export, indexes, filter, order
+          workspace.rs # Read-write WorkspaceFilesystem (FUSE impl)
+          workspace_inode.rs  # Path-based inode table
         format/        # JSON, CSV, YAML serializers
         mount/         # Mount registry
   sandboxes/
@@ -311,6 +348,8 @@ pgmount/
 **Inode allocation**: Lazy and deterministic within a mount session. A `NodeIdentity` enum describes every virtual node type. A `DashMap` ensures the same identity always maps to the same inode number.
 
 **File content**: `getattr` reports an estimated size (4096). On `open`, the full content is generated and cached in a file-handle map. `read` slices from this cache. If the file doesn't exist (e.g., nonexistent row), `open` returns ENOENT.
+
+**Workspace write-back buffering**: `WorkspaceFilesystem` loads file content into memory on `open()`, mutates the buffer on `write()`, and flushes back to PostgreSQL in a single `INSERT ... ON CONFLICT UPDATE` on `flush()`/`release()`. This avoids per-`write()` DB round-trips (the kernel sends many 4KB chunks).
 
 **Type handling**: All column values are cast to `::text` in SQL, avoiding Rust type-mapping issues with PostgreSQL types like NUMERIC, MONEY, or custom domains.
 
