@@ -123,7 +123,7 @@ echo "--- Setup ---"
 
 # Create test schema and tables
 export PGPASSWORD=pgmount
-psql -h "$DB_HOST" -U openeral -d testdb -q <<'SQL'
+psql -h "$DB_HOST" -U pgmount -d testdb -q <<'SQL'
 -- Clean slate
 DROP SCHEMA IF EXISTS test_schema CASCADE;
 CREATE SCHEMA test_schema;
