@@ -191,10 +191,8 @@ async fn execute_mount(args: MountWorkspaceArgs) -> Result<(), FsError> {
     fuse_config.mount_options = vec![
         fuser::MountOption::FSName("pgmount-workspace".to_string()),
         fuser::MountOption::Subtype("pgmount".to_string()),
-        fuser::MountOption::DefaultPermissions,
-        fuser::MountOption::CUSTOM("allow_other".to_string()),
     ];
-    fuse_config.acl = fuser::SessionACL::All;
+    fuse_config.acl = fuser::SessionACL::Owner;
 
     let handle = tokio::task::spawn_blocking(move || {
         fuser::mount2(fs, &mount_point, &fuse_config).map_err(FsError::IoError)
