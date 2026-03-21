@@ -27,13 +27,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Node.js 22 (Claude Code requires modern Node)
-RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
-    && apt-get install -y nodejs \
-    && rm -rf /var/lib/apt/lists/*
-
-# Install Claude Code CLI globally
-RUN npm install -g @anthropic-ai/claude-code
+# Install Claude Code (native installer — no Node.js needed)
+RUN curl -fsSL https://claude.ai/install.sh | bash
+ENV PATH="${PATH}:/root/.local/bin"
 
 # Copy openeral binary
 COPY --from=builder /build/target/release/openeral /usr/local/bin/openeral
