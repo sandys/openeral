@@ -1,6 +1,8 @@
-# pgmount
+# OpenEral
 
-Mount PostgreSQL databases as virtual filesystems. Browse schemas, tables, rows, and columns as directories and files using standard shell commands.
+*Eral (ஏரல்) — Tamil for the lobster family. Like lobsters carry their homes on their backs, OpenEral gives AI agents a persistent home they carry across containers.*
+
+Mount PostgreSQL databases as virtual filesystems. Browse schemas, tables, rows, and columns as directories and files using standard shell commands. Give AI agents a persistent `~/.claude/` directory backed by PostgreSQL that survives container restarts.
 
 ```
 $ pgmount mount -c "host=localhost dbname=myapp" /mnt/db

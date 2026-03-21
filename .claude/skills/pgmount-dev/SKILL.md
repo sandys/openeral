@@ -7,9 +7,9 @@ allowed-tools: Read, Grep, Glob, Bash
 argument-hint: [task description]
 ---
 
-# pgmount Development
+# OpenEral Development
 
-pgmount is a Rust project that mounts PostgreSQL databases as FUSE virtual filesystems. It has two filesystem implementations:
+OpenEral (pgmount) is a Rust project that mounts PostgreSQL databases as FUSE virtual filesystems. It has two filesystem implementations:
 
 1. **PgmountFilesystem** (read-only) — browse schemas, tables, rows, and columns as directories and files
 2. **WorkspaceFilesystem** (read-write) — persistent agent state stored in PostgreSQL, designed for Claude Code's `~/.claude/` directory

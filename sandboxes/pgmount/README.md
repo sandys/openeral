@@ -1,4 +1,4 @@
-# pgmount OpenShell Sandbox
+# OpenEral Sandbox
 
 A container image for running AI agents with PostgreSQL database access at `/db` (read-only) and an optional persistent workspace at `/home/agent` (read-write, backed by PostgreSQL).
 

@@ -3,7 +3,7 @@ name: pgmount-navigate
 description: Navigate a PostgreSQL database mounted at /db and manage persistent workspace state
 ---
 
-# pgmount — Database at /db, Workspace at $HOME
+# OpenEral — Database at /db, Workspace at $HOME
 
 You have two mounted filesystems:
 
