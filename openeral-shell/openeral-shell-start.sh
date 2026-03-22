@@ -6,16 +6,14 @@ set -euo pipefail
 # Designed for OpenShell sandboxes.
 #
 # Usage:
-#   openshell sandbox create --from . \
-#     --upload .env:/sandbox/.env \
-#     --policy openeral-shell/policy.yaml
+#   openshell sandbox create --from . --upload .env
 #
 # Sets up:
 #   /db         — read-only PostgreSQL database browsable as files
 #   /home/agent — read-write persistent home directory (backed by PostgreSQL)
 # =============================================================================
 
-# --- Source .env file if uploaded via --upload .env:/sandbox/.env ---
+# --- Source .env file if uploaded via --upload .env ---
 
 if [ -f /sandbox/.env ]; then
     set -a
@@ -36,9 +34,7 @@ if [ -z "$DB_URL" ]; then
     echo "ERROR: DATABASE_URL is not set." >&2
     echo "" >&2
     echo "From repo root:" >&2
-    echo "  openshell sandbox create --from . \\" >&2
-    echo "    --upload .env:/sandbox/.env \\" >&2
-    echo "    --policy openeral-shell/policy.yaml" >&2
+    echo "  openshell sandbox create --from . --upload .env" >&2
     exit 1
 fi
 

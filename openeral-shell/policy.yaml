@@ -1,23 +1,39 @@
-version: "1.0"
-name: openeral-shell
-description: Persistent shell with PostgreSQL database at /db and writable workspace at /home/agent
+version: 1
 
-extends: base
-
-filesystem:
+filesystem_policy:
+  include_workdir: true
   read_only:
+    - /usr
+    - /lib
+    - /proc
+    - /dev/urandom
+    - /dev/fuse
+    - /app
+    - /etc
+    - /var/log
     - /db
-    - /usr/local/bin/openeral
-    - /etc/fuse.conf
   read_write:
     - /sandbox
     - /tmp
+    - /dev/null
     - /home/agent
 
-capabilities:
-  required:
-    - SYS_ADMIN
+landlock:
+  compatibility: best_effort
 
-devices:
-  required:
-    - /dev/fuse
+process:
+  run_as_user: sandbox
+  run_as_group: sandbox
+
+network_policies:
+  claude_code:
+    name: claude-code
+    endpoints:
+      - { host: api.anthropic.com, port: 443, protocol: rest, enforcement: enforce, access: full, tls: terminate }
+      - { host: statsig.anthropic.com, port: 443 }
+      - { host: sentry.io, port: 443 }
+      - { host: raw.githubusercontent.com, port: 443 }
+      - { host: platform.claude.com, port: 443 }
+    binaries:
+      - { path: /usr/local/bin/claude }
+      - { path: /usr/bin/node }

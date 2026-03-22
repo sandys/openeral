@@ -16,9 +16,7 @@ ANTHROPIC_API_KEY=sk-ant-...
 EOF
 
 # 2. Create the sandbox
-openshell sandbox create --from . \
-  --upload .env:/sandbox/.env \
-  --policy openeral-shell/policy.yaml
+openshell sandbox create --from . --upload .env
 
 # 3. Connect
 openshell sandbox connect <sandbox-name> -- claude
@@ -79,7 +77,7 @@ cat /db/public/users/.export/data.csv/page_1.csv # bulk export
 
 ## Environment Variables
 
-Set in `.env` and uploaded via `--upload .env:/sandbox/.env`:
+Set in `.env` and uploaded via `--upload .env`:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
