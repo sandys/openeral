@@ -1,6 +1,6 @@
 ---
 name: openeral-shell
-description: Navigate a PostgreSQL database at /db and manage persistent workspace at /home/agent
+description: Navigate a PostgreSQL database mounted at /db (fuse.openeral) and manage persistent workspace at /home/agent
 ---
 
 # Environment

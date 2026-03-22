@@ -6,7 +6,9 @@ An OpenShell sandbox that mounts a PostgreSQL database as a browsable filesystem
 
 openeral-shell starts two FUSE mounts inside the container. `/db/` exposes your PostgreSQL database as a read-only hierarchy of schemas, tables, rows, and columns — navigable with `ls` and `cat`, no SQL required. `/home/agent/` is a read-write workspace where every file persists in PostgreSQL across container restarts.
 
-## Quick Start
+openeral is a standard Linux FUSE filesystem (`fuse.openeral`). Mounts can be declared in `/etc/fstab` and managed by `mount.fuse3`, `systemd`, or any orchestrator that inspects fstab.
+
+## Quick Start (OpenShell)
 
 ```bash
 # 1. Create .env (from repo root)
@@ -20,6 +22,28 @@ openshell sandbox create --from . --upload .env
 
 # 3. Connect
 openshell sandbox connect <sandbox-name> -- claude
+```
+
+## Quick Start (Standard Linux)
+
+openeral works on any Linux system with FUSE support:
+
+```bash
+# Direct mount
+openeral mount /db
+
+# Or via standard mount command (fuse.openeral type)
+mount -t fuse.openeral "host=pg.example.com dbname=mydb" /db -o ro,allow_other
+
+# Or declare in /etc/fstab
+echo '"host=pg.example.com dbname=mydb"  /db  fuse.openeral  ro,noauto,allow_other  0  0' >> /etc/fstab
+mount /db
+```
+
+Workspace mounts use the `#workspace#<id>` separator in the source:
+
+```bash
+mount -t fuse.openeral "host=pg dbname=mydb#workspace#default" /home/agent -o rw,allow_other
 ```
 
 ## What's Inside
@@ -75,6 +99,25 @@ cat /db/public/orders/.order/created_at/desc/page_1/1001/row.json
 cat /db/public/users/.export/data.csv/page_1.csv # bulk export
 ```
 
+## Mounting
+
+openeral registers as filesystem type `fuse.openeral`. Three ways to mount:
+
+| Method | Command |
+|--------|---------|
+| Direct CLI | `openeral mount /db` |
+| mount command | `mount -t fuse.openeral "<connstr>" /db -o ro` |
+| /etc/fstab | `"<connstr>" /db fuse.openeral ro,noauto 0 0` |
+
+The fstab source field encodes the connection string. For workspace mounts, append `#workspace#<id>`:
+
+```
+"host=pg dbname=mydb"                    /db          fuse.openeral  ro,noauto,allow_other  0  0
+"host=pg dbname=mydb#workspace#default"  /home/agent  fuse.openeral  rw,noauto,allow_other  0  0
+```
+
+With `mount.fuse3 --drop_privileges`, the FUSE daemon runs fully unprivileged — no capabilities, no setuid. This is the mechanism for safe FUSE mounts in sandboxed environments.
+
 ## Environment Variables
 
 Set in `.env` and uploaded via `--upload .env`:
@@ -100,4 +143,4 @@ WORKSPACE_ID=agent-alice
 - **Landlock policy** — `/db/` read-only, `/home/agent/` read-write, system directories locked
 - **FUSE isolation** — database and workspace are independent mounts
 - **Non-root execution** — runs as `sandbox` user (UID 1000)
-- **SYS_ADMIN scoped** — capability used only for FUSE mount operations
+- **drop_privileges** — `mount.fuse3` can mount openeral filesystems with zero capabilities passed to the daemon
