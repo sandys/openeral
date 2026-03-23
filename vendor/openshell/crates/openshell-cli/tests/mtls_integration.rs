@@ -108,21 +108,12 @@ impl OpenShell for TestOpenShell {
         ))
     }
 
-    async fn get_sandbox_config(
+    async fn get_sandbox_policy(
         &self,
-        _request: tonic::Request<openshell_core::proto::GetSandboxConfigRequest>,
-    ) -> Result<Response<openshell_core::proto::GetSandboxConfigResponse>, Status> {
+        _request: tonic::Request<openshell_core::proto::GetSandboxPolicyRequest>,
+    ) -> Result<Response<openshell_core::proto::GetSandboxPolicyResponse>, Status> {
         Ok(Response::new(
-            openshell_core::proto::GetSandboxConfigResponse::default(),
-        ))
-    }
-
-    async fn get_gateway_config(
-        &self,
-        _request: tonic::Request<openshell_core::proto::GetGatewayConfigRequest>,
-    ) -> Result<Response<openshell_core::proto::GetGatewayConfigResponse>, Status> {
-        Ok(Response::new(
-            openshell_core::proto::GetGatewayConfigResponse::default(),
+            openshell_core::proto::GetSandboxPolicyResponse::default(),
         ))
     }
 
@@ -221,10 +212,10 @@ impl OpenShell for TestOpenShell {
         )))
     }
 
-    async fn update_config(
+    async fn update_sandbox_policy(
         &self,
-        _request: tonic::Request<openshell_core::proto::UpdateConfigRequest>,
-    ) -> Result<Response<openshell_core::proto::UpdateConfigResponse>, Status> {
+        _request: tonic::Request<openshell_core::proto::UpdateSandboxPolicyRequest>,
+    ) -> Result<Response<openshell_core::proto::UpdateSandboxPolicyResponse>, Status> {
         Err(Status::unimplemented("not implemented in test"))
     }
 

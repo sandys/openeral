@@ -6,7 +6,7 @@ use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Cell, Padding, Paragraph, Row, Table};
 
-use crate::app::{App, Focus, MiddlePaneTab};
+use crate::app::{App, Focus};
 
 pub fn draw(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let chunks = Layout::default()
@@ -19,17 +19,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &App, area: Rect) {
         .split(area);
 
     draw_gateway_list(frame, app, chunks[0]);
-
-    let mid_focused = app.focus == Focus::Providers;
-    match app.middle_pane_tab {
-        MiddlePaneTab::Providers => {
-            super::providers::draw(frame, app, chunks[1], mid_focused);
-        }
-        MiddlePaneTab::GlobalSettings => {
-            super::global_settings::draw(frame, app, chunks[1], mid_focused);
-        }
-    }
-
+    super::providers::draw(frame, app, chunks[1], app.focus == Focus::Providers);
     super::sandboxes::draw(frame, app, chunks[2], app.focus == Focus::Sandboxes);
 }
 
@@ -41,7 +31,6 @@ fn draw_gateway_list(frame: &mut Frame<'_>, app: &App, area: Rect) {
         Cell::from(Span::styled("  NAME", t.muted)),
         Cell::from(Span::styled("TYPE", t.muted)),
         Cell::from(Span::styled("STATUS", t.muted)),
-        Cell::from(Span::styled("", t.muted)),
     ])
     .bottom_margin(1);
 
@@ -80,20 +69,10 @@ fn draw_gateway_list(frame: &mut Frame<'_>, app: &App, area: Rect) {
                 Cell::from(Span::styled("-", t.muted))
             };
 
-            let policy_cell = if is_active && app.global_policy_active {
-                Cell::from(Span::styled(
-                    format!("Global Policy Active (v{})", app.global_policy_version),
-                    t.status_warn,
-                ))
-            } else {
-                Cell::from(Span::raw(""))
-            };
-
             Row::new(vec![
                 name_cell,
                 Cell::from(Span::styled(type_label, t.muted)),
                 status_cell,
-                policy_cell,
             ])
         })
         .collect();
@@ -107,9 +86,8 @@ fn draw_gateway_list(frame: &mut Frame<'_>, app: &App, area: Rect) {
         .padding(Padding::horizontal(1));
 
     let widths = [
-        Constraint::Percentage(30),
-        Constraint::Percentage(10),
-        Constraint::Percentage(25),
+        Constraint::Percentage(45),
+        Constraint::Percentage(20),
         Constraint::Percentage(35),
     ];
 

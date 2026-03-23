@@ -14,6 +14,7 @@ OpenShell is built agent-first. The project ships with agent skills for everythi
 
 ## Quickstart
 
+
 ### Prerequisites
 
 - **Docker** — Docker Desktop (or a Docker daemon) must be running.
@@ -32,12 +33,10 @@ curl -LsSf https://raw.githubusercontent.com/NVIDIA/OpenShell/main/install.sh | 
 uv tool install -U openshell
 ```
 
-Both methods install the latest stable release by default. To install a specific version, set `OPENSHELL_VERSION` (binary) or pin the version with `uv tool install openshell==<version>`. A [`dev` release](https://github.com/NVIDIA/OpenShell/releases/tag/dev) is also available that tracks the latest commit on `main`.
-
 ### Create a sandbox
 
 ```bash
-openshell sandbox create -- claude  # or opencode, codex, copilot
+openshell sandbox create -- claude  # or opencode, codex, ollama
 ```
 
 A gateway is created automatically on first use. To deploy on a remote host instead, pass `--remote user@host` to the create command.
@@ -46,7 +45,7 @@ The sandbox container includes the following tools by default:
 
 | Category   | Tools                                                    |
 | ---------- | -------------------------------------------------------- |
-| Agent      | `claude`, `opencode`, `codex`, `copilot`                 |
+| Agent      | `claude`, `opencode`, `codex`                            |
 | Language   | `python` (3.13), `node` (22)                             |
 | Developer  | `gh`, `git`, `vim`, `nano`                               |
 | Networking | `ping`, `dig`, `nslookup`, `nc`, `traceroute`, `netstat` |
@@ -116,11 +115,9 @@ Policies are declarative YAML files. Static sections (filesystem, process) are l
 
 ## Providers
 
-Agents need credentials — API keys, tokens, service accounts. OpenShell manages these as **providers**: named credential bundles that are injected into sandboxes at creation. The CLI auto-discovers credentials for recognized agents (Claude, Codex, OpenCode, Copilot) from your shell environment, or you can create providers explicitly with `openshell provider create`. Credentials never leak into the sandbox filesystem; they are injected as environment variables at runtime.
+Agents need credentials — API keys, tokens, service accounts. OpenShell manages these as **providers**: named credential bundles that are injected into sandboxes at creation. The CLI auto-discovers credentials for recognized agents (Claude, Codex, OpenCode) from your shell environment, or you can create providers explicitly with `openshell provider create`. Credentials never leak into the sandbox filesystem; they are injected as environment variables at runtime.
 
-## GPU Support (Experimental)
-
-> **Experimental** — GPU passthrough works on supported hosts but is under active development. Expect rough edges and breaking changes.
+## GPU Support
 
 OpenShell can pass host GPUs into sandboxes for local inference, fine-tuning, or any GPU workload. Add `--gpu` when creating a sandbox:
 
@@ -139,9 +136,8 @@ The CLI auto-bootstraps a GPU-enabled gateway on first use. GPU intent is also i
 | [Claude Code](https://docs.anthropic.com/en/docs/claude-code) | [`base`](https://github.com/NVIDIA/OpenShell-Community/tree/main/sandboxes/base) | Works out of the box. Provider uses `ANTHROPIC_API_KEY`.                      |
 | [OpenCode](https://opencode.ai/)                              | [`base`](https://github.com/NVIDIA/OpenShell-Community/tree/main/sandboxes/base) | Works out of the box. Provider uses `OPENAI_API_KEY` or `OPENROUTER_API_KEY`. |
 | [Codex](https://developers.openai.com/codex)                  | [`base`](https://github.com/NVIDIA/OpenShell-Community/tree/main/sandboxes/base) | Works out of the box. Provider uses `OPENAI_API_KEY`.                         |
-| [GitHub Copilot CLI](https://docs.github.com/en/copilot/github-copilot-in-the-cli) | [`base`](https://github.com/NVIDIA/OpenShell-Community/tree/main/sandboxes/base) | Works out of the box. Provider uses `GITHUB_TOKEN` or `COPILOT_GITHUB_TOKEN`. |
 | [OpenClaw](https://openclaw.ai/)                              | [Community](https://github.com/NVIDIA/OpenShell-Community)                       | Launch with `openshell sandbox create --from openclaw`.                       |
-| [Ollama](https://ollama.com/)                                 | [Community](https://github.com/NVIDIA/OpenShell-Community)                       | Launch with `openshell sandbox create --from ollama`.                         |
+| [Ollama](https://ollama.com/)                              | [Community](https://github.com/NVIDIA/OpenShell-Community)                       | Launch with `openshell sandbox create --from ollama`.                       |
 
 ## Key Commands
 

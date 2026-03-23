@@ -112,9 +112,9 @@ sequenceDiagram
     GW-->>CLI: UpdateSandboxPolicyResponse(version=N, hash)
 
     loop Every 30s (configurable)
-        SB->>GW: GetSandboxSettings(sandbox_id)
+        SB->>GW: GetSandboxPolicy(sandbox_id)
         GW->>DB: get_latest_policy(sandbox_id)
-        GW-->>SB: GetSandboxSettingsResponse(policy, version=N, hash)
+        GW-->>SB: GetSandboxPolicyResponse(policy, version=N, hash)
     end
 
     Note over SB: Detects version > current_version
@@ -140,7 +140,7 @@ sequenceDiagram
 
 Each sandbox maintains an independent, monotonically increasing version counter for its policy revisions:
 
-- **Version 1** is the policy from the sandbox's `spec.policy` at creation time. It is backfilled lazily on the first `GetSandboxSettings` call if no explicit revision exists in the policy history table. See `crates/openshell-server/src/grpc.rs` -- `get_sandbox_settings()`.
+- **Version 1** is the policy from the sandbox's `spec.policy` at creation time. It is backfilled lazily on the first `GetSandboxPolicy` call if no explicit revision exists in the policy history table. See `crates/openshell-server/src/grpc.rs` -- `get_sandbox_policy()`.
 - Each `UpdateSandboxPolicy` call computes the next version as `latest_version + 1` and persists a new `PolicyRecord` with status `"pending"`.
 - When a new version is persisted, all older revisions still in `"pending"` status are marked `"superseded"` via `supersede_pending_policies()`. This handles rapid successive updates where the sandbox has not yet picked up an intermediate version.
 - The `Sandbox` protobuf object carries a `current_policy_version` field (see `proto/datamodel.proto`) that is updated when the sandbox reports a successful load.
@@ -182,7 +182,7 @@ In gRPC mode, the sandbox spawns a background task that periodically polls the g
 The poll loop:
 
 1. Connects a reusable gRPC client (`CachedOpenShellClient`) to avoid per-poll TLS handshake overhead.
-2. Fetches the current policy via `GetSandboxSettings`, which returns the latest version, its policy payload, and a SHA-256 hash.
+2. Fetches the current policy via `GetSandboxPolicy`, which returns the latest version, its policy payload, and a SHA-256 hash.
 3. Compares the returned version against the locally tracked `current_version`. If the server version is not greater, the loop sleeps and retries.
 4. On a new version, calls `OpaEngine::reload_from_proto()` which builds a complete new `regorus::Engine` through the same validated pipeline as the initial load (proto-to-JSON conversion, L7 validation, access preset expansion).
 5. If the new engine builds successfully, it atomically replaces the inner `Mutex<regorus::Engine>`. If it fails, the previous engine is untouched.
@@ -206,60 +206,33 @@ Failure scenarios that trigger LKG behavior include:
 
 ### CLI Commands
 
-The `openshell policy` subcommand group manages live policy updates:
+The `nav policy` subcommand group manages live policy updates:
 
 ```bash
 # Push a new policy to a running sandbox
-openshell policy set <sandbox-name> --policy updated-policy.yaml
+nav policy set <sandbox-name> --policy updated-policy.yaml
 
 # Push and wait for the sandbox to load it (with 60s timeout)
-openshell policy set <sandbox-name> --policy updated-policy.yaml --wait
+nav policy set <sandbox-name> --policy updated-policy.yaml --wait
 
 # Push and wait with a custom timeout
-openshell policy set <sandbox-name> --policy updated-policy.yaml --wait --timeout 120
-
-# Set a gateway-global policy (overrides all sandbox policies)
-openshell policy set --global --policy policy.yaml --yes
-
-# Delete the gateway-global policy (restores sandbox-level control)
-openshell policy delete --global --yes
+nav policy set <sandbox-name> --policy updated-policy.yaml --wait --timeout 120
 
 # View the current active policy and its status
-openshell policy get <sandbox-name>
+nav policy get <sandbox-name>
 
 # Inspect a specific revision
-openshell policy get <sandbox-name> --rev 3
+nav policy get <sandbox-name> --rev 3
 
 # Print the full policy as YAML (round-trips with --policy input format)
-openshell policy get <sandbox-name> --full
+nav policy get <sandbox-name> --full
 
 # Combine: inspect a specific revision's full policy
-openshell policy get <sandbox-name> --rev 2 --full
+nav policy get <sandbox-name> --rev 2 --full
 
 # List policy revision history
-openshell policy list <sandbox-name> --limit 20
+nav policy list <sandbox-name> --limit 20
 ```
-
-#### Global Policy
-
-The `--global` flag on `policy set`, `policy delete`, `policy list`, and `policy get` manages a gateway-wide policy override. When a global policy is set, all sandboxes receive it through `GetSandboxSettings` (with `policy_source: GLOBAL`) instead of their own per-sandbox policy. Global policies are versioned through the `sandbox_policies` table using the sentinel `sandbox_id = "__global__"` and delivered to sandboxes via the reserved `policy` key in the `gateway_settings` blob.
-
-| Command | Behavior |
-|---------|----------|
-| `policy set --global --policy FILE` | Creates a versioned revision (marked `loaded` immediately) and stores the policy in the global settings blob. Sandboxes pick it up on their next poll (~10s). Deduplicates against the latest `loaded` revision by hash. |
-| `policy delete --global` | Removes the `policy` key from global settings and supersedes all `__global__` revisions. Sandboxes revert to their per-sandbox policy on the next poll. |
-| `policy list --global [--limit N]` | Lists global policy revision history (version, hash, status, timestamps). |
-| `policy get --global [--rev N] [--full]` | Shows a specific global revision's metadata, or the latest. `--full` includes the full policy as YAML. |
-
-Both `set` and `delete` require interactive confirmation (or `--yes` to bypass). The `--wait` flag is rejected for global policy updates: `"--wait is not supported for global policies; global policies are effective immediately"`.
-
-When a global policy is active, sandbox-scoped policy mutations are blocked:
-- `policy set <sandbox>` returns `FailedPrecondition: "policy is managed globally"`
-- `rule approve`, `rule approve-all` return `FailedPrecondition: "cannot approve rules while a global policy is active"`
-- Revoking a previously approved draft chunk is blocked (it would modify the sandbox policy)
-- Rejecting pending chunks is allowed (does not modify the sandbox policy)
-
-See [Gateway Settings Channel](gateway-settings.md#global-policy-lifecycle) for the full state machine, storage model, and implementation details.
 
 #### `policy get` flags
 
@@ -1409,7 +1382,6 @@ An empty `sources`/`log_sources` list means no source filtering (all sources pas
 
 - [Sandbox Architecture](sandbox.md) -- Full sandbox lifecycle, enforcement mechanisms, and component interaction
 - [Gateway Architecture](gateway.md) -- How the gateway stores and delivers policies via gRPC
-- [Gateway Settings Channel](gateway-settings.md) -- Runtime settings channel, global policy override, CLI/TUI settings commands
 - [Inference Routing](inference-routing.md) -- How `inference.local` requests are routed to model backends
 - [Overview](README.md) -- System-level context for how policies fit into the platform
 - [Plain HTTP Forward Proxy Plan](plans/plain-http-forward-proxy.md) -- Design document for the forward proxy feature

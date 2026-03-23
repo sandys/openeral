@@ -38,6 +38,11 @@ RUN echo "user_allow_other" >> /etc/fuse.conf
 # Create mount points
 RUN mkdir -p /db /home/agent && chown sandbox:sandbox /home/agent
 
+# Declare FUSE mounts in fstab — discovered by OpenShell supervisor
+# "env" source tells openeral to read DATABASE_URL/OPENERAL_DATABASE_URL from environment
+RUN echo 'env  /db  fuse.openeral  ro,noauto,allow_other,default_permissions  0  0' >> /etc/fstab \
+ && echo 'env#workspace#default  /home/agent  fuse.openeral  rw,noauto,allow_other  0  0' >> /etc/fstab
+
 # Copy security policy
 COPY openeral-shell/policy.yaml /etc/openshell/policy.yaml
 

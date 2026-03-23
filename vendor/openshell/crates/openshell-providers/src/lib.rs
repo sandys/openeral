@@ -77,7 +77,6 @@ impl ProviderRegistry {
         let mut registry = Self::default();
         registry.register(providers::claude::ClaudeProvider);
         registry.register(providers::codex::CodexProvider);
-        registry.register(providers::copilot::CopilotProvider);
         registry.register(providers::opencode::OpencodeProvider);
         registry.register(providers::generic::GenericProvider);
         registry.register(providers::openai::OpenaiProvider);
@@ -129,7 +128,6 @@ pub fn normalize_provider_type(input: &str) -> Option<&'static str> {
     match normalized.as_str() {
         "claude" => Some("claude"),
         "codex" => Some("codex"),
-        "copilot" => Some("copilot"),
         "opencode" => Some("opencode"),
         "generic" => Some("generic"),
         "openai" => Some("openai"),
@@ -166,7 +164,6 @@ mod tests {
         assert_eq!(normalize_provider_type("openai"), Some("openai"));
         assert_eq!(normalize_provider_type("anthropic"), Some("anthropic"));
         assert_eq!(normalize_provider_type("nvidia"), Some("nvidia"));
-        assert_eq!(normalize_provider_type("copilot"), Some("copilot"));
         assert_eq!(normalize_provider_type("unknown"), None);
     }
 
@@ -183,20 +180,6 @@ mod tests {
         assert_eq!(
             detect_provider_from_command(&["/usr/bin/bash".to_string()]),
             None
-        );
-        // Copilot standalone binary
-        assert_eq!(
-            detect_provider_from_command(&["copilot".to_string()]),
-            Some("copilot")
-        );
-        assert_eq!(
-            detect_provider_from_command(&["/usr/local/bin/copilot".to_string()]),
-            Some("copilot")
-        );
-        // gh alone still maps to github
-        assert_eq!(
-            detect_provider_from_command(&["gh".to_string()]),
-            Some("github")
         );
     }
 }

@@ -15,7 +15,6 @@ pub mod forward;
 pub mod inference;
 pub mod paths;
 pub mod proto;
-pub mod settings;
 
 pub use config::{Config, TlsConfig};
 pub use error::{Error, Result};

@@ -66,12 +66,6 @@ pub struct ServerState {
 
     /// Active SSH tunnel connection counts per sandbox id.
     pub ssh_connections_by_sandbox: Mutex<HashMap<String, u32>>,
-
-    /// Serializes settings mutations (global and sandbox) to prevent
-    /// read-modify-write races. Held for the duration of any setting
-    /// set/delete operation, including the precedence check on sandbox
-    /// mutations that reads global state.
-    pub settings_mutex: tokio::sync::Mutex<()>,
 }
 
 fn is_benign_tls_handshake_failure(error: &std::io::Error) -> bool {
@@ -101,7 +95,6 @@ impl ServerState {
             tracing_log_bus,
             ssh_connections_by_token: Mutex::new(HashMap::new()),
             ssh_connections_by_sandbox: Mutex::new(HashMap::new()),
-            settings_mutex: tokio::sync::Mutex::new(()),
         }
     }
 }

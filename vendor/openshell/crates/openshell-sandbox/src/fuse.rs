@@ -22,32 +22,19 @@ use crate::policy::SandboxPolicy;
 /// A FUSE mount discovered from /etc/fstab.
 #[derive(Debug)]
 pub struct FuseMount {
-    /// Source argument passed to the FUSE binary (e.g., connection string).
     pub source: String,
-    /// Mount point path (e.g., /db).
     pub mount_point: PathBuf,
-    /// Full filesystem type (e.g., "fuse.openeral").
-    pub fs_type: String,
-    /// Binary name extracted from fs_type (e.g., "openeral").
     pub binary: String,
-    /// Comma-separated mount options.
     pub options: String,
-    /// Whether the mount is read-only.
     pub read_only: bool,
 }
 
 /// Parse /etc/fstab for FUSE mount entries.
-///
-/// Returns entries where:
-/// - Type starts with `fuse.`
-/// - Options contain `noauto` (explicit opt-in, not auto-mounted at boot)
-/// - The FUSE binary exists in PATH
 pub fn discover_fuse_mounts() -> Vec<FuseMount> {
-    let fstab_path = Path::new("/etc/fstab");
-    let content = match std::fs::read_to_string(fstab_path) {
+    let content = match std::fs::read_to_string("/etc/fstab") {
         Ok(c) => c,
         Err(e) => {
-            debug!(error = %e, "No /etc/fstab or cannot read it, skipping FUSE discovery");
+            debug!(error = %e, "No /etc/fstab, skipping FUSE discovery");
             return Vec::new();
         }
     };
@@ -56,8 +43,6 @@ pub fn discover_fuse_mounts() -> Vec<FuseMount> {
 
     for line in content.lines() {
         let line = line.trim();
-
-        // Skip comments and empty lines
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
@@ -72,48 +57,28 @@ pub fn discover_fuse_mounts() -> Vec<FuseMount> {
         let fs_type = fields[2];
         let options = fields[3];
 
-        // Only process fuse.* types
         let binary = match fs_type.strip_prefix("fuse.") {
             Some(b) if !b.is_empty() => b,
             _ => continue,
         };
 
-        // Only process noauto entries (explicit opt-in)
         if !options.split(',').any(|o| o == "noauto") {
-            debug!(
-                mount_point = mount_point,
-                "Skipping fuse entry without noauto flag"
-            );
             continue;
         }
 
-        // Verify the binary exists
-        if which_binary(binary).is_none() {
-            warn!(
-                binary = binary,
-                mount_point = mount_point,
-                "FUSE binary not found in PATH, skipping"
-            );
+        if which_binary(binary).is_none() && find_binary_in_common_paths(binary).is_none() {
+            warn!(binary = binary, mount_point = mount_point, "FUSE binary not found, skipping");
             continue;
         }
 
-        // Strip quotes from source (fstab allows quoted source fields)
         let source = source.trim_matches('"').trim_matches('\'');
-
         let read_only = options.split(',').any(|o| o == "ro");
 
-        info!(
-            fs_type = fs_type,
-            source = source,
-            mount_point = mount_point,
-            read_only = read_only,
-            "Discovered FUSE mount in /etc/fstab"
-        );
+        info!(fs_type = fs_type, source = source, mount_point = mount_point, "Discovered FUSE mount");
 
         mounts.push(FuseMount {
             source: source.to_string(),
             mount_point: PathBuf::from(mount_point),
-            fs_type: fs_type.to_string(),
             binary: binary.to_string(),
             options: options.to_string(),
             read_only,
@@ -124,20 +89,16 @@ pub fn discover_fuse_mounts() -> Vec<FuseMount> {
 }
 
 /// Create /dev/fuse character device if it doesn't exist.
-///
-/// Requires CAP_SYS_ADMIN (the supervisor has it).
-/// Major 10, minor 229 is the standard Linux FUSE device.
 #[cfg(target_os = "linux")]
 pub fn ensure_fuse_device() -> Result<()> {
     use nix::sys::stat::{self, SFlag};
 
     let path = Path::new("/dev/fuse");
     if path.exists() {
-        debug!("/dev/fuse already exists");
         return Ok(());
     }
 
-    info!("Creating /dev/fuse character device (10, 229)");
+    info!("Creating /dev/fuse (10, 229)");
     stat::mknod(
         path,
         SFlag::S_IFCHR,
@@ -154,22 +115,24 @@ pub fn ensure_fuse_device() -> Result<()> {
     Ok(())
 }
 
-/// Spawn a FUSE daemon via mount.fuse3 for a single fstab entry.
-///
-/// mount.fuse3 handles the privileged setup (opening /dev/fuse, calling
-/// mount(2)), then execs the FUSE binary. The binary runs as a long-lived
-/// daemon process managed by the supervisor.
+/// Find mount.fuse3 in standard locations.
+fn find_mount_fuse3() -> Option<PathBuf> {
+    for path in &["/sbin/mount.fuse3", "/usr/sbin/mount.fuse3", "/bin/mount.fuse3", "/usr/bin/mount.fuse3"] {
+        let p = PathBuf::from(path);
+        if p.exists() {
+            return Some(p);
+        }
+    }
+    which_binary("mount.fuse3")
+}
+
+/// Spawn a FUSE daemon via mount.fuse3.
 pub fn spawn_fuse_mount(mount: &FuseMount, env: &HashMap<String, String>) -> Result<Child> {
-    let mount_fuse3 = which_binary("mount.fuse3")
-        .ok_or_else(|| miette::miette!("mount.fuse3 not found in PATH"))?;
+    let mount_fuse3 = find_mount_fuse3()
+        .ok_or_else(|| miette::miette!("mount.fuse3 not found"))?;
 
-    info!(
-        binary = %mount.binary,
-        mount_point = %mount.mount_point.display(),
-        "Spawning FUSE daemon via mount.fuse3"
-    );
+    info!(binary = %mount.binary, mount_point = %mount.mount_point.display(), "Spawning FUSE daemon");
 
-    // mount.fuse3 expects: mount.fuse3 type#source mountpoint -o options
     let type_source = format!("{}#{}", mount.binary, mount.source);
 
     let mut cmd = Command::new(mount_fuse3);
@@ -178,7 +141,6 @@ pub fn spawn_fuse_mount(mount: &FuseMount, env: &HashMap<String, String>) -> Res
     cmd.arg("-o");
     cmd.arg(&mount.options);
 
-    // Pass provider environment (database URLs, API keys, etc.)
     for (k, v) in env {
         cmd.env(k, v);
     }
@@ -189,112 +151,112 @@ pub fn spawn_fuse_mount(mount: &FuseMount, env: &HashMap<String, String>) -> Res
 /// Wait for a mountpoint to become ready.
 pub fn wait_for_mount(path: &Path, timeout: Duration) -> Result<()> {
     let start = std::time::Instant::now();
-    let poll_interval = Duration::from_millis(500);
-
     while start.elapsed() < timeout {
         if is_mountpoint(path) {
             info!(path = %path.display(), "FUSE mount ready");
             return Ok(());
         }
-        std::thread::sleep(poll_interval);
+        std::thread::sleep(Duration::from_millis(500));
     }
-
-    Err(miette::miette!(
-        "FUSE mount at {} did not become ready within {:?}",
-        path.display(),
-        timeout
-    ))
+    Err(miette::miette!("FUSE mount at {} not ready within {:?}", path.display(), timeout))
 }
 
-/// Check if a path is a mountpoint using /proc/mounts.
 fn is_mountpoint(path: &Path) -> bool {
     let path_str = path.to_string_lossy();
     std::fs::read_to_string("/proc/mounts")
         .ok()
-        .map(|content| {
-            content
-                .lines()
-                .any(|line| line.split_whitespace().nth(1) == Some(path_str.as_ref()))
-        })
+        .map(|c| c.lines().any(|l| l.split_whitespace().nth(1) == Some(path_str.as_ref())))
         .unwrap_or(false)
 }
 
-/// Find a binary in PATH, returning its full path.
 fn which_binary(name: &str) -> Option<PathBuf> {
     std::env::var_os("PATH").and_then(|paths| {
         std::env::split_paths(&paths).find_map(|dir| {
             let full = dir.join(name);
-            if full.is_file() {
-                Some(full)
-            } else {
-                None
-            }
+            if full.is_file() { Some(full) } else { None }
         })
     })
 }
 
-/// Top-level entry point: discover FUSE mounts from fstab, set up the device,
-/// spawn all daemons, wait for readiness, and update the policy for Landlock.
-///
-/// Returns the FUSE daemon child processes. These must be kept alive for the
-/// duration of the sandbox. On cleanup, they should be killed and their mounts
-/// unmounted via fusermount.
+/// Search common binary locations that may not be in PATH.
+fn find_binary_in_common_paths(name: &str) -> Option<PathBuf> {
+    for dir in &["/usr/local/bin", "/usr/bin", "/bin", "/usr/local/sbin", "/usr/sbin", "/sbin"] {
+        let full = PathBuf::from(dir).join(name);
+        if full.is_file() {
+            return Some(full);
+        }
+    }
+    None
+}
+
+/// Top-level: discover, create device, spawn daemons, wait, update policy.
 pub fn setup_fuse_mounts(
     policy: &mut SandboxPolicy,
     env: &HashMap<String, String>,
 ) -> Result<Vec<Child>> {
     let mounts = discover_fuse_mounts();
-
     if mounts.is_empty() {
-        debug!("No FUSE mounts declared in /etc/fstab");
         return Ok(Vec::new());
     }
 
     info!(count = mounts.len(), "Setting up FUSE mounts from /etc/fstab");
-
-    // Create /dev/fuse if missing (requires CAP_SYS_ADMIN)
     ensure_fuse_device()?;
+
+    // Build FUSE daemon environment from:
+    // 1. Provider env (injected by OpenShell as pod env vars)
+    // 2. Process env (inherits pod env vars set by providers)
+    let mut fuse_env = env.clone();
+
+    // Inherit relevant env vars from the process environment.
+    // Provider credentials are injected as pod env vars and available here.
+    for key in &["DATABASE_URL", "OPENERAL_DATABASE_URL", "ANTHROPIC_API_KEY"] {
+        if !fuse_env.contains_key(*key) {
+            if let Ok(val) = std::env::var(key) {
+                fuse_env.insert(key.to_string(), val);
+            }
+        }
+    }
+
+    // Map DATABASE_URL → OPENERAL_DATABASE_URL if the latter isn't set.
+    if !fuse_env.contains_key("OPENERAL_DATABASE_URL") {
+        if let Some(db_url) = fuse_env.get("DATABASE_URL") {
+            info!("Mapping DATABASE_URL → OPENERAL_DATABASE_URL");
+            fuse_env.insert("OPENERAL_DATABASE_URL".to_string(), db_url.clone());
+        }
+    }
+
+    if let Some(db_url) = fuse_env.get("OPENERAL_DATABASE_URL") {
+        info!(db_url_len = db_url.len(), db_url_prefix = %&db_url[..db_url.len().min(30)], "OPENERAL_DATABASE_URL resolved");
+    }
+
+    if !fuse_env.contains_key("OPENERAL_DATABASE_URL") {
+        return Err(miette::miette!(
+            "FUSE mounts declared in /etc/fstab but no DATABASE_URL or OPENERAL_DATABASE_URL available. \
+             Create an OpenShell provider: openshell provider create --name db --type generic \
+             --credential DATABASE_URL=\"host=... user=... dbname=...\""
+        ));
+    }
 
     let timeout = Duration::from_secs(30);
     let mut daemons = Vec::new();
 
     for mount in &mounts {
-        // Ensure mount point directory exists
         if !mount.mount_point.exists() {
             std::fs::create_dir_all(&mount.mount_point).into_diagnostic()?;
         }
 
-        // Spawn the FUSE daemon
-        let child = spawn_fuse_mount(mount, env)?;
+        let child = spawn_fuse_mount(mount, &fuse_env)?;
         daemons.push(child);
-
-        // Wait for mount to become ready
         wait_for_mount(&mount.mount_point, timeout)?;
 
-        // Add mount point to Landlock-allowed paths so the child process can access it
         if mount.read_only {
-            policy
-                .filesystem
-                .read_only
-                .push(mount.mount_point.clone());
+            policy.filesystem.read_only.push(mount.mount_point.clone());
         } else {
-            policy
-                .filesystem
-                .read_write
-                .push(mount.mount_point.clone());
+            policy.filesystem.read_write.push(mount.mount_point.clone());
         }
     }
 
-    // /dev/fuse needs to stay accessible for FUSE daemon processes
-    policy
-        .filesystem
-        .read_write
-        .push(PathBuf::from("/dev/fuse"));
-
-    info!(
-        count = daemons.len(),
-        "All FUSE mounts ready"
-    );
-
+    policy.filesystem.read_write.push(PathBuf::from("/dev/fuse"));
+    info!(count = daemons.len(), "All FUSE mounts ready");
     Ok(daemons)
 }

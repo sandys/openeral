@@ -229,7 +229,7 @@ These are used to build a `tonic::transport::ClientTlsConfig` with:
 - `identity()` -- presents the shared client certificate for mTLS.
 
 The sandbox calls two RPCs over this authenticated channel:
-- `GetSandboxSettings` -- fetches the YAML policy that governs the sandbox's behavior.
+- `GetSandboxPolicy` -- fetches the YAML policy that governs the sandbox's behavior.
 - `GetSandboxProviderEnvironment` -- fetches provider credentials as environment variables.
 
 ## SSH Tunnel Authentication

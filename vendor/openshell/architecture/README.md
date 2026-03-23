@@ -224,11 +224,9 @@ Sandbox behavior is governed by policies written in YAML and evaluated by an emb
 
 Inference routing to `inference.local` is configured separately at the cluster level and does not require network policy entries. The OPA engine evaluates only explicit network policies; `inference.local` connections bypass OPA entirely and are handled by the proxy's dedicated inference interception path.
 
-Policies are not intended to be hand-edited by end users in normal operation. They are associated with sandboxes at creation time and fetched by the sandbox supervisor at startup via gRPC. For development and testing, policies can also be loaded from local files. A gateway-global policy can override all sandbox policies via `openshell policy set --global`.
+Policies are not intended to be hand-edited by end users in normal operation. They are associated with sandboxes at creation time and fetched by the sandbox supervisor at startup via gRPC. For development and testing, policies can also be loaded from local files.
 
-In addition to policy, the gateway delivers runtime **settings** -- typed key-value pairs (e.g., `log_level`) that can be configured per-sandbox or globally. Settings and policy are delivered together through the `GetSandboxSettings` RPC and tracked by a single `config_revision` fingerprint. See [Gateway Settings Channel](gateway-settings.md) for details.
-
-For more detail on the policy language, see [Policy Language](security-policy.md).
+For more detail, see [Policy Language](security-policy.md).
 
 ### Command-Line Interface
 
@@ -236,7 +234,7 @@ The CLI is the primary way users interact with the platform. It provides command
 
 - **Gateway management** (`openshell gateway`): Deploy, stop, destroy, and inspect clusters. Supports both local and remote (SSH) targets.
 - **Sandbox management** (`openshell sandbox`): Create sandboxes (with optional file upload and provider auto-discovery), connect to sandboxes via SSH, and delete sandboxes.
-- **Top-level commands**: `openshell status` (cluster health), `openshell logs` (sandbox logs), `openshell forward` (port forwarding), `openshell policy` (sandbox policy management), `openshell settings` (effective sandbox settings and global/sandbox key updates).
+- **Top-level commands**: `openshell status` (cluster health), `openshell logs` (sandbox logs), `openshell forward` (port forwarding), `openshell policy` (sandbox policy management).
 - **Provider management** (`openshell provider`): Create, update, list, and delete external service credentials.
 - **Inference management** (`openshell cluster inference`): Configure cluster-level inference by specifying a provider and model. The gateway resolves endpoint and credential details from the named provider record.
 
@@ -299,5 +297,4 @@ This opens an interactive SSH session into the sandbox, with all provider creden
 | [Policy Language](security-policy.md) | The YAML/Rego policy system that governs sandbox behavior. |
 | [Inference Routing](inference-routing.md) | Transparent interception and sandbox-local routing of AI inference API calls to configured backends. |
 | [System Architecture](system-architecture.md) | Top-level system architecture diagram with all deployable components and communication flows. |
-| [Gateway Settings Channel](gateway-settings.md) | Runtime settings channel: two-tier key-value configuration, global policy override, settings registry, CLI/TUI commands. |
 | [TUI](tui.md) | Terminal user interface for sandbox interaction. |

@@ -49,14 +49,27 @@ fn parse_dev_fd(path: &str) -> Option<i32> {
 ///
 /// Format:
 ///   - Database: `<connstr>`
+///   - Database (env): `env` (reads OPENERAL_DATABASE_URL from environment)
 ///   - Workspace: `<connstr>#workspace#<id>`
+///   - Workspace (env): `env#workspace#<id>`
 fn parse_source(source: &str) -> (String, Option<String>) {
     if let Some(idx) = source.find("#workspace#") {
-        let conn_str = source[..idx].to_string();
+        let conn_part = &source[..idx];
         let workspace_id = source[idx + "#workspace#".len()..].to_string();
+        let conn_str = resolve_source_conn(conn_part);
         (conn_str, Some(workspace_id))
     } else {
-        (source.to_string(), None)
+        (resolve_source_conn(source), None)
+    }
+}
+
+/// Resolve the connection portion of a source string.
+/// If "env", returns empty string so resolve_connection_string falls through to env var.
+fn resolve_source_conn(source: &str) -> String {
+    if source == "env" {
+        String::new()
+    } else {
+        source.to_string()
     }
 }
 
@@ -148,7 +161,8 @@ async fn execute_database(
     read_only: bool,
     mount_mode: MountMode,
 ) -> Result<(), FsError> {
-    let conn_str = resolve_connection_string(Some(&conn_str), "OPENERAL_DATABASE_URL")?;
+    let cli_arg = if conn_str.is_empty() { None } else { Some(conn_str.as_str()) };
+    let conn_str = resolve_connection_string(cli_arg, "OPENERAL_DATABASE_URL")?;
 
     let mount_point_str = match &mount_mode {
         MountMode::PreOpenedFd(_) => "(mount.fuse3)".to_string(),
@@ -190,7 +204,8 @@ async fn execute_workspace(
     workspace_id: String,
     mount_mode: MountMode,
 ) -> Result<(), FsError> {
-    let conn_str = resolve_connection_string(Some(&conn_str), "OPENERAL_DATABASE_URL")?;
+    let cli_arg = if conn_str.is_empty() { None } else { Some(conn_str.as_str()) };
+    let conn_str = resolve_connection_string(cli_arg, "OPENERAL_DATABASE_URL")?;
     let pool = create_pool(&conn_str, 30)?;
 
     // Test connection

@@ -40,13 +40,12 @@ use hyper_util::{
 use openshell_core::proto::{
     CreateProviderRequest, CreateSandboxRequest, CreateSshSessionRequest, CreateSshSessionResponse,
     DeleteProviderRequest, DeleteProviderResponse, DeleteSandboxRequest, DeleteSandboxResponse,
-    ExecSandboxEvent, ExecSandboxRequest, GetGatewayConfigRequest, GetGatewayConfigResponse,
-    GetProviderRequest, GetSandboxConfigRequest, GetSandboxConfigResponse,
-    GetSandboxProviderEnvironmentRequest, GetSandboxProviderEnvironmentResponse, GetSandboxRequest,
-    HealthRequest, HealthResponse, ListProvidersRequest, ListProvidersResponse,
-    ListSandboxesRequest, ListSandboxesResponse, ProviderResponse, RevokeSshSessionRequest,
-    RevokeSshSessionResponse, SandboxResponse, SandboxStreamEvent, ServiceStatus,
-    UpdateProviderRequest, WatchSandboxRequest,
+    ExecSandboxEvent, ExecSandboxRequest, GetProviderRequest, GetSandboxPolicyRequest,
+    GetSandboxPolicyResponse, GetSandboxProviderEnvironmentRequest,
+    GetSandboxProviderEnvironmentResponse, GetSandboxRequest, HealthRequest, HealthResponse,
+    ListProvidersRequest, ListProvidersResponse, ListSandboxesRequest, ListSandboxesResponse,
+    ProviderResponse, RevokeSshSessionRequest, RevokeSshSessionResponse, SandboxResponse,
+    SandboxStreamEvent, ServiceStatus, UpdateProviderRequest, WatchSandboxRequest,
     open_shell_client::OpenShellClient,
     open_shell_server::{OpenShell, OpenShellServer},
 };
@@ -106,18 +105,11 @@ impl OpenShell for TestOpenShell {
         Ok(Response::new(DeleteSandboxResponse { deleted: true }))
     }
 
-    async fn get_sandbox_config(
+    async fn get_sandbox_policy(
         &self,
-        _request: tonic::Request<GetSandboxConfigRequest>,
-    ) -> Result<Response<GetSandboxConfigResponse>, Status> {
-        Ok(Response::new(GetSandboxConfigResponse::default()))
-    }
-
-    async fn get_gateway_config(
-        &self,
-        _request: tonic::Request<GetGatewayConfigRequest>,
-    ) -> Result<Response<GetGatewayConfigResponse>, Status> {
-        Ok(Response::new(GetGatewayConfigResponse::default()))
+        _request: tonic::Request<GetSandboxPolicyRequest>,
+    ) -> Result<Response<GetSandboxPolicyResponse>, Status> {
+        Ok(Response::new(GetSandboxPolicyResponse::default()))
     }
 
     async fn get_sandbox_provider_environment(
@@ -197,10 +189,10 @@ impl OpenShell for TestOpenShell {
         Ok(Response::new(ReceiverStream::new(rx)))
     }
 
-    async fn update_config(
+    async fn update_sandbox_policy(
         &self,
-        _request: tonic::Request<openshell_core::proto::UpdateConfigRequest>,
-    ) -> Result<Response<openshell_core::proto::UpdateConfigResponse>, Status> {
+        _request: tonic::Request<openshell_core::proto::UpdateSandboxPolicyRequest>,
+    ) -> Result<Response<openshell_core::proto::UpdateSandboxPolicyResponse>, Status> {
         Err(Status::unimplemented("not implemented in test"))
     }
 

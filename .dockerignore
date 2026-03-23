@@ -1,8 +1,9 @@
 .git
 .env
-.claude
 .gemini
 .agents
 .codex
 target
 agent-task.txt
+sandboxes
+vendor
