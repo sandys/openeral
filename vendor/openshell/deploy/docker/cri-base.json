@@ -1,8 +1,19 @@
 {
-  "ociVersion": "1.0.2",
+  "ociVersion": "1.2.1",
+  "process": {
+    "cwd": "/"
+  },
   "linux": {
+    "namespaces": [
+      { "type": "pid" },
+      { "type": "ipc" },
+      { "type": "uts" },
+      { "type": "mount" },
+      { "type": "network" }
+    ],
     "resources": {
       "devices": [
+        { "allow": false, "access": "rwm" },
         { "allow": true, "type": "c", "major": 10, "minor": 229, "access": "rwm" }
       ]
     },
