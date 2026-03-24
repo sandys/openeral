@@ -470,6 +470,31 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# Configure containerd to provide /dev/fuse to all containers
+# ---------------------------------------------------------------------------
+# Sandbox images that declare FUSE mounts in /etc/fstab need access to
+# /dev/fuse. By default, the device cgroup blocks it. We configure
+# containerd's base OCI runtime spec to include /dev/fuse, so every
+# container gets the device injected automatically — no privileged mode,
+# no device plugins, no pod-level configuration needed.
+FUSE_BASE_SPEC="/opt/openshell/cri-base.json"
+if [ -f "$FUSE_BASE_SPEC" ]; then
+    mkdir -p /etc/containerd
+    cp "$FUSE_BASE_SPEC" /etc/containerd/cri-base.json
+
+    CONTAINERD_TMPL="/var/lib/rancher/k3s/agent/etc/containerd/config.toml.tmpl"
+    mkdir -p "$(dirname "$CONTAINERD_TMPL")"
+    cat > "$CONTAINERD_TMPL" <<'CONTAINERD_EOF'
+{{ template "base" . }}
+
+[plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.runc]
+  base_runtime_spec = "/etc/containerd/cri-base.json"
+CONTAINERD_EOF
+
+    echo "Configured containerd base runtime spec with /dev/fuse support"
+fi
+
+# ---------------------------------------------------------------------------
 # Ensure flannel CNI directories exist
 # ---------------------------------------------------------------------------
 # k3s uses flannel as its default CNI. Flannel writes subnet configuration to

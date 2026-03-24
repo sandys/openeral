@@ -1,0 +1,13 @@
+{
+  "ociVersion": "1.0.2",
+  "linux": {
+    "resources": {
+      "devices": [
+        { "allow": true, "type": "c", "major": 10, "minor": 229, "access": "rwm" }
+      ]
+    },
+    "devices": [
+      { "path": "/dev/fuse", "type": "c", "major": 10, "minor": 229, "fileMode": 438 }
+    ]
+  }
+}

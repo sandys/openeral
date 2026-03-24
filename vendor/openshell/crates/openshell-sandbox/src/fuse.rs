@@ -90,18 +90,18 @@ pub fn discover_fuse_mounts() -> Vec<FuseMount> {
 
 /// Verify /dev/fuse is available.
 ///
-/// The fuse-device-plugin DaemonSet provides /dev/fuse to containers that
-/// request the `github.com/fuse` resource. The kubelet handles the device
-/// cgroup allowlist and bind-mount automatically.
+/// The cluster image configures containerd's base_runtime_spec to include
+/// /dev/fuse in all containers. This is set up by the cluster-entrypoint.sh
+/// via cri-base.json — no device plugins or resource requests needed.
 pub fn ensure_fuse_device() -> Result<()> {
     let path = Path::new("/dev/fuse");
     if path.exists() {
-        info!("/dev/fuse available (provided by fuse-device-plugin)");
+        info!("/dev/fuse available");
         Ok(())
     } else {
         Err(miette::miette!(
-            "/dev/fuse not found. The fuse-device-plugin DaemonSet may not be deployed, \
-             or the pod did not request the github.com/fuse resource."
+            "/dev/fuse not found. The cluster image must be built with FUSE support \
+             (cri-base.json with /dev/fuse in the containerd base_runtime_spec)."
         ))
     }
 }
