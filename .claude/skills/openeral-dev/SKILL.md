@@ -39,11 +39,12 @@ When developing this repo, optimize for that end-to-end flow first.
 
 The most important validation is an end-to-end OpenShell run where:
 
-1. the gateway uses the custom cluster image
-2. the sandbox uses the published openeral image
-3. the sandbox starts with `/db` and `/home/agent`
-4. `HOME=/home/agent claude -p 'Reply with READY and nothing else.'` succeeds
-5. PostgreSQL contains the resulting `/.claude*` rows in `_openeral.workspace_files`
+1. a fresh host starts a gateway with the custom cluster image
+2. a generic OpenShell provider is created for the live PostgreSQL database
+3. the sandbox uses the published openeral image
+4. the sandbox starts with `/db` and `/home/agent`
+5. `HOME=/home/agent claude -p 'Reply with READY and nothing else.'` succeeds
+6. PostgreSQL contains the resulting `/.claude*` rows in `_openeral.workspace_files`
 
 If a change affects the OpenShell path, rerun the full flow from scratch.
 

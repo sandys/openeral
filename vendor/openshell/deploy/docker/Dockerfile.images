@@ -16,6 +16,13 @@ ARG K3S_VERSION=v1.35.2-k3s1
 ARG K9S_VERSION=v0.50.18
 ARG HELM_VERSION=v3.17.3
 ARG NVIDIA_CONTAINER_TOOLKIT_VERSION=1.18.2-1
+ARG CRANE_VERSION=v0.20.6
+ARG KLIPPER_HELM_IMAGE=rancher/klipper-helm:v0.9.14-build20260210
+ARG COREDNS_IMAGE=rancher/mirrored-coredns-coredns:1.14.1
+ARG LOCAL_PATH_PROVISIONER_IMAGE=rancher/local-path-provisioner:v0.0.34
+ARG METRICS_SERVER_IMAGE=rancher/mirrored-metrics-server:v0.8.1
+ARG GENERIC_DEVICE_PLUGIN_IMAGE=squat/generic-device-plugin:0.1.0
+ARG AGENT_SANDBOX_CONTROLLER_IMAGE=registry.k8s.io/agent-sandbox/agent-sandbox-controller:v0.1.0
 
 # ---------------------------------------------------------------------------
 # Shared Rust build stages
@@ -217,6 +224,40 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         "libnvidia-container1=${NVIDIA_CONTAINER_TOOLKIT_VERSION}" && \
     rm -rf /var/lib/apt/lists/*
 
+FROM ubuntu:24.04 AS cluster-image-preload
+ARG TARGETARCH
+ARG CRANE_VERSION
+ARG KLIPPER_HELM_IMAGE
+ARG COREDNS_IMAGE
+ARG LOCAL_PATH_PROVISIONER_IMAGE
+ARG METRICS_SERVER_IMAGE
+ARG GENERIC_DEVICE_PLUGIN_IMAGE
+ARG AGENT_SANDBOX_CONTROLLER_IMAGE
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates curl && rm -rf /var/lib/apt/lists/*
+
+RUN case "${TARGETARCH}" in \
+      amd64) crane_arch=x86_64 ;; \
+      arm64) crane_arch=arm64 ;; \
+      *) echo "Unsupported crane arch: ${TARGETARCH}" >&2; exit 1 ;; \
+    esac && \
+    curl -fsSL "https://github.com/google/go-containerregistry/releases/download/${CRANE_VERSION}/go-containerregistry_Linux_${crane_arch}.tar.gz" \
+      | tar xz -C /usr/local/bin crane && \
+    chmod +x /usr/local/bin/crane
+
+RUN mkdir -p /preload && \
+    for image in \
+      "${KLIPPER_HELM_IMAGE}" \
+      "${COREDNS_IMAGE}" \
+      "${LOCAL_PATH_PROVISIONER_IMAGE}" \
+      "${METRICS_SERVER_IMAGE}" \
+      "${GENERIC_DEVICE_PLUGIN_IMAGE}" \
+      "${AGENT_SANDBOX_CONTROLLER_IMAGE}"; do \
+      safe_name=$(printf '%s' "$image" | tr '/:@' '____'); \
+      crane pull "$image" "/preload/${safe_name}.tar"; \
+    done
+
 # ---------------------------------------------------------------------------
 # Final cluster image
 # ---------------------------------------------------------------------------
@@ -249,6 +290,7 @@ COPY --from=supervisor-builder /build/out/openshell-sandbox /opt/openshell/bin/o
 
 RUN mkdir -p /var/lib/rancher/k3s/server/manifests \
              /var/lib/rancher/k3s/server/static/charts \
+             /var/lib/rancher/k3s/agent/images \
              /etc/rancher/k3s \
              /opt/openshell/manifests \
              /opt/openshell/charts \
@@ -264,6 +306,7 @@ RUN chmod +x /usr/local/bin/cluster-healthcheck.sh
 COPY deploy/docker/.build/charts/*.tgz /opt/openshell/charts/
 COPY deploy/kube/manifests/*.yaml /opt/openshell/manifests/
 COPY deploy/kube/gpu-manifests/*.yaml /opt/openshell/gpu-manifests/
+COPY --from=cluster-image-preload /preload/*.tar /var/lib/rancher/k3s/agent/images/
 
 ENTRYPOINT ["/usr/local/bin/cluster-entrypoint.sh"]
 

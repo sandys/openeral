@@ -15,6 +15,27 @@ Your first assumption should be:
 
 Do not optimize for anything else first.
 
+## Fresh Machine Setup
+
+If you only have upstream `openshell`, image refs, and a live database:
+
+1. start the gateway with the openeral cluster image
+2. create a generic provider from `DATABASE_URL`
+3. launch the sandbox with that provider plus `claude --auto-providers`
+
+The supported Claude launch still remains:
+
+```bash
+openshell sandbox create \
+  --gateway "$OPENSHELL_GATEWAY_NAME" \
+  --name "$OPENERAL_SANDBOX_NAME" \
+  --from "$OPENERAL_SANDBOX_IMAGE" \
+  --provider "$OPENERAL_DB_PROVIDER" \
+  --provider claude \
+  --auto-providers \
+  --no-tty -- env HOME=/home/agent claude
+```
+
 ## What Must Be True
 
 Inside a healthy sandbox:

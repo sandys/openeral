@@ -33,23 +33,53 @@ When that works correctly:
 - those files persist in PostgreSQL
 - `/db` is available as a read-only view of the same database
 
-## Prerequisites
+## Fresh Machine Flow
 
-This repo assumes these are already true before the final launch command:
+Assume a fresh machine with:
 
-1. Upstream `openshell` CLI is installed on the host.
-2. An OpenShell gateway is already running with the custom openeral cluster image.
-3. A generic OpenShell provider already exists for the live PostgreSQL database.
-4. The published openeral sandbox image is available by image reference.
-5. The host has `ANTHROPIC_API_KEY` available.
+1. upstream `openshell` already installed
+2. a live PostgreSQL database already available
+3. the openeral cluster image reference
+4. the openeral sandbox image reference
+5. host `ANTHROPIC_API_KEY` available
 
-The database and its OpenShell provider are infrastructure prerequisites. They are not created by the final user-facing launch command.
+From that starting point, the full flow is:
+
+1. start an OpenShell gateway with the custom openeral cluster image
+2. create one generic provider that points at the live PostgreSQL database
+3. launch a sandbox from the published openeral sandbox image
+4. run Claude with `HOME=/home/agent`
+
+The database itself may exist out of band. The only OpenShell-side setup you need is the gateway and the generic database provider.
+
+## Start Gateway
+
+```bash
+export OPENSHELL_CLUSTER_IMAGE='<cluster image ref>'
+export OPENSHELL_REGISTRY_HOST='<registry host:port>'
+export OPENSHELL_REGISTRY_INSECURE=true
+export OPENSHELL_GATEWAY_NAME=openeral
+
+openshell gateway start --name "$OPENSHELL_GATEWAY_NAME"
+```
+
+## Create Database Provider
+
+```bash
+export DATABASE_URL='host=<host> port=<port> user=<user> password=<password> dbname=<dbname>'
+export OPENERAL_DB_PROVIDER=openeral-db
+
+openshell provider create \
+  --gateway "$OPENSHELL_GATEWAY_NAME" \
+  --name "$OPENERAL_DB_PROVIDER" \
+  --type generic \
+  --credential DATABASE_URL
+```
 
 ## Launch Claude Code
 
 ```bash
 export OPENERAL_SANDBOX_IMAGE='<sandbox image ref>'
-export OPENERAL_DB_PROVIDER=openeral-db
 export OPENERAL_SANDBOX_NAME=openeral-demo
 
 set -a
@@ -57,6 +87,7 @@ set -a
 set +a
 
 openshell sandbox create \
+  --gateway "$OPENSHELL_GATEWAY_NAME" \
   --name "$OPENERAL_SANDBOX_NAME" \
   --from "$OPENERAL_SANDBOX_IMAGE" \
   --provider "$OPENERAL_DB_PROVIDER" \

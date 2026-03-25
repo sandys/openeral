@@ -4,20 +4,50 @@ This sandbox exists for one purpose: run Claude Code in OpenShell with a persist
 
 `/db` is mounted too, but it is secondary. The primary success criterion is that Claude writes `~/.claude` into `/home/agent` and that those files survive reconnects.
 
-## Required Inputs
+## Fresh Machine Inputs
 
-Before the final launch command, these must already exist:
+Assume a fresh machine where only these are already available:
 
-- a running OpenShell gateway using the custom openeral cluster image
-- a generic OpenShell provider for the live PostgreSQL database
+- upstream `openshell`
+- a live PostgreSQL database
+- the published openeral cluster image reference
 - the published openeral sandbox image reference
 - host `ANTHROPIC_API_KEY`
+
+From there, the supported flow is:
+
+1. start the gateway with the openeral cluster image
+2. create one generic provider for the live database
+3. launch Claude from the sandbox image
+
+## Start Gateway
+
+```bash
+export OPENSHELL_CLUSTER_IMAGE='<cluster image ref>'
+export OPENSHELL_REGISTRY_HOST='<registry host:port>'
+export OPENSHELL_REGISTRY_INSECURE=true
+export OPENSHELL_GATEWAY_NAME=openeral
+
+openshell gateway start --name "$OPENSHELL_GATEWAY_NAME"
+```
+
+## Create Database Provider
+
+```bash
+export DATABASE_URL='host=<host> port=<port> user=<user> password=<password> dbname=<dbname>'
+export OPENERAL_DB_PROVIDER=openeral-db
+
+openshell provider create \
+  --gateway "$OPENSHELL_GATEWAY_NAME" \
+  --name "$OPENERAL_DB_PROVIDER" \
+  --type generic \
+  --credential DATABASE_URL
+```
 
 ## One-Command Launch
 
 ```bash
 export OPENERAL_SANDBOX_IMAGE='<sandbox image ref>'
-export OPENERAL_DB_PROVIDER=openeral-db
 export OPENERAL_SANDBOX_NAME=openeral-demo
 
 set -a
@@ -25,6 +55,7 @@ set -a
 set +a
 
 openshell sandbox create \
+  --gateway "$OPENSHELL_GATEWAY_NAME" \
   --name "$OPENERAL_SANDBOX_NAME" \
   --from "$OPENERAL_SANDBOX_IMAGE" \
   --provider "$OPENERAL_DB_PROVIDER" \
