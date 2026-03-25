@@ -36,6 +36,7 @@ Build and push the cluster image:
 docker build \
   -f vendor/openshell/deploy/docker/Dockerfile.images \
   --target cluster \
+  --build-arg OPENERAL_DEFAULT_IMAGE_REPO_BASE=172.17.0.1:5000/openshell/openeral \
   --build-arg OPENERAL_DEFAULT_IMAGE_TAG=dev \
   -t 127.0.0.1:5000/openshell/openeral/cluster:dev \
   vendor/openshell
@@ -71,10 +72,9 @@ Then use:
 - `OPENSHELL_CLUSTER_IMAGE=127.0.0.1:5000/openshell/openeral/cluster:dev`
 - `OPENSHELL_REGISTRY_HOST=172.17.0.1:5000`
 - `OPENSHELL_REGISTRY_INSECURE=true`
-- `OPENSHELL_IMAGE_REPO_BASE=172.17.0.1:5000/openshell/openeral`
 - `OPENERAL_SANDBOX_IMAGE=172.17.0.1:5000/openshell/openeral/sandbox:dev`
 
-The cluster image is pulled by host Docker, so `127.0.0.1:5000` is correct there. Gateway and sandbox images are pulled from inside the cluster container, so use `172.17.0.1:5000` for `OPENSHELL_IMAGE_REPO_BASE`, the sandbox image reference, and the registry host.
+The cluster image is pulled by host Docker, so `127.0.0.1:5000` is correct there. The cluster image itself is baked to resolve its sibling gateway image via `172.17.0.1:5000`, and the sandbox image is also pulled from inside the cluster, so use `172.17.0.1:5000` for the sandbox image reference and the registry host.
 
 ## Start Gateway
 

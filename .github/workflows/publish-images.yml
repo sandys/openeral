@@ -188,7 +188,6 @@ jobs:
       - name: Promote candidate tags
         env:
           RELEASE_TAG: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}
-          OWNER: ${{ github.repository_owner }}
         run: |
           set -euo pipefail
 
@@ -206,16 +205,10 @@ jobs:
             promote "$cluster_source" "${IMAGE_REPO_BASE}/cluster:latest"
             promote "$gateway_source" "${IMAGE_REPO_BASE}/gateway:latest"
             promote "$sandbox_source" "${IMAGE_REPO_BASE}/sandbox:latest"
-
-            promote "$cluster_source" "ghcr.io/${OWNER}/openeral-cluster:latest"
-            promote "$sandbox_source" "ghcr.io/${OWNER}/openeral-sandbox:latest"
           fi
 
           if [ -n "${RELEASE_TAG}" ]; then
             promote "$cluster_source" "${IMAGE_REPO_BASE}/cluster:${RELEASE_TAG}"
             promote "$gateway_source" "${IMAGE_REPO_BASE}/gateway:${RELEASE_TAG}"
             promote "$sandbox_source" "${IMAGE_REPO_BASE}/sandbox:${RELEASE_TAG}"
-
-            promote "$cluster_source" "ghcr.io/${OWNER}/openeral-cluster:${RELEASE_TAG}"
-            promote "$sandbox_source" "ghcr.io/${OWNER}/openeral-sandbox:${RELEASE_TAG}"
           fi

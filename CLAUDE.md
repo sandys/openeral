@@ -35,7 +35,6 @@ Do NOT use `cargo build` or `cargo test` directly on the host. The dev container
 - `crates/openeral/` — binary crate (thin CLI entry point)
 - `crates/openeral-core/` — library crate (all logic: FUSE filesystem, DB queries, CLI commands)
 - `crates/openeral-core/migrations/` — SQL migrations (V1–V4), managed by refinery
-- `openeral-shell/` — legacy entrypoint-based sandbox path kept for reference; not the supported OpenShell flow
 - `sandboxes/openeral/` — current OpenShell sandbox image (OpenClaw-based, supervisor-managed via `/etc/fstab`)
 - `vendor/openshell/` — vendored OpenShell fork used to build the custom cluster and gateway images
 - `.github/workflows/publish-images.yml` — atomically publishes `openeral/{cluster,gateway,sandbox}`
