@@ -497,7 +497,8 @@ pub async fn seed_from_directory(
     local_dir: &std::path::Path,
 ) -> Result<u64, FsError> {
     let mut count = 0u64;
-    seed_dir_recursive(pool, workspace_id, local_dir, "/", &mut count).await?;
+    let (uid, gid) = default_workspace_owner();
+    seed_dir_recursive(pool, workspace_id, local_dir, "/", uid, gid, &mut count).await?;
     Ok(count)
 }
 
@@ -506,6 +507,8 @@ fn seed_dir_recursive<'a>(
     workspace_id: &'a str,
     local_path: &'a std::path::Path,
     db_path: &'a str,
+    uid: i32,
+    gid: i32,
     count: &'a mut u64,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), FsError>> + Send + 'a>> {
     Box::pin(async move {
@@ -541,12 +544,13 @@ fn seed_dir_recursive<'a>(
                     ctime_ns: now_ns,
                     atime_ns: now_ns,
                     nlink: 2,
-                    uid: 1000,
-                    gid: 1000,
+                    uid,
+                    gid,
                 };
                 let _ = create_file(pool, &dir).await;
                 *count += 1;
-                seed_dir_recursive(pool, workspace_id, &entry.path(), &child_path, count).await?;
+                seed_dir_recursive(pool, workspace_id, &entry.path(), &child_path, uid, gid, count)
+                    .await?;
             } else if file_type.is_file() {
                 let content = tokio::fs::read(entry.path())
                     .await
@@ -564,8 +568,8 @@ fn seed_dir_recursive<'a>(
                     ctime_ns: now_ns,
                     atime_ns: now_ns,
                     nlink: 1,
-                    uid: 1000,
-                    gid: 1000,
+                    uid,
+                    gid,
                 };
                 let _ = create_file(pool, &file).await;
                 *count += 1;

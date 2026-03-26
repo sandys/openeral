@@ -377,6 +377,46 @@ async fn test_seed_from_config() {
 }
 
 #[tokio::test]
+async fn test_seed_from_directory_uses_default_workspace_owner() {
+    let pool = get_pool().await;
+    let ws_id = unique_ws_id("ws-seed-dir");
+    let layout = WorkspaceLayout::default();
+    let temp_dir = std::env::temp_dir().join(format!("openeral-seed-{}", ws_id));
+
+    std::fs::create_dir_all(temp_dir.join("nested")).unwrap();
+    std::fs::write(temp_dir.join("nested").join("hello.txt"), b"hello from disk").unwrap();
+
+    ws_queries::create_workspace(&pool, &ws_id, Some("Seed Dir Test"), &layout)
+        .await
+        .unwrap();
+    ws_queries::seed_from_config(&pool, &ws_id, &layout)
+        .await
+        .unwrap();
+
+    let root = ws_queries::get_file(&pool, &ws_id, "/").await.unwrap();
+    let count = ws_queries::seed_from_directory(&pool, &ws_id, &temp_dir)
+        .await
+        .unwrap();
+    assert_eq!(count, 2);
+
+    let nested = ws_queries::get_file(&pool, &ws_id, "/nested").await.unwrap();
+    assert!(nested.is_dir);
+    assert_eq!(nested.uid, root.uid);
+    assert_eq!(nested.gid, root.gid);
+
+    let hello = ws_queries::get_file(&pool, &ws_id, "/nested/hello.txt")
+        .await
+        .unwrap();
+    assert!(!hello.is_dir);
+    assert_eq!(hello.content, Some(b"hello from disk".to_vec()));
+    assert_eq!(hello.uid, root.uid);
+    assert_eq!(hello.gid, root.gid);
+
+    ws_queries::delete_workspace(&pool, &ws_id).await.unwrap();
+    std::fs::remove_dir_all(&temp_dir).unwrap();
+}
+
+#[tokio::test]
 async fn test_cascade_delete() {
     let pool = get_pool().await;
     let ws_id = unique_ws_id("ws-cascade");

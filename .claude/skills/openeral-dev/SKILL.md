@@ -33,6 +33,8 @@ Do not assume any mixed upstream/openeral image combination is valid.
 
 The supported CLI is still the upstream released `openshell` binary. The vendored OpenShell tree is kept to build the custom `cluster` and `gateway` images, not to provide a separate CLI path.
 
+When validating the fresh-machine path with upstream `openshell 0.0.12`, include `IMAGE_REPO_BASE=<openeral repo base>` alongside `OPENSHELL_CLUSTER_IMAGE`. Without that override, the CLI still points the internal gateway pull at upstream OpenShell.
+
 ## Files That Matter Most
 
 - `crates/openeral-core/src/fs/workspace.rs`

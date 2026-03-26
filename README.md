@@ -79,6 +79,8 @@ In normal use you only set two refs:
 
 The matching `gateway` image is internal and is resolved from the cluster image. It is version-locked to that cluster image and should not be mixed with upstream OpenShell images.
 
+With stock upstream `openshell 0.0.12`, also set `IMAGE_REPO_BASE` to the openeral repo base when using canonical openeral image refs. Otherwise the CLI still defaults the internal gateway pull to upstream OpenShell.
+
 Unsupported combinations:
 
 - openeral `cluster` + upstream `gateway`
@@ -156,12 +158,15 @@ That is intentional:
 ## Start Gateway
 
 ```bash
-export OPENSHELL_CLUSTER_IMAGE='ghcr.io/sandys/openeral/cluster:latest'
+export OPENSHELL_CLUSTER_IMAGE='<provided-cluster-image-ref>'
+export IMAGE_REPO_BASE='<provided-gateway-repo-base>'
 export OPENSHELL_REGISTRY_HOST='ghcr.io'
 export OPENSHELL_GATEWAY_NAME=openeral
 
 openshell gateway start --name "$OPENSHELL_GATEWAY_NAME"
 ```
+
+If your cluster image ref is `ghcr.io/<owner>/openeral/cluster:<tag>`, then `IMAGE_REPO_BASE` should be `ghcr.io/<owner>/openeral`.
 
 ## Create Database Provider
 
@@ -179,7 +184,7 @@ openshell provider create \
 ## Launch Claude Code
 
 ```bash
-export OPENERAL_SANDBOX_IMAGE='ghcr.io/sandys/openeral/sandbox:latest'
+export OPENERAL_SANDBOX_IMAGE='<provided-sandbox-image-ref>'
 export OPENERAL_SANDBOX_NAME=openeral-demo
 
 set -a
@@ -210,9 +215,10 @@ The cluster image resolves the matching gateway image automatically. In normal u
 - `OPENSHELL_CLUSTER_IMAGE`
 - `OPENERAL_SANDBOX_IMAGE`
 
-Behind the scenes, the gateway image is still required and must come from the same openeral image set as the cluster image.
+Behind the scenes, the gateway image is still required and must come from the same openeral image set as the cluster image. With upstream `openshell 0.0.12`, `IMAGE_REPO_BASE` is the required hint that points that internal gateway pull at the openeral repo base instead of upstream.
 
 For repeatable deployments, prefer the same immutable tag for both refs, for example a release tag or `sha-<commit>`. `latest` is intended for atomic quickstarts, not for long-lived pinned environments.
+For repeatable deployments, prefer the provided immutable refs, for example a release tag or `sha-<commit>`. Do not assume the canonical `latest` tags exist or are the intended deployment channel.
 
 ## What OpenEral Provides
 

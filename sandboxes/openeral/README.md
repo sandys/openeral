@@ -43,6 +43,8 @@ Only two refs are user-facing:
 
 The `gateway` image is internal. It is resolved from the cluster image and must come from the same openeral image set.
 
+With stock upstream `openshell 0.0.12`, also set `IMAGE_REPO_BASE` to the openeral repo base when using canonical openeral image refs. Otherwise the CLI still defaults the internal gateway pull to upstream OpenShell.
+
 Unsupported combinations:
 
 - openeral `cluster` + upstream `gateway`
@@ -110,12 +112,15 @@ The cluster image is pulled by host Docker, so `127.0.0.1:5000` is correct there
 ## Start Gateway
 
 ```bash
-export OPENSHELL_CLUSTER_IMAGE='ghcr.io/sandys/openeral/cluster:latest'
+export OPENSHELL_CLUSTER_IMAGE='<provided-cluster-image-ref>'
+export IMAGE_REPO_BASE='<provided-gateway-repo-base>'
 export OPENSHELL_REGISTRY_HOST='ghcr.io'
 export OPENSHELL_GATEWAY_NAME=openeral
 
 openshell gateway start --name "$OPENSHELL_GATEWAY_NAME"
 ```
+
+If your cluster image ref is `ghcr.io/<owner>/openeral/cluster:<tag>`, then `IMAGE_REPO_BASE` should be `ghcr.io/<owner>/openeral`.
 
 ## Create Database Provider
 
@@ -133,7 +138,7 @@ openshell provider create \
 ## One-Command Launch
 
 ```bash
-export OPENERAL_SANDBOX_IMAGE='ghcr.io/sandys/openeral/sandbox:latest'
+export OPENERAL_SANDBOX_IMAGE='<provided-sandbox-image-ref>'
 export OPENERAL_SANDBOX_NAME=openeral-demo
 
 set -a
@@ -150,7 +155,7 @@ openshell sandbox create \
   --no-tty -- env HOME=/home/agent claude
 ```
 
-The cluster image resolves the matching gateway image automatically. The gateway image is still required, but it is not a user-facing input. For repeatable deployments, prefer the same immutable tag for both `OPENSHELL_CLUSTER_IMAGE` and `OPENERAL_SANDBOX_IMAGE`.
+The cluster image resolves the matching gateway image automatically. The gateway image is still required, but it is not a user-facing input. With upstream `openshell 0.0.12`, `IMAGE_REPO_BASE` is the required hint that points that internal gateway pull at the openeral repo base instead of upstream. For repeatable deployments, prefer the provided immutable refs, for example a release tag or `sha-<commit>`. Do not assume the canonical `latest` tags exist or are the intended deployment channel.
 
 This is the preferred and supported user flow:
 

@@ -19,7 +19,7 @@ Do not optimize for anything else first.
 
 If you only have upstream `openshell`, image refs, and a live database:
 
-1. start the gateway with the openeral cluster image
+1. start the gateway with the openeral cluster image and matching `IMAGE_REPO_BASE`
 2. create a generic provider from `DATABASE_URL`
 3. launch the sandbox with that provider plus `claude --auto-providers`
 
@@ -30,6 +30,8 @@ The runtime dependency is still a 3-image set:
 - custom `sandbox`
 
 Only `cluster` and `sandbox` are user-facing. The matching `gateway` image is resolved internally from the cluster image and must not be mixed with upstream OpenShell images.
+
+With upstream `openshell 0.0.12`, the gateway repo base still needs an explicit host-side hint. If the provided cluster image is `ghcr.io/<owner>/openeral/cluster:<tag>`, set `IMAGE_REPO_BASE=ghcr.io/<owner>/openeral` before `openshell gateway start`.
 
 The CLI itself is still the stock upstream `openshell` release. This repo changes the images behind that CLI flow, not the user-facing command surface.
 
