@@ -24,8 +24,72 @@ env:
   REGISTRY: ghcr.io
   IMAGE_REPO_BASE: ghcr.io/${{ github.repository_owner }}/openeral
   CANDIDATE_TAG: sha-${{ github.sha }}
+  OPENSHELL_IMAGE_CACHE_SCOPE: publish-openshell-images
 
 jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: pgmount
+          POSTGRES_PASSWORD: pgmount
+          POSTGRES_DB: testdb
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U pgmount"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust 1.85
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.85"
+          components: clippy
+
+      - name: Cache Rust dependencies and build outputs
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-rust-1.85
+          cache-workspaces: |
+            . -> target
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libfuse3-dev fuse3 pkg-config libpq-dev
+
+      - name: Build and clippy
+        env:
+          TEST_DATABASE_URL: "host=localhost user=pgmount password=pgmount dbname=testdb"
+        run: |
+          cargo clippy --all-targets
+          cargo test -p openeral-core --no-run
+
+      - name: Rust integration tests
+        env:
+          TEST_DATABASE_URL: "host=localhost user=pgmount password=pgmount dbname=testdb"
+        run: cargo test -p openeral-core
+
+      - name: FUSE mount integration tests
+        env:
+          PGPASSWORD: pgmount
+          DB_CONN: "host=localhost user=pgmount password=pgmount dbname=testdb"
+          DB_HOST: localhost
+          OPENERAL_TEST_MNT: /mnt/pgtest
+        run: |
+          sudo mkdir -p /mnt/pgtest
+          sudo chmod 777 /mnt/pgtest
+          sudo sed -i 's/#user_allow_other/user_allow_other/' /etc/fuse.conf || true
+          bash tests/test_fuse_mount.sh
+
   build-cluster:
     runs-on: ubuntu-latest
     permissions:
@@ -52,8 +116,8 @@ jobs:
           target: cluster
           push: true
           tags: ${{ env.IMAGE_REPO_BASE }}/cluster:${{ env.CANDIDATE_TAG }}
-          cache-from: type=gha,scope=publish-cluster
-          cache-to: type=gha,mode=max,scope=publish-cluster
+          cache-from: type=gha,scope=${{ env.OPENSHELL_IMAGE_CACHE_SCOPE }}
+          cache-to: type=gha,mode=max,scope=${{ env.OPENSHELL_IMAGE_CACHE_SCOPE }}
           build-args: |
             OPENERAL_DEFAULT_IMAGE_REPO_BASE=${{ env.IMAGE_REPO_BASE }}
             OPENERAL_DEFAULT_IMAGE_TAG=${{ env.CANDIDATE_TAG }}
@@ -84,8 +148,8 @@ jobs:
           target: gateway
           push: true
           tags: ${{ env.IMAGE_REPO_BASE }}/gateway:${{ env.CANDIDATE_TAG }}
-          cache-from: type=gha,scope=publish-gateway
-          cache-to: type=gha,mode=max,scope=publish-gateway
+          cache-from: type=gha,scope=${{ env.OPENSHELL_IMAGE_CACHE_SCOPE }}
+          cache-to: type=gha,mode=max,scope=${{ env.OPENSHELL_IMAGE_CACHE_SCOPE }}
           build-args: |
             OPENERAL_DEFAULT_IMAGE_REPO_BASE=${{ env.IMAGE_REPO_BASE }}
             OPENERAL_DEFAULT_IMAGE_TAG=${{ env.CANDIDATE_TAG }}
