@@ -155,6 +155,23 @@ That is intentional:
 - runtime control is exercised through the stock upstream `openshell` CLI
 - CI should not compile a vendored `openshell` CLI binary just to run smoke tests
 
+## Database Migrations
+
+`openeral` embeds its database migrations with `refinery`.
+
+That matters during upgrades:
+
+- the first upgraded `openeral` mount against a database auto-applies any pending `_openeral` schema migrations
+- if migrations fail, the mount fails instead of serving `/db` or `/home/agent` against a half-prepared schema
+
+In the normal OpenShell flow, auto-run is the expected path. If you have direct access to the `openeral` binary and want to prepare a database ahead of time, the explicit admin command is:
+
+```bash
+openeral migrate --connection "$DATABASE_URL"
+```
+
+If `--connection` is omitted, `openeral migrate` uses `OPENERAL_DATABASE_URL`.
+
 ## Start Gateway
 
 ```bash

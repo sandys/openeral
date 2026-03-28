@@ -166,6 +166,23 @@ This is the preferred and supported user flow:
 
 The same rule applies in CI: release smoke installs the upstream released `openshell` CLI and drives the published openeral images through that CLI path.
 
+## Database Migrations
+
+`openeral` carries its own embedded PostgreSQL migrations with `refinery`.
+
+That means image upgrades are self-contained:
+
+- the first upgraded mount auto-applies pending `_openeral` schema changes
+- if migrations fail, the sandbox does not get a working `/db` or `/home/agent` mount
+
+That auto-run path is the normal OpenShell behavior. If you are debugging or preparing a database manually and have direct access to the binary, you can run:
+
+```bash
+openeral migrate --connection "$DATABASE_URL"
+```
+
+Without `--connection`, the command falls back to `OPENERAL_DATABASE_URL`.
+
 ## Runtime Contract
 
 When the sandbox is healthy:

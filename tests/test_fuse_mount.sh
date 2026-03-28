@@ -102,6 +102,9 @@ DB_HOST="${DB_HOST:-$(echo "$DB_CONN" | grep -oP 'host=\K\S+')}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 OPENERAL_BIN="${OPENERAL_BIN:-$PROJECT_ROOT/target/debug/openeral}"
+OPENERAL_HELPER_LINK="/usr/local/bin/openeral"
+OPENERAL_HELPER_BACKUP=""
+OPENERAL_HELPER_CREATED=0
 
 # Issue #11: reliable cleanup via trap
 cleanup() {
@@ -111,6 +114,12 @@ cleanup() {
     fusermount -u /tmp/openeral_fuse3_test 2>/dev/null || true
     fusermount -u /tmp/openeral_fuse3_ws_test 2>/dev/null || true
     fusermount -u /tmp/openeral_fuse3_consistency 2>/dev/null || true
+    if [ "$OPENERAL_HELPER_CREATED" -eq 1 ]; then
+        rm -f "$OPENERAL_HELPER_LINK"
+        if [ -n "$OPENERAL_HELPER_BACKUP" ] && [ -e "$OPENERAL_HELPER_BACKUP" ]; then
+            mv "$OPENERAL_HELPER_BACKUP" "$OPENERAL_HELPER_LINK"
+        fi
+    fi
     if [ -n "${MOUNT_PID:-}" ]; then
         wait "$MOUNT_PID" 2>/dev/null || true
     fi
@@ -215,6 +224,21 @@ echo "Test data created"
 # Build openeral
 echo "Building openeral..."
 (cd "$PROJECT_ROOT" && cargo build 2>&1 | tail -1)
+
+if [ ! -x "$OPENERAL_BIN" ]; then
+    echo "Built openeral binary not found at $OPENERAL_BIN"
+    exit 1
+fi
+
+# mount.fuse3 resolves the filesystem helper from a standard system PATH,
+# not from this script's injected PATH. Install a temporary symlink so the
+# helper uses the exact binary that was just built for the test.
+if [ -e "$OPENERAL_HELPER_LINK" ] || [ -L "$OPENERAL_HELPER_LINK" ]; then
+    OPENERAL_HELPER_BACKUP="${OPENERAL_HELPER_LINK}.bak.$$"
+    mv "$OPENERAL_HELPER_LINK" "$OPENERAL_HELPER_BACKUP"
+fi
+ln -s "$OPENERAL_BIN" "$OPENERAL_HELPER_LINK"
+OPENERAL_HELPER_CREATED=1
 
 # Create mount point and mount
 mkdir -p "$MNT"
@@ -577,8 +601,7 @@ echo ""
 
 # ---- mount.fuse3 Integration Tests ----
 
-# Ensure openeral is in PATH for mount.fuse3 to find it.
-# Relying on /usr/local/bin symlinks is brittle in CI and unneeded here.
+# Keep PATH aligned with the freshly built binary for direct invocations too.
 OPENERAL_BIN_DIR="$(dirname "$OPENERAL_BIN")"
 case ":$PATH:" in
     *":$OPENERAL_BIN_DIR:"*) ;;

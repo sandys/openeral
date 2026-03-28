@@ -35,6 +35,8 @@ With upstream `openshell 0.0.12`, the gateway repo base still needs an explicit 
 
 The CLI itself is still the stock upstream `openshell` release. This repo changes the images behind that CLI flow, not the user-facing command surface.
 
+`openeral` also embeds its own database migrations. In the normal sandbox flow, those migrations auto-run before `/db` or `/home/agent` mounts come up. If you are debugging outside the normal mount path and have direct binary access, `openeral migrate` is the manual preflight/admin command.
+
 The supported Claude launch still remains:
 
 ```bash
@@ -114,5 +116,8 @@ Prefer targeted lookups through `.filter/` instead of browsing large page trees.
   - `HOME` was wrong
 - Claude auth or billing failure:
   - credential issue, not a mount issue
+
+- mount fails immediately after an image upgrade:
+  - check the embedded `openeral` migration path first
 
 Do not try ad hoc mount workarounds from inside the sandbox.

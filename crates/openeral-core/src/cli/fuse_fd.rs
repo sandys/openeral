@@ -25,7 +25,15 @@ use crate::error::FsError;
 use crate::fs::workspace::WorkspaceFilesystem;
 use crate::fs::PgmountFilesystem;
 
-const KNOWN_SUBCOMMANDS: &[&str] = &["mount", "unmount", "list", "version", "workspace", "help"];
+const KNOWN_SUBCOMMANDS: &[&str] = &[
+    "mount",
+    "migrate",
+    "unmount",
+    "list",
+    "version",
+    "workspace",
+    "help",
+];
 
 /// Detect mount.fuse3 invocation pattern.
 ///

@@ -3,10 +3,12 @@ use openeral_core::db::pool::create_pool;
 use openeral_core::db::queries::{indexes, introspection, rows, stats};
 use openeral_core::fs::cache::MetadataCache;
 use openeral_core::fs::inode::{InodeTable, NodeIdentity};
+use std::sync::OnceLock;
 use std::time::Duration;
 use tokio::sync::OnceCell;
 
 static SETUP_CELL: OnceCell<()> = OnceCell::const_new();
+static MIGRATION_TEST_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
 
 fn connection_string() -> String {
     std::env::var("TEST_DATABASE_URL")
@@ -49,6 +51,10 @@ async fn get_pool() -> deadpool_postgres::Pool {
     let pool = create_pool(&connection_string(), 30).unwrap();
     setup_db(&pool).await;
     pool
+}
+
+fn migration_test_lock() -> &'static tokio::sync::Mutex<()> {
+    MIGRATION_TEST_LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
 }
 
 const S: &str = "rust_test";
@@ -549,6 +555,7 @@ async fn test_exact_row_count_nonexistent_table() {
 
 #[tokio::test]
 async fn test_migrations_create_openeral_schema() {
+    let _guard = migration_test_lock().lock().await;
     let pool = get_pool().await;
 
     // Clean up from any previous test runs (including refinery's tracking table)
@@ -603,6 +610,7 @@ async fn test_migrations_create_openeral_schema() {
 
 #[tokio::test]
 async fn test_migrations_idempotent() {
+    let _guard = migration_test_lock().lock().await;
     let pool = get_pool().await;
 
     // Clean slate
@@ -625,6 +633,7 @@ async fn test_migrations_idempotent() {
 
 #[tokio::test]
 async fn test_log_mount_session() {
+    let _guard = migration_test_lock().lock().await;
     let pool = get_pool().await;
 
     // Clean slate, then run migrations fresh

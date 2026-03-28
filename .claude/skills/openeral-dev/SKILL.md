@@ -65,6 +65,16 @@ If a change affects the OpenShell path, rerun the full flow from scratch.
 
 In CI and release smoke, use the upstream OpenShell installer/release path for the CLI. Do not add vendored `openshell-cli` builds just to run smoke.
 
+## Migration Contract
+
+`openeral` owns its PostgreSQL schema migrations.
+
+- binary or image upgrades are expected to auto-run pending migrations on first mount
+- mounts must fail closed if migrations cannot be applied
+- `openeral migrate` is the explicit admin/preflight command when you have direct binary access
+
+Do not introduce a separate external migration tool for the supported product flow.
+
 ## Local Rust Validation
 
 Use the Docker dev environment:

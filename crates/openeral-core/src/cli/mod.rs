@@ -1,5 +1,6 @@
 pub mod fuse_fd;
 pub mod list;
+pub mod migrate;
 pub mod mount;
 pub mod unmount;
 pub mod version;
@@ -24,6 +25,8 @@ pub struct Cli {
 pub enum Commands {
     /// Mount a PostgreSQL database
     Mount(mount::MountArgs),
+    /// Run pending database migrations
+    Migrate(migrate::MigrateArgs),
     /// Unmount a previously mounted database
     Unmount(unmount::UnmountArgs),
     /// List active mounts
@@ -38,6 +41,7 @@ pub async fn run() -> Result<(), FsError> {
     let cli = Cli::parse();
     match cli.command {
         Commands::Mount(args) => mount::execute(args).await,
+        Commands::Migrate(args) => migrate::execute(args).await,
         Commands::Unmount(args) => unmount::execute(args).await,
         Commands::List => list::execute().await,
         Commands::Version => {
@@ -45,5 +49,17 @@ pub async fn run() -> Result<(), FsError> {
             Ok(())
         }
         Commands::Workspace(args) => workspace::execute(args).await,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn test_parse_migrate_subcommand() {
+        let cli = Cli::try_parse_from(["openeral", "migrate"]).unwrap();
+        assert!(matches!(cli.command, Commands::Migrate(_)));
     }
 }
