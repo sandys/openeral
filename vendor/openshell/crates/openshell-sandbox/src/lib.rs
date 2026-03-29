@@ -37,11 +37,12 @@ use tracing::{debug, error, info, trace, warn};
 
 use crate::identity::BinaryIdentityCache;
 use crate::l7::tls::{
-    CertCache, ProxyTlsState, SandboxCa, build_upstream_client_config, write_ca_files,
+    CertCache, ProxyTlsState, SandboxCa, build_upstream_client_config,
+    write_ca_files_with_extra_certs,
 };
 use crate::opa::OpaEngine;
 use crate::policy::{NetworkMode, NetworkPolicy, ProxyPolicy, SandboxPolicy};
-use crate::proxy::ProxyHandle;
+use crate::proxy::{PackageProxyConfig, ProxyHandle};
 #[cfg(target_os = "linux")]
 use crate::sandbox::linux::netns::NetworkNamespace;
 use crate::secrets::SecretResolver;
@@ -211,6 +212,11 @@ pub async fn run_sandbox(
 
     let (provider_env, secret_resolver) = SecretResolver::from_provider_env(provider_env);
     let secret_resolver = secret_resolver.map(Arc::new);
+    let package_proxy = PackageProxyConfig::from_env()?;
+    let package_proxy_extra_certs = package_proxy
+        .as_ref()
+        .map(PackageProxyConfig::extra_ca_paths)
+        .unwrap_or_default();
 
     // Create identity cache for SHA256 TOFU when OPA is active
     let identity_cache = opa_engine
@@ -223,7 +229,7 @@ pub async fn run_sandbox(
         match SandboxCa::generate() {
             Ok(ca) => {
                 let tls_dir = std::path::Path::new("/etc/openshell-tls");
-                match write_ca_files(&ca, tls_dir) {
+                match write_ca_files_with_extra_certs(&ca, tls_dir, &package_proxy_extra_certs) {
                     Ok(paths) => {
                         // /etc/openshell-tls is subsumed by the /etc baseline
                         // path injected by enrich_*_baseline_paths(), so no
@@ -353,6 +359,7 @@ pub async fn run_sandbox(
             tls_state,
             inference_ctx,
             secret_resolver.clone(),
+            package_proxy.clone(),
             denial_tx,
         )
         .await?;

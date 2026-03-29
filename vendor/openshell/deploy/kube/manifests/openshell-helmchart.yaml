@@ -31,6 +31,12 @@ spec:
     server:
       sandboxImage: ghcr.io/nvidia/openshell-community/sandboxes/base:latest
       sandboxFuseResourceName: github.com/fuse
+      packageProxy:
+        enabled: __PACKAGE_PROXY_ENABLED__
+        profile: "__PACKAGE_PROXY_PROFILE__"
+        upstreamUrl: "__PACKAGE_PROXY_UPSTREAM_URL__"
+        caSecretName: "__PACKAGE_PROXY_CA_SECRET_NAME__"
+        authSecretName: "__PACKAGE_PROXY_AUTH_SECRET_NAME__"
       sshGatewayHost: __SSH_GATEWAY_HOST__
       sshGatewayPort: __SSH_GATEWAY_PORT__
       sshHandshakeSecret: __SSH_HANDSHAKE_SECRET__

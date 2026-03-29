@@ -437,6 +437,24 @@ if [ -n "${IMAGE_PULL_POLICY:-}" ] && [ -f "$HELMCHART" ]; then
     sed -i "s|pullPolicy: Always|pullPolicy: ${IMAGE_PULL_POLICY}|" "$HELMCHART"
 fi
 
+package_proxy_enabled="${OPENERAL_PACKAGE_PROXY_ENABLED:-false}"
+case "$package_proxy_enabled" in
+    1|true|TRUE|yes|YES|on|ON) package_proxy_enabled=true ;;
+    *) package_proxy_enabled=false ;;
+esac
+package_proxy_profile="${OPENERAL_PACKAGE_PROXY_PROFILE:-socket}"
+package_proxy_upstream_url="${OPENERAL_PACKAGE_PROXY_UPSTREAM_URL:-}"
+package_proxy_ca_secret_name="${OPENERAL_PACKAGE_PROXY_CA_SECRET_NAME:-}"
+package_proxy_auth_secret_name="${OPENERAL_PACKAGE_PROXY_AUTH_SECRET_NAME:-}"
+
+if [ -f "$HELMCHART" ]; then
+    sed -i "s|__PACKAGE_PROXY_ENABLED__|${package_proxy_enabled}|g" "$HELMCHART"
+    sed -i "s|__PACKAGE_PROXY_PROFILE__|${package_proxy_profile}|g" "$HELMCHART"
+    sed -i "s|__PACKAGE_PROXY_UPSTREAM_URL__|${package_proxy_upstream_url}|g" "$HELMCHART"
+    sed -i "s|__PACKAGE_PROXY_CA_SECRET_NAME__|${package_proxy_ca_secret_name}|g" "$HELMCHART"
+    sed -i "s|__PACKAGE_PROXY_AUTH_SECRET_NAME__|${package_proxy_auth_secret_name}|g" "$HELMCHART"
+fi
+
 # Generate a random SSH handshake secret for the NSSH1 HMAC handshake between
 # the gateway and sandbox SSH servers. This is required — the server will refuse
 # to start without it.

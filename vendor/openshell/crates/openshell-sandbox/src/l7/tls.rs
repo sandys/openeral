@@ -199,15 +199,33 @@ pub async fn tls_connect_upstream(
 
 /// Build a rustls `ClientConfig` with Mozilla root CAs for upstream connections.
 pub fn build_upstream_client_config() -> Arc<ClientConfig> {
+    build_upstream_client_config_with_extra_certs(&[])
+        .expect("default upstream TLS config should always build")
+}
+
+/// Build a rustls `ClientConfig` with Mozilla roots plus extra PEM bundles.
+pub fn build_upstream_client_config_with_extra_certs(
+    extra_cert_paths: &[PathBuf],
+) -> Result<Arc<ClientConfig>> {
     let mut root_store = rustls::RootCertStore::empty();
     root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    for path in extra_cert_paths {
+        let certs = parse_pem_certs(path)?;
+        let (added, ignored) = root_store.add_parsable_certificates(certs);
+        if added == 0 {
+            return Err(miette::miette!(
+                "no usable certificates found in extra CA bundle {} (ignored {ignored})",
+                path.display()
+            ));
+        }
+    }
 
     let mut config = ClientConfig::builder()
         .with_root_certificates(root_store)
         .with_no_client_auth();
     config.alpn_protocols = vec![b"http/1.1".to_vec()];
 
-    Arc::new(config)
+    Ok(Arc::new(config))
 }
 
 /// Write CA certificate files for the sandbox trust store.
@@ -218,6 +236,15 @@ pub fn build_upstream_client_config() -> Arc<ClientConfig> {
 ///
 /// Returns `(ca_cert_path, combined_bundle_path)`.
 pub fn write_ca_files(ca: &SandboxCa, output_dir: &Path) -> Result<(PathBuf, PathBuf)> {
+    write_ca_files_with_extra_certs(ca, output_dir, &[])
+}
+
+/// Write CA certificate files for the sandbox trust store, optionally appending extra PEM bundles.
+pub fn write_ca_files_with_extra_certs(
+    ca: &SandboxCa,
+    output_dir: &Path,
+    extra_cert_paths: &[PathBuf],
+) -> Result<(PathBuf, PathBuf)> {
     std::fs::create_dir_all(output_dir).into_diagnostic()?;
 
     let ca_cert_path = output_dir.join("openshell-ca.pem");
@@ -229,6 +256,16 @@ pub fn write_ca_files(ca: &SandboxCa, output_dir: &Path) -> Result<(PathBuf, Pat
         combined.push('\n');
     }
     combined.push_str(ca.cert_pem());
+    for extra_path in extra_cert_paths {
+        let extra = std::fs::read_to_string(extra_path).into_diagnostic()?;
+        if !combined.ends_with('\n') {
+            combined.push('\n');
+        }
+        combined.push_str(&extra);
+        if !combined.ends_with('\n') {
+            combined.push('\n');
+        }
+    }
 
     let combined_path = output_dir.join("ca-bundle.pem");
     std::fs::write(&combined_path, &combined).into_diagnostic()?;

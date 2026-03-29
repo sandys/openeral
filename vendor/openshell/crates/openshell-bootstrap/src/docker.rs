@@ -714,6 +714,22 @@ pub async fn ensure_container(
         env_vars.push("GPU_ENABLED=true".to_string());
     }
 
+    if let Some(enabled) = env_non_empty("OPENERAL_PACKAGE_PROXY_ENABLED") {
+        env_vars.push(format!("OPENERAL_PACKAGE_PROXY_ENABLED={enabled}"));
+    }
+    if let Some(profile) = env_non_empty("OPENERAL_PACKAGE_PROXY_PROFILE") {
+        env_vars.push(format!("OPENERAL_PACKAGE_PROXY_PROFILE={profile}"));
+    }
+    if let Some(upstream_url) = env_non_empty("OPENERAL_PACKAGE_PROXY_UPSTREAM_URL") {
+        env_vars.push(format!("OPENERAL_PACKAGE_PROXY_UPSTREAM_URL={upstream_url}"));
+    }
+    if let Some(ca_secret_name) = env_non_empty("OPENERAL_PACKAGE_PROXY_CA_SECRET_NAME") {
+        env_vars.push(format!("OPENERAL_PACKAGE_PROXY_CA_SECRET_NAME={ca_secret_name}"));
+    }
+    if let Some(auth_secret_name) = env_non_empty("OPENERAL_PACKAGE_PROXY_AUTH_SECRET_NAME") {
+        env_vars.push(format!("OPENERAL_PACKAGE_PROXY_AUTH_SECRET_NAME={auth_secret_name}"));
+    }
+
     let env = Some(env_vars);
 
     let config = ContainerCreateBody {

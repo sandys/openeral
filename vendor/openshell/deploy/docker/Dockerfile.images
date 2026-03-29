@@ -25,6 +25,7 @@ ARG LOCAL_PATH_PROVISIONER_IMAGE=rancher/local-path-provisioner:v0.0.34
 ARG METRICS_SERVER_IMAGE=rancher/mirrored-metrics-server:v0.8.1
 ARG GENERIC_DEVICE_PLUGIN_IMAGE=squat/generic-device-plugin:0.1.0
 ARG AGENT_SANDBOX_CONTROLLER_IMAGE=registry.k8s.io/agent-sandbox/agent-sandbox-controller:v0.1.0
+ARG LOCAL_PATH_HELPER_IMAGE=rancher/mirrored-library-busybox:1.37.0
 
 # ---------------------------------------------------------------------------
 # Shared Rust build stages
@@ -242,6 +243,7 @@ ARG LOCAL_PATH_PROVISIONER_IMAGE
 ARG METRICS_SERVER_IMAGE
 ARG GENERIC_DEVICE_PLUGIN_IMAGE
 ARG AGENT_SANDBOX_CONTROLLER_IMAGE
+ARG LOCAL_PATH_HELPER_IMAGE
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates curl && rm -rf /var/lib/apt/lists/*
@@ -262,7 +264,8 @@ RUN mkdir -p /preload && \
       "${LOCAL_PATH_PROVISIONER_IMAGE}" \
       "${METRICS_SERVER_IMAGE}" \
       "${GENERIC_DEVICE_PLUGIN_IMAGE}" \
-      "${AGENT_SANDBOX_CONTROLLER_IMAGE}"; do \
+      "${AGENT_SANDBOX_CONTROLLER_IMAGE}" \
+      "${LOCAL_PATH_HELPER_IMAGE}"; do \
       safe_name=$(printf '%s' "$image" | tr '/:@' '____'); \
       crane pull "$image" "/preload/${safe_name}.tar"; \
     done
@@ -273,6 +276,11 @@ RUN mkdir -p /preload && \
 FROM nvcr.io/nvidia/base/ubuntu:noble-20251013 AS cluster
 ARG OPENERAL_DEFAULT_IMAGE_REPO_BASE
 ARG OPENERAL_DEFAULT_IMAGE_TAG
+ARG OPENERAL_DEFAULT_PACKAGE_PROXY_ENABLED=false
+ARG OPENERAL_DEFAULT_PACKAGE_PROXY_PROFILE=""
+ARG OPENERAL_DEFAULT_PACKAGE_PROXY_UPSTREAM_URL=""
+ARG OPENERAL_DEFAULT_PACKAGE_PROXY_CA_SECRET_NAME=""
+ARG OPENERAL_DEFAULT_PACKAGE_PROXY_AUTH_SECRET_NAME=""
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
@@ -290,7 +298,12 @@ COPY --from=k3s /usr/share/zoneinfo/ /usr/share/zoneinfo/
 ENV PATH="/var/lib/rancher/k3s/data/cni:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/bin/aux" \
     CRI_CONFIG_FILE="/var/lib/rancher/k3s/agent/etc/crictl.yaml" \
     OPENERAL_DEFAULT_IMAGE_REPO_BASE="${OPENERAL_DEFAULT_IMAGE_REPO_BASE}" \
-    OPENERAL_DEFAULT_IMAGE_TAG="${OPENERAL_DEFAULT_IMAGE_TAG}"
+    OPENERAL_DEFAULT_IMAGE_TAG="${OPENERAL_DEFAULT_IMAGE_TAG}" \
+    OPENERAL_PACKAGE_PROXY_ENABLED="${OPENERAL_DEFAULT_PACKAGE_PROXY_ENABLED}" \
+    OPENERAL_PACKAGE_PROXY_PROFILE="${OPENERAL_DEFAULT_PACKAGE_PROXY_PROFILE}" \
+    OPENERAL_PACKAGE_PROXY_UPSTREAM_URL="${OPENERAL_DEFAULT_PACKAGE_PROXY_UPSTREAM_URL}" \
+    OPENERAL_PACKAGE_PROXY_CA_SECRET_NAME="${OPENERAL_DEFAULT_PACKAGE_PROXY_CA_SECRET_NAME}" \
+    OPENERAL_PACKAGE_PROXY_AUTH_SECRET_NAME="${OPENERAL_DEFAULT_PACKAGE_PROXY_AUTH_SECRET_NAME}"
 
 COPY --from=nvidia-toolkit /usr/bin/nvidia-cdi-hook /usr/bin/
 COPY --from=nvidia-toolkit /usr/bin/nvidia-container-runtime /usr/bin/

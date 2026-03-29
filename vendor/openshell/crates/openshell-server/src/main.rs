@@ -103,6 +103,26 @@ struct Args {
     #[arg(long, env = "OPENSHELL_SANDBOX_FUSE_RESOURCE_NAME")]
     sandbox_fuse_resource_name: Option<String>,
 
+    /// Enable package-proxy routing support for sandbox pods by default.
+    #[arg(long, env = "OPENERAL_PACKAGE_PROXY_ENABLED", default_value_t = false)]
+    package_proxy_enabled: bool,
+
+    /// Routing profile name used for package-proxy endpoints.
+    #[arg(long, env = "OPENERAL_PACKAGE_PROXY_PROFILE")]
+    package_proxy_profile: Option<String>,
+
+    /// Upstream proxy URL used for package-proxy endpoints.
+    #[arg(long, env = "OPENERAL_PACKAGE_PROXY_UPSTREAM_URL")]
+    package_proxy_upstream_url: Option<String>,
+
+    /// Kubernetes secret name containing the package-proxy CA bundle for sandbox pods.
+    #[arg(long, env = "OPENERAL_PACKAGE_PROXY_CA_SECRET_NAME")]
+    package_proxy_ca_secret_name: Option<String>,
+
+    /// Kubernetes secret name containing package-proxy auth material for sandbox pods.
+    #[arg(long, env = "OPENERAL_PACKAGE_PROXY_AUTH_SECRET_NAME")]
+    package_proxy_auth_secret_name: Option<String>,
+
     /// Disable TLS entirely — listen on plaintext HTTP.
     /// Use this when the gateway sits behind a reverse proxy or tunnel
     /// (e.g. Cloudflare Tunnel) that terminates TLS at the edge.
@@ -196,6 +216,24 @@ async fn main() -> Result<()> {
 
     if let Some(name) = args.sandbox_fuse_resource_name {
         config = config.with_sandbox_fuse_resource_name(name);
+    }
+
+    config = config.with_package_proxy_enabled(args.package_proxy_enabled);
+
+    if let Some(profile) = args.package_proxy_profile {
+        config = config.with_package_proxy_profile(profile);
+    }
+
+    if let Some(url) = args.package_proxy_upstream_url {
+        config = config.with_package_proxy_upstream_url(url);
+    }
+
+    if let Some(name) = args.package_proxy_ca_secret_name {
+        config = config.with_package_proxy_ca_secret_name(name);
+    }
+
+    if let Some(name) = args.package_proxy_auth_secret_name {
+        config = config.with_package_proxy_auth_secret_name(name);
     }
 
     if args.disable_tls {

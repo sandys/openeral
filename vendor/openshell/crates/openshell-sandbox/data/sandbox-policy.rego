@@ -234,10 +234,10 @@ command_matches(actual, expected) if {
 	upper(actual) == upper(expected)
 }
 
-# --- Matched endpoint config (for L7 and allowed_ips extraction) ---
+# --- Matched endpoint config (for L7, allowed_ips, and egress routing extraction) ---
 # Returns the raw endpoint object for the matched policy + host:port.
-# Used by Rust to extract L7 config (protocol, tls, enforcement) and/or
-# allowed_ips for SSRF allowlist validation.
+# Used by Rust to extract L7 config (protocol, tls, enforcement), allowed_ips
+# for SSRF allowlist validation, and optional egress routing metadata.
 
 # Collect all matching endpoint configs into an array to avoid complete-rule
 # conflicts when multiple policies cover the same endpoint.  Return the first.
@@ -277,11 +277,20 @@ endpoint_matches_request(ep, network) if {
 	ep.ports[_] == network.port
 }
 
-# An endpoint has extended config if it specifies L7 protocol or allowed_ips.
+# An endpoint has extended config if it specifies L7 protocol, allowed_ips,
+# or custom egress routing metadata.
 endpoint_has_extended_config(ep) if {
 	ep.protocol
 }
 
 endpoint_has_extended_config(ep) if {
 	count(object.get(ep, "allowed_ips", [])) > 0
+}
+
+endpoint_has_extended_config(ep) if {
+	object.get(ep, "egress_via", "") != ""
+}
+
+endpoint_has_extended_config(ep) if {
+	object.get(ep, "egress_profile", "") != ""
 }

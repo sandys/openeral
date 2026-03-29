@@ -35,6 +35,12 @@ const GPU_RUNTIME_CLASS_NAME: &str = "nvidia";
 const GPU_RESOURCE_NAME: &str = "nvidia.com/gpu";
 const GPU_RESOURCE_QUANTITY: &str = "1";
 const FUSE_RESOURCE_QUANTITY: &str = "1";
+const PACKAGE_PROXY_CA_VOLUME_NAME: &str = "openeral-package-proxy-ca";
+const PACKAGE_PROXY_CA_MOUNT_PATH: &str = "/etc/openeral-package-proxy-ca";
+const PACKAGE_PROXY_CA_FILE: &str = "/etc/openeral-package-proxy-ca/ca.crt";
+const PACKAGE_PROXY_AUTH_VOLUME_NAME: &str = "openeral-package-proxy-auth";
+const PACKAGE_PROXY_AUTH_MOUNT_PATH: &str = "/etc/openeral-package-proxy-auth";
+const PACKAGE_PROXY_AUTH_FILE: &str = "/etc/openeral-package-proxy-auth/authorization";
 
 #[derive(Clone)]
 pub struct SandboxClient {
@@ -56,6 +62,16 @@ pub struct SandboxClient {
     /// When non-empty, sandbox pods request this extended resource to trigger
     /// kubelet device-plugin allocation for `/dev/fuse`.
     sandbox_fuse_resource_name: String,
+    /// Whether sandbox pods should default to package-proxy routing support.
+    package_proxy_enabled: bool,
+    /// Routing profile for package-proxy endpoints.
+    package_proxy_profile: String,
+    /// Upstream proxy URL used for package-proxy endpoints.
+    package_proxy_upstream_url: String,
+    /// Secret name mounted into sandbox pods for the package-proxy CA bundle.
+    package_proxy_ca_secret_name: String,
+    /// Secret name mounted into sandbox pods for package-proxy auth material.
+    package_proxy_auth_secret_name: String,
 }
 
 impl std::fmt::Debug for SandboxClient {
@@ -80,6 +96,11 @@ impl SandboxClient {
         client_tls_secret_name: String,
         host_gateway_ip: String,
         sandbox_fuse_resource_name: String,
+        package_proxy_enabled: bool,
+        package_proxy_profile: String,
+        package_proxy_upstream_url: String,
+        package_proxy_ca_secret_name: String,
+        package_proxy_auth_secret_name: String,
     ) -> Result<Self, KubeError> {
         let mut config = match kube::Config::incluster() {
             Ok(c) => c,
@@ -103,6 +124,11 @@ impl SandboxClient {
             client_tls_secret_name,
             host_gateway_ip,
             sandbox_fuse_resource_name,
+            package_proxy_enabled,
+            package_proxy_profile,
+            package_proxy_upstream_url,
+            package_proxy_ca_secret_name,
+            package_proxy_auth_secret_name,
         })
     }
 
@@ -219,6 +245,11 @@ impl SandboxClient {
             &self.client_tls_secret_name,
             &self.host_gateway_ip,
             &self.sandbox_fuse_resource_name,
+            self.package_proxy_enabled,
+            &self.package_proxy_profile,
+            &self.package_proxy_upstream_url,
+            &self.package_proxy_ca_secret_name,
+            &self.package_proxy_auth_secret_name,
         );
         let api = self.api();
 
@@ -774,6 +805,11 @@ fn sandbox_to_k8s_spec(
     client_tls_secret_name: &str,
     host_gateway_ip: &str,
     sandbox_fuse_resource_name: &str,
+    package_proxy_enabled: bool,
+    package_proxy_profile: &str,
+    package_proxy_upstream_url: &str,
+    package_proxy_ca_secret_name: &str,
+    package_proxy_auth_secret_name: &str,
 ) -> serde_json::Value {
     let mut root = serde_json::Map::new();
     if let Some(spec) = spec {
@@ -804,6 +840,11 @@ fn sandbox_to_k8s_spec(
                     client_tls_secret_name,
                     host_gateway_ip,
                     sandbox_fuse_resource_name,
+                    package_proxy_enabled,
+                    package_proxy_profile,
+                    package_proxy_upstream_url,
+                    package_proxy_ca_secret_name,
+                    package_proxy_auth_secret_name,
                 ),
             );
             if !template.agent_socket.is_empty() {
@@ -839,6 +880,11 @@ fn sandbox_to_k8s_spec(
                 client_tls_secret_name,
                 host_gateway_ip,
                 sandbox_fuse_resource_name,
+                package_proxy_enabled,
+                package_proxy_profile,
+                package_proxy_upstream_url,
+                package_proxy_ca_secret_name,
+                package_proxy_auth_secret_name,
             ),
         );
     }
@@ -864,6 +910,11 @@ fn sandbox_template_to_k8s(
     client_tls_secret_name: &str,
     host_gateway_ip: &str,
     sandbox_fuse_resource_name: &str,
+    package_proxy_enabled: bool,
+    package_proxy_profile: &str,
+    package_proxy_upstream_url: &str,
+    package_proxy_ca_secret_name: &str,
+    package_proxy_auth_secret_name: &str,
 ) -> serde_json::Value {
     if let Some(pod_template) = struct_to_json(&template.pod_template) {
         return inject_pod_template(
@@ -882,6 +933,11 @@ fn sandbox_template_to_k8s(
             client_tls_secret_name,
             host_gateway_ip,
             sandbox_fuse_resource_name,
+            package_proxy_enabled,
+            package_proxy_profile,
+            package_proxy_upstream_url,
+            package_proxy_ca_secret_name,
+            package_proxy_auth_secret_name,
         );
     }
 
@@ -942,6 +998,11 @@ fn sandbox_template_to_k8s(
         ssh_handshake_secret,
         ssh_handshake_skew_secs,
         !client_tls_secret_name.is_empty(),
+        package_proxy_enabled,
+        package_proxy_profile,
+        package_proxy_upstream_url,
+        !package_proxy_ca_secret_name.is_empty(),
+        !package_proxy_auth_secret_name.is_empty(),
     );
 
     container.insert("env".to_string(), serde_json::Value::Array(env));
@@ -961,15 +1022,32 @@ fn sandbox_template_to_k8s(
         }),
     );
 
-    // Mount client TLS secret for mTLS to the server.
+    let mut volume_mounts = Vec::new();
     if !client_tls_secret_name.is_empty() {
+        volume_mounts.push(serde_json::json!({
+            "name": "openshell-client-tls",
+            "mountPath": "/etc/openshell-tls/client",
+            "readOnly": true
+        }));
+    }
+    if !package_proxy_ca_secret_name.is_empty() {
+        volume_mounts.push(serde_json::json!({
+            "name": PACKAGE_PROXY_CA_VOLUME_NAME,
+            "mountPath": PACKAGE_PROXY_CA_MOUNT_PATH,
+            "readOnly": true
+        }));
+    }
+    if !package_proxy_auth_secret_name.is_empty() {
+        volume_mounts.push(serde_json::json!({
+            "name": PACKAGE_PROXY_AUTH_VOLUME_NAME,
+            "mountPath": PACKAGE_PROXY_AUTH_MOUNT_PATH,
+            "readOnly": true
+        }));
+    }
+    if !volume_mounts.is_empty() {
         container.insert(
             "volumeMounts".to_string(),
-            serde_json::json!([{
-                "name": "openshell-client-tls",
-                "mountPath": "/etc/openshell-tls/client",
-                "readOnly": true
-            }]),
+            serde_json::Value::Array(volume_mounts),
         );
     }
 
@@ -988,16 +1066,27 @@ fn sandbox_template_to_k8s(
         serde_json::Value::Array(vec![serde_json::Value::Object(container)]),
     );
 
-    // Add TLS secret volume.  Mode 0400 (owner-read) prevents the
-    // unprivileged sandbox user from reading the mTLS private key.
+    let mut volumes = Vec::new();
     if !client_tls_secret_name.is_empty() {
-        spec.insert(
-            "volumes".to_string(),
-            serde_json::json!([{
-                "name": "openshell-client-tls",
-                "secret": { "secretName": client_tls_secret_name, "defaultMode": 256 }
-            }]),
-        );
+        volumes.push(serde_json::json!({
+            "name": "openshell-client-tls",
+            "secret": { "secretName": client_tls_secret_name, "defaultMode": 256 }
+        }));
+    }
+    if !package_proxy_ca_secret_name.is_empty() {
+        volumes.push(serde_json::json!({
+            "name": PACKAGE_PROXY_CA_VOLUME_NAME,
+            "secret": { "secretName": package_proxy_ca_secret_name, "defaultMode": 256 }
+        }));
+    }
+    if !package_proxy_auth_secret_name.is_empty() {
+        volumes.push(serde_json::json!({
+            "name": PACKAGE_PROXY_AUTH_VOLUME_NAME,
+            "secret": { "secretName": package_proxy_auth_secret_name, "defaultMode": 256 }
+        }));
+    }
+    if !volumes.is_empty() {
+        spec.insert("volumes".to_string(), serde_json::Value::Array(volumes));
     }
 
     // Add hostAliases so sandbox pods can reach the Docker host.
@@ -1042,6 +1131,11 @@ fn inject_pod_template(
     client_tls_secret_name: &str,
     host_gateway_ip: &str,
     sandbox_fuse_resource_name: &str,
+    package_proxy_enabled: bool,
+    package_proxy_profile: &str,
+    package_proxy_upstream_url: &str,
+    package_proxy_ca_secret_name: &str,
+    package_proxy_auth_secret_name: &str,
 ) -> serde_json::Value {
     let Some(spec) = pod_template
         .get_mut("spec")
@@ -1081,6 +1175,28 @@ fn inject_pod_template(
             }));
         }
     }
+    if !package_proxy_ca_secret_name.is_empty() {
+        let volumes = spec
+            .entry("volumes")
+            .or_insert_with(|| serde_json::Value::Array(Vec::new()));
+        if let Some(volumes_arr) = volumes.as_array_mut() {
+            volumes_arr.push(serde_json::json!({
+                "name": PACKAGE_PROXY_CA_VOLUME_NAME,
+                "secret": { "secretName": package_proxy_ca_secret_name, "defaultMode": 256 }
+            }));
+        }
+    }
+    if !package_proxy_auth_secret_name.is_empty() {
+        let volumes = spec
+            .entry("volumes")
+            .or_insert_with(|| serde_json::Value::Array(Vec::new()));
+        if let Some(volumes_arr) = volumes.as_array_mut() {
+            volumes_arr.push(serde_json::json!({
+                "name": PACKAGE_PROXY_AUTH_VOLUME_NAME,
+                "secret": { "secretName": package_proxy_auth_secret_name, "defaultMode": 256 }
+            }));
+        }
+    }
 
     let Some(containers) = spec
         .get_mut("containers")
@@ -1112,6 +1228,11 @@ fn inject_pod_template(
             ssh_handshake_skew_secs,
             spec_environment,
             !client_tls_secret_name.is_empty(),
+            package_proxy_enabled,
+            package_proxy_profile,
+            package_proxy_upstream_url,
+            !package_proxy_ca_secret_name.is_empty(),
+            !package_proxy_auth_secret_name.is_empty(),
         );
 
         // Inject imagePullPolicy on the agent container.
@@ -1135,6 +1256,34 @@ fn inject_pod_template(
                 mounts_arr.push(serde_json::json!({
                     "name": "openshell-client-tls",
                     "mountPath": "/etc/openshell-tls/client",
+                    "readOnly": true
+                }));
+            }
+        }
+        if !package_proxy_ca_secret_name.is_empty()
+            && let Some(container_obj) = container.as_object_mut()
+        {
+            let mounts = container_obj
+                .entry("volumeMounts")
+                .or_insert_with(|| serde_json::Value::Array(Vec::new()));
+            if let Some(mounts_arr) = mounts.as_array_mut() {
+                mounts_arr.push(serde_json::json!({
+                    "name": PACKAGE_PROXY_CA_VOLUME_NAME,
+                    "mountPath": PACKAGE_PROXY_CA_MOUNT_PATH,
+                    "readOnly": true
+                }));
+            }
+        }
+        if !package_proxy_auth_secret_name.is_empty()
+            && let Some(container_obj) = container.as_object_mut()
+        {
+            let mounts = container_obj
+                .entry("volumeMounts")
+                .or_insert_with(|| serde_json::Value::Array(Vec::new()));
+            if let Some(mounts_arr) = mounts.as_array_mut() {
+                mounts_arr.push(serde_json::json!({
+                    "name": PACKAGE_PROXY_AUTH_VOLUME_NAME,
+                    "mountPath": PACKAGE_PROXY_AUTH_MOUNT_PATH,
                     "readOnly": true
                 }));
             }
@@ -1229,6 +1378,11 @@ fn update_container_env(
     ssh_handshake_skew_secs: u64,
     spec_environment: &std::collections::HashMap<String, String>,
     tls_enabled: bool,
+    package_proxy_enabled: bool,
+    package_proxy_profile: &str,
+    package_proxy_upstream_url: &str,
+    package_proxy_ca_enabled: bool,
+    package_proxy_auth_enabled: bool,
 ) {
     let Some(container_obj) = container.as_object_mut() else {
         return;
@@ -1248,6 +1402,11 @@ fn update_container_env(
         ssh_handshake_secret,
         ssh_handshake_skew_secs,
         tls_enabled,
+        package_proxy_enabled,
+        package_proxy_profile,
+        package_proxy_upstream_url,
+        package_proxy_ca_enabled,
+        package_proxy_auth_enabled,
     );
     container_obj.insert("env".to_string(), serde_json::Value::Array(env));
 }
@@ -1264,10 +1423,23 @@ fn build_env_list(
     ssh_handshake_secret: &str,
     ssh_handshake_skew_secs: u64,
     tls_enabled: bool,
+    package_proxy_enabled: bool,
+    package_proxy_profile: &str,
+    package_proxy_upstream_url: &str,
+    package_proxy_ca_enabled: bool,
+    package_proxy_auth_enabled: bool,
 ) -> Vec<serde_json::Value> {
     let mut env = existing_env.cloned().unwrap_or_default();
     apply_env_map(&mut env, template_environment);
     apply_env_map(&mut env, spec_environment);
+    apply_package_proxy_defaults(
+        &mut env,
+        package_proxy_enabled,
+        package_proxy_profile,
+        package_proxy_upstream_url,
+        package_proxy_ca_enabled,
+        package_proxy_auth_enabled,
+    );
     apply_required_env(
         &mut env,
         sandbox_id,
@@ -1279,6 +1451,35 @@ fn build_env_list(
         tls_enabled,
     );
     env
+}
+
+fn apply_package_proxy_defaults(
+    env: &mut Vec<serde_json::Value>,
+    enabled: bool,
+    profile: &str,
+    upstream_url: &str,
+    ca_enabled: bool,
+    auth_enabled: bool,
+) {
+    if enabled {
+        insert_env_if_missing(env, "OPENERAL_PACKAGE_PROXY_ENABLED", "1");
+    }
+    if !profile.is_empty() {
+        insert_env_if_missing(env, "OPENERAL_PACKAGE_PROXY_PROFILE", profile);
+    }
+    if !upstream_url.is_empty() {
+        insert_env_if_missing(env, "OPENERAL_PACKAGE_PROXY_UPSTREAM_URL", upstream_url);
+    }
+    if ca_enabled {
+        insert_env_if_missing(env, "OPENERAL_PACKAGE_PROXY_CA_FILE", PACKAGE_PROXY_CA_FILE);
+    }
+    if auth_enabled {
+        insert_env_if_missing(
+            env,
+            "OPENERAL_PACKAGE_PROXY_AUTHORIZATION_FILE",
+            PACKAGE_PROXY_AUTH_FILE,
+        );
+    }
 }
 
 fn apply_env_map(
@@ -1336,6 +1537,17 @@ fn upsert_env(env: &mut Vec<serde_json::Value>, name: &str, value: &str) {
         .find(|item| item.get("name").and_then(|value| value.as_str()) == Some(name))
     {
         *existing = serde_json::json!({"name": name, "value": value});
+        return;
+    }
+
+    env.push(serde_json::json!({"name": name, "value": value}));
+}
+
+fn insert_env_if_missing(env: &mut Vec<serde_json::Value>, name: &str, value: &str) {
+    if env
+        .iter()
+        .any(|item| item.get("name").and_then(|current| current.as_str()) == Some(name))
+    {
         return;
     }
 
@@ -1886,6 +2098,11 @@ mod tests {
             "",
             "",
             "",
+            false,
+            "",
+            "",
+            "",
+            "",
         );
 
         assert_eq!(
@@ -1930,6 +2147,11 @@ mod tests {
             "secret",
             300,
             &std::collections::HashMap::new(),
+            "",
+            "",
+            "",
+            false,
+            "",
             "",
             "",
             "",
@@ -1994,6 +2216,11 @@ mod tests {
             "",
             "",
             "",
+            false,
+            "",
+            "",
+            "",
+            "",
         );
 
         assert_eq!(
@@ -2023,6 +2250,11 @@ mod tests {
             "",
             "",
             "github.com/fuse",
+            false,
+            "",
+            "",
+            "",
+            "",
         );
 
         assert_eq!(
@@ -2066,6 +2298,11 @@ mod tests {
             "",
             "",
             "github.com/fuse",
+            false,
+            "",
+            "",
+            "",
+            "",
         );
 
         let limits = &pod_template["spec"]["containers"][0]["resources"]["limits"];
@@ -2090,6 +2327,11 @@ mod tests {
             "",
             "",
             "github.com/fuse",
+            false,
+            "",
+            "",
+            "",
+            "",
         );
 
         let limits = &pod_template["spec"]["containers"][0]["resources"]["limits"];
@@ -2116,6 +2358,11 @@ mod tests {
             &std::collections::HashMap::new(),
             "",
             "172.17.0.1",
+            "",
+            false,
+            "",
+            "",
+            "",
             "",
         );
 
@@ -2145,6 +2392,11 @@ mod tests {
             "secret",
             300,
             &std::collections::HashMap::new(),
+            "",
+            "",
+            "",
+            false,
+            "",
             "",
             "",
             "",
@@ -2207,6 +2459,11 @@ mod tests {
             "",
             "192.168.65.2",
             "",
+            false,
+            "",
+            "",
+            "",
+            "",
         );
 
         let host_aliases = pod_template["spec"]["hostAliases"]
@@ -2233,6 +2490,11 @@ mod tests {
             "my-tls-secret",
             "",
             "",
+            false,
+            "",
+            "",
+            "",
+            "",
         );
 
         let volumes = pod_template["spec"]["volumes"]
@@ -2246,6 +2508,118 @@ mod tests {
             tls_vol["secret"]["defaultMode"],
             256, // 0o400
             "TLS secret volume must use mode 0400 to prevent sandbox user from reading the private key"
+        );
+    }
+
+    #[test]
+    fn package_proxy_env_and_mounts_are_injected() {
+        let pod_template = sandbox_template_to_k8s(
+            &SandboxTemplate::default(),
+            false,
+            "openshell/sandbox:latest",
+            "",
+            "sandbox-id",
+            "sandbox-name",
+            "https://gateway.example.com",
+            "0.0.0.0:2222",
+            "secret",
+            300,
+            &std::collections::HashMap::new(),
+            "",
+            "",
+            "",
+            true,
+            "socket",
+            "https://proxy.socket.dev:8443",
+            "package-proxy-ca",
+            "package-proxy-auth",
+        );
+
+        let env = pod_template["spec"]["containers"][0]["env"]
+            .as_array()
+            .expect("env should exist");
+        let get_env = |name: &str| {
+            env.iter()
+                .find(|entry| entry["name"] == name)
+                .and_then(|entry| entry["value"].as_str())
+        };
+        assert_eq!(get_env("OPENERAL_PACKAGE_PROXY_ENABLED"), Some("1"));
+        assert_eq!(get_env("OPENERAL_PACKAGE_PROXY_PROFILE"), Some("socket"));
+        assert_eq!(
+            get_env("OPENERAL_PACKAGE_PROXY_UPSTREAM_URL"),
+            Some("https://proxy.socket.dev:8443")
+        );
+        assert_eq!(
+            get_env("OPENERAL_PACKAGE_PROXY_CA_FILE"),
+            Some(PACKAGE_PROXY_CA_FILE)
+        );
+        assert_eq!(
+            get_env("OPENERAL_PACKAGE_PROXY_AUTHORIZATION_FILE"),
+            Some(PACKAGE_PROXY_AUTH_FILE)
+        );
+
+        let mounts = pod_template["spec"]["containers"][0]["volumeMounts"]
+            .as_array()
+            .expect("volume mounts should exist");
+        assert!(mounts.iter().any(|mount| mount["name"] == PACKAGE_PROXY_CA_VOLUME_NAME));
+        assert!(mounts.iter().any(|mount| mount["name"] == PACKAGE_PROXY_AUTH_VOLUME_NAME));
+
+        let volumes = pod_template["spec"]["volumes"]
+            .as_array()
+            .expect("volumes should exist");
+        let ca_volume = volumes
+            .iter()
+            .find(|volume| volume["name"] == PACKAGE_PROXY_CA_VOLUME_NAME)
+            .expect("package proxy CA volume should exist");
+        assert_eq!(ca_volume["secret"]["secretName"], "package-proxy-ca");
+        let auth_volume = volumes
+            .iter()
+            .find(|volume| volume["name"] == PACKAGE_PROXY_AUTH_VOLUME_NAME)
+            .expect("package proxy auth volume should exist");
+        assert_eq!(auth_volume["secret"]["secretName"], "package-proxy-auth");
+    }
+
+    #[test]
+    fn package_proxy_defaults_do_not_override_existing_env() {
+        let mut template_environment = std::collections::HashMap::new();
+        template_environment.insert("OPENERAL_PACKAGE_PROXY_ENABLED".to_string(), "0".to_string());
+        template_environment.insert(
+            "OPENERAL_PACKAGE_PROXY_UPSTREAM_URL".to_string(),
+            "http://custom-proxy:8080".to_string(),
+        );
+
+        let env = build_env_list(
+            None,
+            &template_environment,
+            &std::collections::HashMap::new(),
+            "sandbox-id",
+            "sandbox-name",
+            "https://gateway.example.com",
+            "0.0.0.0:2222",
+            "secret",
+            300,
+            false,
+            true,
+            "socket",
+            "https://cluster-proxy:8443",
+            true,
+            true,
+        );
+
+        let get_env = |name: &str| {
+            env.iter()
+                .find(|entry| entry["name"] == name)
+                .and_then(|entry| entry["value"].as_str())
+        };
+        assert_eq!(get_env("OPENERAL_PACKAGE_PROXY_ENABLED"), Some("0"));
+        assert_eq!(
+            get_env("OPENERAL_PACKAGE_PROXY_UPSTREAM_URL"),
+            Some("http://custom-proxy:8080")
+        );
+        assert_eq!(get_env("OPENERAL_PACKAGE_PROXY_PROFILE"), Some("socket"));
+        assert_eq!(
+            get_env("OPENERAL_PACKAGE_PROXY_CA_FILE"),
+            Some(PACKAGE_PROXY_CA_FILE)
         );
     }
 }

@@ -47,6 +47,10 @@ When validating the fresh-machine path with upstream `openshell 0.0.12`, include
   - supervisor-side FUSE startup from `/etc/fstab`
 - `vendor/openshell/crates/openshell-server/src/sandbox/mod.rs`
   - sandbox pod generation and resource requests
+- `vendor/openshell/crates/openshell-sandbox/src/proxy.rs`
+  - package-proxy routing inside the built-in OpenShell sandbox proxy
+- `vendor/openshell/crates/openshell-sandbox/src/child_env.rs`
+  - child process proxy and CA trust environment
 - `vendor/openshell/deploy/helm/openshell/templates/statefulset.yaml`
   - gateway deployment wiring
 
@@ -64,6 +68,20 @@ The most important validation is an end-to-end OpenShell run where:
 If a change affects the OpenShell path, rerun the full flow from scratch.
 
 In CI and release smoke, use the upstream OpenShell installer/release path for the CLI. Do not add vendored `openshell-cli` builds just to run smoke.
+
+If a change affects package-proxy routing, validate both:
+
+1. positive path:
+   - allowed package-manager traffic reaches the upstream proxy
+2. negative path:
+   - non-allowed binaries are still denied by normal OpenShell policy
+   - stopping the upstream proxy makes package-manager traffic fail closed
+
+For real Socket validation, remember the upstream service itself is entitlement
+gated. Even with a valid API token, `socketdev/socket-firewall --service` will
+exit until the account has Firewall Enterprise enabled. Socket also requires its
+CA to be mounted into the sandbox trust path via
+`OPENERAL_PACKAGE_PROXY_CA_SECRET_NAME`.
 
 ## Migration Contract
 

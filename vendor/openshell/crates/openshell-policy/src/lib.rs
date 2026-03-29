@@ -99,6 +99,10 @@ struct NetworkEndpointDef {
     rules: Vec<L7RuleDef>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     allowed_ips: Vec<String>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    egress_via: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    egress_profile: String,
 }
 
 fn is_zero(v: &u32) -> bool {
@@ -180,6 +184,8 @@ fn to_proto(raw: PolicyFile) -> SandboxPolicy {
                                 })
                                 .collect(),
                             allowed_ips: e.allowed_ips,
+                            egress_via: e.egress_via,
+                            egress_profile: e.egress_profile,
                         }
                     })
                     .collect(),
@@ -280,6 +286,8 @@ fn from_proto(policy: &SandboxPolicy) -> PolicyFile {
                                 })
                                 .collect(),
                             allowed_ips: e.allowed_ips.clone(),
+                            egress_via: e.egress_via.clone(),
+                            egress_profile: e.egress_profile.clone(),
                         }
                     })
                     .collect(),
@@ -649,6 +657,33 @@ network_policies:
         let ep2 = &proto2.network_policies["internal"].endpoints[0];
         assert_eq!(ep1.allowed_ips, ep2.allowed_ips);
         assert_eq!(ep1.allowed_ips, vec!["10.0.5.0/24", "10.0.6.0/24"]);
+    }
+
+    #[test]
+    fn round_trip_preserves_package_proxy_metadata() {
+        let yaml = r#"
+version: 1
+network_policies:
+  packages:
+    name: packages
+    endpoints:
+      - host: registry.npmjs.org
+        port: 443
+        egress_via: package_proxy
+        egress_profile: socket
+    binaries:
+      - path: /usr/bin/npm
+"#;
+        let proto1 = parse_sandbox_policy(yaml).expect("parse failed");
+        let yaml_out = serialize_sandbox_policy(&proto1).expect("serialize failed");
+        let proto2 = parse_sandbox_policy(&yaml_out).expect("re-parse failed");
+
+        let ep1 = &proto1.network_policies["packages"].endpoints[0];
+        let ep2 = &proto2.network_policies["packages"].endpoints[0];
+        assert_eq!(ep1.egress_via, "package_proxy");
+        assert_eq!(ep1.egress_profile, "socket");
+        assert_eq!(ep1.egress_via, ep2.egress_via);
+        assert_eq!(ep1.egress_profile, ep2.egress_profile);
     }
 
     /// Verify that the network policy `name` field survives the round-trip.

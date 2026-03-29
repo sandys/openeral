@@ -681,6 +681,12 @@ fn proto_to_opa_data_json(proto: &ProtoSandboxPolicy) -> String {
                     if !e.allowed_ips.is_empty() {
                         ep["allowed_ips"] = e.allowed_ips.clone().into();
                     }
+                    if !e.egress_via.is_empty() {
+                        ep["egress_via"] = e.egress_via.clone().into();
+                    }
+                    if !e.egress_profile.is_empty() {
+                        ep["egress_profile"] = e.egress_profile.clone().into();
+                    }
                     ep
                 })
                 .collect();
@@ -2501,6 +2507,49 @@ process:
         let l7 = crate::l7::parse_l7_config(&config).unwrap();
         assert_eq!(l7.protocol, crate::l7::L7Protocol::Rest);
         assert_eq!(l7.enforcement, crate::l7::EnforcementMode::Enforce);
+    }
+
+    #[test]
+    fn endpoint_config_returns_package_proxy_metadata() {
+        let data = r#"
+network_policies:
+  npm_registry:
+    name: npm_registry
+    endpoints:
+      - host: registry.npmjs.org
+        port: 443
+        egress_via: package_proxy
+        egress_profile: socket
+    binaries:
+      - { path: /usr/bin/npm }
+filesystem_policy:
+  include_workdir: true
+  read_only: []
+  read_write: []
+landlock:
+  compatibility: best_effort
+process:
+  run_as_user: sandbox
+  run_as_group: sandbox
+"#;
+        let engine = OpaEngine::from_strings(TEST_POLICY, data).unwrap();
+        let input = NetworkInput {
+            host: "registry.npmjs.org".into(),
+            port: 443,
+            binary_path: PathBuf::from("/usr/bin/npm"),
+            binary_sha256: "unused".into(),
+            ancestors: vec![],
+            cmdline_paths: vec![],
+        };
+        let config = engine
+            .query_endpoint_config(&input)
+            .unwrap()
+            .expect("expected matched endpoint config");
+        assert_eq!(
+            get_str(&config, "egress_via").as_deref(),
+            Some("package_proxy")
+        );
+        assert_eq!(get_str(&config, "egress_profile").as_deref(), Some("socket"));
     }
 
     #[test]

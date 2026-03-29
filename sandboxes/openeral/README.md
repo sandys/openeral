@@ -53,6 +53,27 @@ Unsupported combinations:
 
 The vendored OpenShell source in this repo exists to build the custom `cluster` and `gateway` images. It is not the supported source of the user-facing CLI.
 
+## Optional Package Proxy
+
+OpenEral can also route package-manager traffic through the built-in OpenShell
+sandbox proxy to an upstream package proxy.
+
+- OpenShell policy still decides whether a given binary may reach a given host
+- once allowed, package-manager traffic can be chained through an upstream proxy
+- if that upstream proxy is down, package-manager requests fail closed
+
+For a real Socket Firewall Enterprise deployment, the sandbox must trust the
+Socket proxy CA. The supported control-plane knob is
+`OPENERAL_PACKAGE_PROXY_CA_SECRET_NAME`, pointing at a Kubernetes secret with a
+`ca.crt` entry mounted into the sandbox pod.
+
+Observed runtime caveat:
+
+- generic upstream proxy routing is validated end to end
+- actual Socket service mode still requires the account entitlement behind
+  `socketdev/socket-firewall --service`; without it, the service exits before the
+  OpenShell sandbox can use it
+
 ### Local Development
 
 If you are developing locally, build and publish all three images to a local registry first.

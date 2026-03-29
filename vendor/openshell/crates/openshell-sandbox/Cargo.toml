@@ -58,6 +58,7 @@ ipnet = "2"
 # Serialization
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }
+url = { workspace = true }
 
 # Logging
 tracing = { workspace = true }

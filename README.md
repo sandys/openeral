@@ -11,6 +11,10 @@ The product goal is simple:
 
 Everything in this repo supports that flow.
 
+OpenEral also extends the OpenShell outbound proxy path so allowed package-manager
+traffic can be chained through an upstream package proxy. FUSE remains optional at
+the product level, but the current published sandbox still includes the FUSE path.
+
 One important constraint:
 
 - users run the stock upstream `openshell` CLI
@@ -88,6 +92,38 @@ Unsupported combinations:
 - upstream `cluster` + openeral `sandbox`
 
 The repo still vendors OpenShell source because the custom `cluster` and `gateway` images are built from it. That vendored source is for image builds, not for the user-facing CLI.
+
+### Optional Package Proxy
+
+Package installs can be routed through OpenShell's existing sandbox proxy and
+policy engine instead of going direct to the public registries.
+
+- policy allow/deny still comes from normal OpenShell `network_policies`
+- if an allowed request matches the package-proxy route, the sandbox proxy chains
+  it through the configured upstream package proxy
+- if the upstream package proxy is unavailable, package-manager traffic fails
+  closed for that request
+
+Current implementation details:
+
+- supported package-manager families: npm/pnpm/yarn, pip/uv, cargo
+- package-proxy routing is enforced inside the built-in OpenShell sandbox proxy,
+  not by a separate sidecar
+- non-package traffic still follows the normal OpenShell allow/deny path
+
+For a real Socket Firewall Enterprise upstream, the sandbox also needs the
+package-proxy CA mounted into the pod so child processes trust Socket's MITM
+certificate. The gateway already supports that via
+`OPENERAL_PACKAGE_PROXY_CA_SECRET_NAME`, with a Kubernetes secret containing
+`ca.crt`.
+
+Operational note:
+
+- on this machine, OpenShell-side package-proxy chaining was validated end to end
+  with a generic upstream proxy
+- the actual `socketdev/socket-firewall --service` container still exits with
+  `Socket Firewall is not enabled for your account; please contact Socket sales`
+  unless the Socket account has the Enterprise Firewall entitlement
 
 ### Local Development
 

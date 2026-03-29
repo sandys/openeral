@@ -116,6 +116,11 @@ pub async fn run_server(config: Config, tracing_log_bus: TracingLogBus) -> Resul
             "ssh_handshake_secret is required. Set --ssh-handshake-secret or OPENSHELL_SSH_HANDSHAKE_SECRET",
         ));
     }
+    if config.package_proxy_enabled && config.package_proxy_upstream_url.trim().is_empty() {
+        return Err(Error::config(
+            "package_proxy_upstream_url is required when package proxy is enabled",
+        ));
+    }
 
     let store = Store::connect(database_url).await?;
     let sandbox_client = SandboxClient::new(
@@ -129,6 +134,11 @@ pub async fn run_server(config: Config, tracing_log_bus: TracingLogBus) -> Resul
         config.client_tls_secret_name.clone(),
         config.host_gateway_ip.clone(),
         config.sandbox_fuse_resource_name.clone(),
+        config.package_proxy_enabled,
+        config.package_proxy_profile.clone(),
+        config.package_proxy_upstream_url.clone(),
+        config.package_proxy_ca_secret_name.clone(),
+        config.package_proxy_auth_secret_name.clone(),
     )
     .await
     .map_err(|e| Error::execution(format!("failed to create kubernetes client: {e}")))?;

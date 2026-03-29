@@ -66,6 +66,26 @@ spec:
             - name: OPENSHELL_SANDBOX_FUSE_RESOURCE_NAME
               value: {{ .Values.server.sandboxFuseResourceName | quote }}
             {{- end }}
+            {{- if .Values.server.packageProxy.enabled }}
+            - name: OPENERAL_PACKAGE_PROXY_ENABLED
+              value: "true"
+            {{- end }}
+            {{- if .Values.server.packageProxy.profile }}
+            - name: OPENERAL_PACKAGE_PROXY_PROFILE
+              value: {{ .Values.server.packageProxy.profile | quote }}
+            {{- end }}
+            {{- if .Values.server.packageProxy.upstreamUrl }}
+            - name: OPENERAL_PACKAGE_PROXY_UPSTREAM_URL
+              value: {{ .Values.server.packageProxy.upstreamUrl | quote }}
+            {{- end }}
+            {{- if .Values.server.packageProxy.caSecretName }}
+            - name: OPENERAL_PACKAGE_PROXY_CA_SECRET_NAME
+              value: {{ .Values.server.packageProxy.caSecretName | quote }}
+            {{- end }}
+            {{- if .Values.server.packageProxy.authSecretName }}
+            - name: OPENERAL_PACKAGE_PROXY_AUTH_SECRET_NAME
+              value: {{ .Values.server.packageProxy.authSecretName | quote }}
+            {{- end }}
             - name: OPENSHELL_GRPC_ENDPOINT
               value: {{ if .Values.server.disableTls }}{{ .Values.server.grpcEndpoint | replace "https://" "http://" | quote }}{{ else }}{{ .Values.server.grpcEndpoint | quote }}{{ end }}
             {{- if .Values.server.sshGatewayHost }}

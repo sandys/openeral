@@ -37,6 +37,19 @@ The CLI itself is still the stock upstream `openshell` release. This repo change
 
 `openeral` also embeds its own database migrations. In the normal sandbox flow, those migrations auto-run before `/db` or `/home/agent` mounts come up. If you are debugging outside the normal mount path and have direct binary access, `openeral migrate` is the manual preflight/admin command.
 
+If the gateway enables package-proxy routing, that still runs through the built-in
+OpenShell sandbox proxy. Package-manager traffic may be chained through an
+upstream proxy, but normal OpenShell policy still decides whether the binary is
+allowed to reach the target at all.
+
+For a real Socket upstream:
+
+- the Socket service account must actually have Firewall Enterprise enabled
+- the Socket proxy CA must be mounted into the sandbox trust path
+
+Without those two pieces, Socket-specific package installs will fail even if the
+generic OpenShell proxy path is healthy.
+
 The supported Claude launch still remains:
 
 ```bash

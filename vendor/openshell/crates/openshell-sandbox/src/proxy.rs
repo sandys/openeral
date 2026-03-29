@@ -5,23 +5,246 @@
 
 use crate::denial_aggregator::DenialEvent;
 use crate::identity::BinaryIdentityCache;
-use crate::l7::tls::ProxyTlsState;
+use crate::l7::tls::{
+    ProxyTlsState, build_upstream_client_config_with_extra_certs,
+};
 use crate::opa::{NetworkAction, OpaEngine};
 use crate::policy::ProxyPolicy;
 use crate::secrets::{SecretResolver, rewrite_header_line};
 use miette::{IntoDiagnostic, Result};
+use rustls::pki_types::ServerName;
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU32;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
+use tokio_rustls::TlsConnector;
 use tracing::{debug, info, warn};
+use url::Url;
 
 const MAX_HEADER_BYTES: usize = 8192;
 const INFERENCE_LOCAL_HOST: &str = "inference.local";
+const PACKAGE_PROXY_ENABLED_ENV: &str = "OPENERAL_PACKAGE_PROXY_ENABLED";
+const PACKAGE_PROXY_PROFILE_ENV: &str = "OPENERAL_PACKAGE_PROXY_PROFILE";
+const PACKAGE_PROXY_UPSTREAM_URL_ENV: &str = "OPENERAL_PACKAGE_PROXY_UPSTREAM_URL";
+const PACKAGE_PROXY_CA_FILE_ENV: &str = "OPENERAL_PACKAGE_PROXY_CA_FILE";
+const PACKAGE_PROXY_AUTHORIZATION_FILE_ENV: &str = "OPENERAL_PACKAGE_PROXY_AUTHORIZATION_FILE";
+
+trait AsyncStream: AsyncRead + AsyncWrite + Unpin + Send {}
+
+impl<T> AsyncStream for T where T: AsyncRead + AsyncWrite + Unpin + Send {}
+
+type BoxedStream = Box<dyn AsyncStream>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EndpointEgressVia {
+    Direct,
+    PackageProxy,
+}
+
+#[derive(Debug, Clone)]
+struct EndpointSettings {
+    allowed_ips: Vec<String>,
+    l7_config: Option<crate::l7::L7EndpointConfig>,
+    egress_via: EndpointEgressVia,
+    egress_profile: Option<String>,
+}
+
+impl Default for EndpointSettings {
+    fn default() -> Self {
+        Self {
+            allowed_ips: Vec::new(),
+            l7_config: None,
+            egress_via: EndpointEgressVia::Direct,
+            egress_profile: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PackageProxyScheme {
+    Http,
+    Https,
+}
+
+#[derive(Debug, Clone)]
+pub struct PackageProxyConfig {
+    profile: String,
+    upstream_url: String,
+    upstream_host: String,
+    upstream_port: u16,
+    scheme: PackageProxyScheme,
+    authorization: Option<String>,
+    extra_ca_paths: Vec<PathBuf>,
+    upstream_tls_config: Option<Arc<rustls::ClientConfig>>,
+}
+
+impl PackageProxyConfig {
+    pub fn from_env() -> Result<Option<Self>> {
+        if !env_var_enabled(PACKAGE_PROXY_ENABLED_ENV) {
+            return Ok(None);
+        }
+
+        let upstream_url = std::env::var(PACKAGE_PROXY_UPSTREAM_URL_ENV)
+            .map_err(|_| miette::miette!("{PACKAGE_PROXY_UPSTREAM_URL_ENV} is required"))?;
+        let parsed = Url::parse(&upstream_url)
+            .map_err(|error| miette::miette!("invalid package proxy URL {upstream_url}: {error}"))?;
+        if !parsed.username().is_empty() || parsed.password().is_some() {
+            return Err(miette::miette!(
+                "package proxy URL credentials are not supported; use {PACKAGE_PROXY_AUTHORIZATION_FILE_ENV}"
+            ));
+        }
+        if !matches!(parsed.path(), "" | "/") {
+            return Err(miette::miette!(
+                "package proxy URL must not include a path: {upstream_url}"
+            ));
+        }
+        let upstream_host = parsed
+            .host_str()
+            .ok_or_else(|| miette::miette!("package proxy URL is missing a host: {upstream_url}"))?
+            .to_string();
+        let upstream_port = parsed.port_or_known_default().ok_or_else(|| {
+            miette::miette!("package proxy URL is missing a usable port: {upstream_url}")
+        })?;
+        let scheme = match parsed.scheme() {
+            "http" => PackageProxyScheme::Http,
+            "https" => PackageProxyScheme::Https,
+            other => {
+                return Err(miette::miette!(
+                    "unsupported package proxy URL scheme {other}; expected http or https"
+                ));
+            }
+        };
+
+        let profile = std::env::var(PACKAGE_PROXY_PROFILE_ENV).unwrap_or_else(|_| "socket".into());
+
+        let extra_ca_paths = match std::env::var(PACKAGE_PROXY_CA_FILE_ENV) {
+            Ok(path) if !path.trim().is_empty() => vec![PathBuf::from(path)],
+            _ => Vec::new(),
+        };
+        let authorization = match std::env::var(PACKAGE_PROXY_AUTHORIZATION_FILE_ENV) {
+            Ok(path) if !path.trim().is_empty() => {
+                let value = std::fs::read_to_string(path.trim()).into_diagnostic()?;
+                let value = value.trim().to_string();
+                if value.is_empty() { None } else { Some(value) }
+            }
+            _ => None,
+        };
+
+        let upstream_tls_config = if matches!(scheme, PackageProxyScheme::Https) {
+            Some(build_upstream_client_config_with_extra_certs(&extra_ca_paths)?)
+        } else {
+            None
+        };
+
+        Ok(Some(Self {
+            profile,
+            upstream_url,
+            upstream_host,
+            upstream_port,
+            scheme,
+            authorization,
+            extra_ca_paths,
+            upstream_tls_config,
+        }))
+    }
+
+    pub fn extra_ca_paths(&self) -> Vec<PathBuf> {
+        self.extra_ca_paths.clone()
+    }
+
+    fn upstream_url(&self) -> &str {
+        &self.upstream_url
+    }
+
+    fn profile(&self) -> &str {
+        &self.profile
+    }
+
+    fn authorization(&self) -> Option<&str> {
+        self.authorization.as_deref()
+    }
+
+    async fn connect(&self) -> Result<BoxedStream> {
+        let tcp = TcpStream::connect((self.upstream_host.as_str(), self.upstream_port))
+            .await
+            .into_diagnostic()?;
+        match self.scheme {
+            PackageProxyScheme::Http => Ok(Box::new(tcp)),
+            PackageProxyScheme::Https => {
+                let connector = TlsConnector::from(Arc::clone(
+                    self.upstream_tls_config
+                        .as_ref()
+                        .expect("https proxy config must have tls config"),
+                ));
+                let server_name =
+                    ServerName::try_from(self.upstream_host.clone()).into_diagnostic()?;
+                let tls_stream = connector
+                    .connect(server_name, tcp)
+                    .await
+                    .into_diagnostic()?;
+                Ok(Box::new(tls_stream))
+            }
+        }
+    }
+}
+
+fn is_known_package_manager_name(name: &str) -> bool {
+    matches!(
+        name,
+        "npm"
+            | "npm-cli.js"
+            | "npx"
+            | "npx-cli.js"
+            | "node"
+            | "pnpm"
+            | "pnpm.cjs"
+            | "pnpm.js"
+            | "yarn"
+            | "yarnpkg"
+            | "yarn.js"
+            | "yarnpkg.js"
+            | "corepack"
+            | "corepack.js"
+            | "cargo"
+            | "pip"
+            | "pip3"
+            | "python"
+            | "python3"
+            | "uv"
+    )
+}
+
+fn should_route_via_package_proxy(
+    endpoint_settings: &EndpointSettings,
+    package_proxy: Option<&PackageProxyConfig>,
+    decision: &ConnectDecision,
+) -> bool {
+    if matches!(endpoint_settings.egress_via, EndpointEgressVia::PackageProxy) {
+        return true;
+    }
+    if package_proxy.is_none() {
+        return false;
+    }
+
+    decision
+        .binary
+        .iter()
+        .chain(decision.ancestors.iter())
+        .chain(decision.cmdline_paths.iter())
+        .filter_map(|path| path.file_name().and_then(|name| name.to_str()))
+        .any(is_known_package_manager_name)
+}
+
+fn env_var_enabled(name: &str) -> bool {
+    matches!(
+        std::env::var(name).ok().as_deref(),
+        Some("1") | Some("true") | Some("TRUE") | Some("yes") | Some("YES") | Some("on") | Some("ON")
+    )
+}
 
 /// Result of a proxy CONNECT policy decision.
 struct ConnectDecision {
@@ -132,6 +355,7 @@ impl ProxyHandle {
         tls_state: Option<Arc<ProxyTlsState>>,
         inference_ctx: Option<Arc<InferenceContext>>,
         secret_resolver: Option<Arc<SecretResolver>>,
+        package_proxy: Option<PackageProxyConfig>,
         denial_tx: Option<mpsc::UnboundedSender<DenialEvent>>,
     ) -> Result<Self> {
         // Use override bind_addr, fall back to policy http_addr, then default
@@ -162,10 +386,11 @@ impl ProxyHandle {
                         let tls = tls_state.clone();
                         let inf = inference_ctx.clone();
                         let resolver = secret_resolver.clone();
+                        let package_proxy = package_proxy.clone();
                         let dtx = denial_tx.clone();
                         tokio::spawn(async move {
                             if let Err(err) = handle_tcp_connection(
-                                stream, opa, cache, spid, tls, inf, resolver, dtx,
+                                stream, opa, cache, spid, tls, inf, resolver, package_proxy, dtx,
                             )
                             .await
                             {
@@ -265,6 +490,7 @@ async fn handle_tcp_connection(
     tls_state: Option<Arc<ProxyTlsState>>,
     inference_ctx: Option<Arc<InferenceContext>>,
     secret_resolver: Option<Arc<SecretResolver>>,
+    package_proxy: Option<PackageProxyConfig>,
     denial_tx: Option<mpsc::UnboundedSender<DenialEvent>>,
 ) -> Result<()> {
     let mut buf = vec![0u8; MAX_HEADER_BYTES];
@@ -309,6 +535,7 @@ async fn handle_tcp_connection(
             identity_cache,
             entrypoint_pid,
             secret_resolver,
+            package_proxy,
             denial_tx.as_ref(),
         )
         .await;
@@ -415,73 +642,75 @@ async fn handle_tcp_connection(
         return Ok(());
     }
 
-    // Query allowed_ips from the matched endpoint config (if any).
-    // When present, the SSRF check validates resolved IPs against this
-    // allowlist instead of blanket-blocking all private IPs.
-    let raw_allowed_ips = query_allowed_ips(&opa_engine, &decision, &host_lc, port);
-
-    // Defense-in-depth: resolve DNS and reject connections to internal IPs.
-    let mut upstream = if !raw_allowed_ips.is_empty() {
-        // allowed_ips mode: validate resolved IPs against CIDR allowlist.
-        // Loopback and link-local are still always blocked.
-        match parse_allowed_ips(&raw_allowed_ips) {
-            Ok(nets) => match resolve_and_check_allowed_ips(&host, port, &nets).await {
-                Ok(addrs) => TcpStream::connect(addrs.as_slice())
-                    .await
-                    .into_diagnostic()?,
-                Err(reason) => {
-                    warn!(
-                        dst_host = %host_lc,
-                        dst_port = port,
-                        reason = %reason,
-                        "CONNECT blocked: allowed_ips check failed"
-                    );
-                    emit_denial(
-                        &denial_tx,
-                        &host_lc,
-                        port,
-                        &binary_str,
-                        &decision,
-                        &reason,
-                        "ssrf",
-                    );
-                    respond(&mut client, b"HTTP/1.1 403 Forbidden\r\n\r\n").await?;
-                    return Ok(());
-                }
-            },
-            Err(reason) => {
-                warn!(
-                    dst_host = %host_lc,
-                    dst_port = port,
-                    reason = %reason,
-                    "CONNECT blocked: invalid allowed_ips in policy"
-                );
-                emit_denial(
-                    &denial_tx,
-                    &host_lc,
-                    port,
-                    &binary_str,
-                    &decision,
-                    &reason,
-                    "ssrf",
-                );
-                respond(&mut client, b"HTTP/1.1 403 Forbidden\r\n\r\n").await?;
-                return Ok(());
-            }
+    let endpoint_settings = match query_endpoint_settings(&opa_engine, &decision, &host_lc, port) {
+        Ok(settings) => settings,
+        Err(reason) => {
+            warn!(
+                dst_host = %host_lc,
+                dst_port = port,
+                reason = %reason,
+                "CONNECT blocked: invalid endpoint config"
+            );
+            emit_denial(
+                &denial_tx,
+                &host_lc,
+                port,
+                &binary_str,
+                &decision,
+                &reason,
+                "endpoint-config",
+            );
+            respond(&mut client, b"HTTP/1.1 502 Bad Gateway\r\n\r\n").await?;
+            return Ok(());
         }
-    } else {
-        // Default: reject all internal IPs (loopback, RFC 1918, link-local).
-        match resolve_and_reject_internal(&host, port).await {
-            Ok(addrs) => TcpStream::connect(addrs.as_slice())
-                .await
-                .into_diagnostic()?,
+    };
+
+    let resolved_addrs = match resolve_destination_addrs(&host, port, &endpoint_settings.allowed_ips).await {
+        Ok(addrs) => addrs,
+        Err(reason) => {
+            warn!(
+                dst_host = %host_lc,
+                dst_port = port,
+                reason = %reason,
+                "CONNECT blocked: destination validation failed"
+            );
+            emit_denial(
+                &denial_tx,
+                &host_lc,
+                port,
+                &binary_str,
+                &decision,
+                &reason,
+                "ssrf",
+            );
+            respond(&mut client, b"HTTP/1.1 403 Forbidden\r\n\r\n").await?;
+            return Ok(());
+        }
+    };
+
+    if should_route_via_package_proxy(&endpoint_settings, package_proxy.as_ref(), &decision) {
+        let Some(package_proxy) = package_proxy.as_ref() else {
+            let reason = "package proxy route requested but sandbox package proxy is not configured";
+            warn!(dst_host = %host_lc, dst_port = port, reason, "CONNECT blocked");
+            emit_denial(
+                &denial_tx,
+                &host_lc,
+                port,
+                &binary_str,
+                &decision,
+                reason,
+                "package-proxy",
+            );
+            respond(&mut client, b"HTTP/1.1 502 Bad Gateway\r\n\r\n").await?;
+            return Ok(());
+        };
+        let egress_profile = match resolve_package_proxy_profile(
+            endpoint_settings.egress_profile.as_deref(),
+            package_proxy,
+        ) {
+            Ok(profile) => profile,
             Err(reason) => {
-                warn!(
-                    dst_host = %host_lc,
-                    dst_port = port,
-                    reason = %reason,
-                    "CONNECT blocked: internal address"
-                );
+                warn!(dst_host = %host_lc, dst_port = port, reason = %reason, "CONNECT blocked");
                 emit_denial(
                     &denial_tx,
                     &host_lc,
@@ -489,26 +718,84 @@ async fn handle_tcp_connection(
                     &binary_str,
                     &decision,
                     &reason,
-                    "ssrf",
+                    "package-proxy",
                 );
-                respond(&mut client, b"HTTP/1.1 403 Forbidden\r\n\r\n").await?;
+                respond(&mut client, b"HTTP/1.1 502 Bad Gateway\r\n\r\n").await?;
                 return Ok(());
             }
+        };
+        if endpoint_settings.l7_config.is_some() {
+            let reason =
+                "endpoint uses egress_via=package_proxy and cannot also request OpenShell L7 inspection";
+            warn!(dst_host = %host_lc, dst_port = port, reason, "CONNECT blocked");
+            emit_denial(
+                &denial_tx,
+                &host_lc,
+                port,
+                &binary_str,
+                &decision,
+                reason,
+                "package-proxy",
+            );
+            respond(&mut client, b"HTTP/1.1 502 Bad Gateway\r\n\r\n").await?;
+            return Ok(());
+        }
+
+        let mut upstream = match connect_via_package_proxy(package_proxy, &host, port).await {
+            Ok(stream) => stream,
+            Err(error) => {
+                warn!(
+                    dst_host = %host_lc,
+                    dst_port = port,
+                    upstream_proxy = %package_proxy.upstream_url(),
+                    error = %error,
+                    "CONNECT upstream package proxy failed"
+                );
+                respond(&mut client, b"HTTP/1.1 502 Bad Gateway\r\n\r\n").await?;
+                return Ok(());
+            }
+        };
+
+        respond(&mut client, b"HTTP/1.1 200 Connection Established\r\n\r\n").await?;
+        info!(
+            src_addr = %peer_addr.ip(),
+            src_port = peer_addr.port(),
+            proxy_addr = %local_addr,
+            dst_host = %host_lc,
+            dst_port = port,
+            binary = %binary_str,
+            binary_pid = %pid_str,
+            ancestors = %ancestors_str,
+            cmdline = %cmdline_str,
+            action = "allow",
+            engine = "opa",
+            policy = %policy_str,
+            egress_via = "package_proxy",
+            egress_profile = %egress_profile,
+            upstream_proxy = %package_proxy.upstream_url(),
+            resolved_ips = ?resolved_addrs,
+            reason = "",
+            "CONNECT",
+        );
+        let _ = tokio::io::copy_bidirectional(&mut client, &mut upstream)
+            .await
+            .into_diagnostic()?;
+        return Ok(());
+    }
+
+    let mut upstream = match TcpStream::connect(resolved_addrs.as_slice()).await {
+        Ok(stream) => stream,
+        Err(error) => {
+            warn!(dst_host = %host_lc, dst_port = port, error = %error, "CONNECT upstream connect failed");
+            respond(&mut client, b"HTTP/1.1 502 Bad Gateway\r\n\r\n").await?;
+            return Ok(());
         }
     };
 
     respond(&mut client, b"HTTP/1.1 200 Connection Established\r\n\r\n").await?;
 
-    // Check if endpoint has L7 config for protocol-aware inspection
-    let l7_config = query_l7_config(&opa_engine, &decision, &host_lc, port);
-
-    // Log the allowed CONNECT — use CONNECT_L7 when L7 inspection follows,
-    // so log consumers can distinguish L4-only decisions from tunnel lifecycle events.
-    let connect_msg = if l7_config.is_some() {
-        "CONNECT_L7"
-    } else {
-        "CONNECT"
-    };
+    let l7_config = endpoint_settings.l7_config;
+    let connect_msg = if l7_config.is_some() { "CONNECT_L7" } else { "CONNECT" };
     info!(
         src_addr = %peer_addr.ip(),
         src_port = peer_addr.port(),
@@ -522,6 +809,10 @@ async fn handle_tcp_connection(
         action = "allow",
         engine = "opa",
         policy = %policy_str,
+        egress_via = "direct",
+        egress_profile = "-",
+        upstream_proxy = "-",
+        resolved_ips = ?resolved_addrs,
         reason = "",
         connect_msg,
     );
@@ -921,7 +1212,7 @@ async fn handle_inference_interception(
 async fn route_inference_request(
     request: &crate::l7::inference::ParsedHttpRequest,
     ctx: &InferenceContext,
-    tls_client: &mut (impl tokio::io::AsyncWrite + Unpin),
+    tls_client: &mut (impl AsyncWrite + Unpin),
 ) -> Result<bool> {
     use crate::l7::inference::{detect_inference_pattern, format_http_response};
 
@@ -1094,30 +1385,26 @@ fn is_hop_by_hop_header(name: &str) -> bool {
 }
 
 /// Write all bytes to an async writer.
-async fn write_all(writer: &mut (impl tokio::io::AsyncWrite + Unpin), data: &[u8]) -> Result<()> {
+async fn write_all(writer: &mut (impl AsyncWrite + Unpin), data: &[u8]) -> Result<()> {
     use tokio::io::AsyncWriteExt;
     writer.write_all(data).await.into_diagnostic()?;
     writer.flush().await.into_diagnostic()?;
     Ok(())
 }
 
-/// Query L7 endpoint config from the OPA engine for a matched CONNECT decision.
-///
-/// Returns `Some(L7EndpointConfig)` if the matched endpoint has L7 config (protocol field),
-/// `None` for L4-only endpoints.
-fn query_l7_config(
+fn query_endpoint_settings(
     engine: &OpaEngine,
     decision: &ConnectDecision,
     host: &str,
     port: u16,
-) -> Option<crate::l7::L7EndpointConfig> {
+) -> std::result::Result<EndpointSettings, String> {
     // Only query if action is Allow (not Deny)
     let has_policy = match &decision.action {
         NetworkAction::Allow { matched_policy } => matched_policy.is_some(),
         _ => false,
     };
     if !has_policy {
-        return None;
+        return Ok(EndpointSettings::default());
     }
 
     let input = crate::opa::NetworkInput {
@@ -1130,13 +1417,213 @@ fn query_l7_config(
     };
 
     match engine.query_endpoint_config(&input) {
-        Ok(Some(val)) => crate::l7::parse_l7_config(&val),
-        Ok(None) => None,
-        Err(e) => {
-            warn!(error = %e, "Failed to query L7 endpoint config");
-            None
+        Ok(Some(val)) => {
+            let egress_via = match endpoint_config_string(&val, "egress_via").as_deref() {
+                None | Some("") | Some("direct") => EndpointEgressVia::Direct,
+                Some("package_proxy") => EndpointEgressVia::PackageProxy,
+                Some(other) => {
+                    return Err(format!(
+                        "unsupported endpoint egress_via value '{other}' for {host}:{port}"
+                    ));
+                }
+            };
+            Ok(EndpointSettings {
+                allowed_ips: endpoint_config_strings(&val, "allowed_ips"),
+                l7_config: crate::l7::parse_l7_config(&val),
+                egress_via,
+                egress_profile: endpoint_config_string(&val, "egress_profile"),
+            })
+        }
+        Ok(None) => Ok(EndpointSettings::default()),
+        Err(e) => Err(format!("failed to query endpoint config: {e}")),
+    }
+}
+
+fn endpoint_config_string(value: &regorus::Value, key: &str) -> Option<String> {
+    let key = regorus::Value::String(key.into());
+    match value {
+        regorus::Value::Object(map) => match map.get(&key) {
+            Some(regorus::Value::String(s)) if !s.is_empty() => Some(s.to_string()),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn endpoint_config_strings(value: &regorus::Value, key: &str) -> Vec<String> {
+    let key = regorus::Value::String(key.into());
+    match value {
+        regorus::Value::Object(map) => match map.get(&key) {
+            Some(regorus::Value::Array(values)) => values
+                .iter()
+                .filter_map(|value| match value {
+                    regorus::Value::String(s) => Some(s.to_string()),
+                    _ => None,
+                })
+                .collect(),
+            _ => Vec::new(),
+        },
+        _ => Vec::new(),
+    }
+}
+
+async fn resolve_destination_addrs(
+    host: &str,
+    port: u16,
+    allowed_ips: &[String],
+) -> std::result::Result<Vec<SocketAddr>, String> {
+    if !allowed_ips.is_empty() {
+        let nets = parse_allowed_ips(allowed_ips)?;
+        resolve_and_check_allowed_ips(host, port, &nets).await
+    } else {
+        resolve_and_reject_internal(host, port).await
+    }
+}
+
+fn resolve_package_proxy_profile(
+    endpoint_profile: Option<&str>,
+    package_proxy: &PackageProxyConfig,
+) -> std::result::Result<String, String> {
+    match endpoint_profile {
+        Some(profile) if profile != package_proxy.profile() => Err(format!(
+            "endpoint requests package proxy profile '{profile}' but configured upstream profile is '{}'",
+            package_proxy.profile()
+        )),
+        Some(profile) => Ok(profile.to_string()),
+        None => Ok(package_proxy.profile().to_string()),
+    }
+}
+
+async fn connect_via_package_proxy(
+    package_proxy: &PackageProxyConfig,
+    target_host: &str,
+    target_port: u16,
+) -> Result<BoxedStream> {
+    let mut upstream = package_proxy.connect().await?;
+    let host_header = if target_host.contains(':') {
+        format!("[{target_host}]:{target_port}")
+    } else {
+        format!("{target_host}:{target_port}")
+    };
+    let mut request = format!(
+        "CONNECT {host_header} HTTP/1.1\r\nHost: {host_header}\r\nUser-Agent: openshell-sandbox\r\n"
+    );
+    if let Some(auth) = package_proxy.authorization() {
+        request.push_str("Proxy-Authorization: ");
+        request.push_str(auth);
+        request.push_str("\r\n");
+    }
+    request.push_str("\r\n");
+    upstream.write_all(request.as_bytes()).await.into_diagnostic()?;
+    upstream.flush().await.into_diagnostic()?;
+
+    let mut buf = vec![0u8; MAX_HEADER_BYTES];
+    let mut used = 0usize;
+    loop {
+        if used == buf.len() {
+            return Err(miette::miette!(
+                "upstream package proxy response exceeded {MAX_HEADER_BYTES} bytes"
+            ));
+        }
+        let n = upstream.read(&mut buf[used..]).await.into_diagnostic()?;
+        if n == 0 {
+            return Err(miette::miette!(
+                "upstream package proxy closed connection during CONNECT handshake"
+            ));
+        }
+        used += n;
+        if buf[..used].windows(4).any(|window| window == b"\r\n\r\n") {
+            break;
         }
     }
+
+    let response = String::from_utf8_lossy(&buf[..used]);
+    let status_line = response.lines().next().unwrap_or("");
+    let status_code = status_line
+        .split_whitespace()
+        .nth(1)
+        .unwrap_or("")
+        .parse::<u16>()
+        .map_err(|_| miette::miette!("invalid upstream package proxy status line: {status_line}"))?;
+    if status_code != 200 {
+        return Err(miette::miette!(
+            "upstream package proxy CONNECT failed with status {status_code}: {status_line}"
+        ));
+    }
+
+    Ok(upstream)
+}
+
+fn rewrite_forward_request_for_upstream_proxy(
+    raw: &[u8],
+    used: usize,
+    secret_resolver: Option<&SecretResolver>,
+    package_proxy: &PackageProxyConfig,
+) -> Vec<u8> {
+    let header_end = raw[..used]
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .map_or(used, |p| p + 4);
+    let header_str = String::from_utf8_lossy(&raw[..header_end]);
+    let lines = header_str.split("\r\n").collect::<Vec<_>>();
+
+    let mut output = Vec::with_capacity(header_end + 128);
+    let mut has_connection = false;
+    let mut has_via = false;
+
+    for (i, line) in lines.iter().enumerate() {
+        if i == 0 {
+            output.extend_from_slice(line.as_bytes());
+            output.extend_from_slice(b"\r\n");
+            continue;
+        }
+        if line.is_empty() {
+            break;
+        }
+
+        let lower = line.to_ascii_lowercase();
+        if lower.starts_with("proxy-connection:")
+            || lower.starts_with("proxy-authorization:")
+            || lower.starts_with("proxy-authenticate:")
+        {
+            continue;
+        }
+        if lower.starts_with("connection:") {
+            has_connection = true;
+            output.extend_from_slice(b"Connection: close\r\n");
+            continue;
+        }
+
+        let rewritten_line = match secret_resolver {
+            Some(resolver) => rewrite_header_line(line, resolver),
+            None => line.to_string(),
+        };
+        output.extend_from_slice(rewritten_line.as_bytes());
+        output.extend_from_slice(b"\r\n");
+
+        if lower.starts_with("via:") {
+            has_via = true;
+        }
+    }
+
+    if let Some(auth) = package_proxy.authorization() {
+        output.extend_from_slice(b"Proxy-Authorization: ");
+        output.extend_from_slice(auth.as_bytes());
+        output.extend_from_slice(b"\r\n");
+    }
+    if !has_connection {
+        output.extend_from_slice(b"Connection: close\r\n");
+    }
+    if !has_via {
+        output.extend_from_slice(b"Via: 1.1 openshell-sandbox\r\n");
+    }
+    output.extend_from_slice(b"\r\n");
+
+    if header_end < used {
+        output.extend_from_slice(&raw[header_end..used]);
+    }
+
+    output
 }
 
 /// Check if an IP address is internal (loopback, private RFC1918, or link-local).
@@ -1302,40 +1789,6 @@ fn parse_allowed_ips(raw: &[String]) -> std::result::Result<Vec<ipnet::IpNet>, S
         Ok(nets)
     } else {
         Err(errors.join("; "))
-    }
-}
-
-/// Query allowed_ips from the matched endpoint config for a CONNECT decision.
-fn query_allowed_ips(
-    engine: &OpaEngine,
-    decision: &ConnectDecision,
-    host: &str,
-    port: u16,
-) -> Vec<String> {
-    // Only query if action is Allow with a matched policy
-    let has_policy = match &decision.action {
-        NetworkAction::Allow { matched_policy } => matched_policy.is_some(),
-        _ => false,
-    };
-    if !has_policy {
-        return vec![];
-    }
-
-    let input = crate::opa::NetworkInput {
-        host: host.to_string(),
-        port,
-        binary_path: decision.binary.clone().unwrap_or_default(),
-        binary_sha256: String::new(),
-        ancestors: decision.ancestors.clone(),
-        cmdline_paths: decision.cmdline_paths.clone(),
-    };
-
-    match engine.query_allowed_ips(&input) {
-        Ok(ips) => ips,
-        Err(e) => {
-            warn!(error = %e, "Failed to query allowed_ips from endpoint config");
-            vec![]
-        }
     }
 }
 
@@ -1568,6 +2021,7 @@ async fn handle_forward_proxy(
     identity_cache: Arc<BinaryIdentityCache>,
     entrypoint_pid: Arc<AtomicU32>,
     secret_resolver: Option<Arc<SecretResolver>>,
+    package_proxy: Option<PackageProxyConfig>,
     denial_tx: Option<&mpsc::UnboundedSender<DenialEvent>>,
 ) -> Result<()> {
     // 1. Parse the absolute-form URI
@@ -1675,10 +2129,33 @@ async fn handle_forward_proxy(
     };
     let policy_str = matched_policy.as_deref().unwrap_or("-");
 
+    let endpoint_settings = match query_endpoint_settings(&opa_engine, &decision, &host_lc, port) {
+        Ok(settings) => settings,
+        Err(reason) => {
+            warn!(
+                dst_host = %host_lc,
+                dst_port = port,
+                reason = %reason,
+                "FORWARD blocked: invalid endpoint config"
+            );
+            emit_denial_simple(
+                denial_tx,
+                &host_lc,
+                port,
+                &binary_str,
+                &decision,
+                &reason,
+                "endpoint-config",
+            );
+            respond(client, b"HTTP/1.1 502 Bad Gateway\r\n\r\n").await?;
+            return Ok(());
+        }
+    };
+
     // 4b. Reject if the endpoint has L7 config — the forward proxy path does
     //     not perform per-request method/path inspection, so L7-configured
     //     endpoints must go through the CONNECT tunnel where inspection happens.
-    if query_l7_config(&opa_engine, &decision, &host_lc, port).is_some() {
+    if endpoint_settings.l7_config.is_some() {
         info!(
             dst_host = %host_lc,
             dst_port = port,
@@ -1703,67 +2180,15 @@ async fn handle_forward_proxy(
         return Ok(());
     }
 
-    // 5. DNS resolution + SSRF defence (mirrors the CONNECT path logic).
-    //    - If allowed_ips is set: validate resolved IPs against the allowlist
-    //      (this is the SSRF override for private IP destinations).
-    //    - If allowed_ips is empty: reject internal IPs, allow public IPs through.
-    let raw_allowed_ips = query_allowed_ips(&opa_engine, &decision, &host_lc, port);
-
-    let addrs = if !raw_allowed_ips.is_empty() {
-        // allowed_ips mode: validate resolved IPs against CIDR allowlist.
-        match parse_allowed_ips(&raw_allowed_ips) {
-            Ok(nets) => match resolve_and_check_allowed_ips(&host, port, &nets).await {
-                Ok(addrs) => addrs,
-                Err(reason) => {
-                    warn!(
-                        dst_host = %host_lc,
-                        dst_port = port,
-                        reason = %reason,
-                        "FORWARD blocked: allowed_ips check failed"
-                    );
-                    emit_denial_simple(
-                        denial_tx,
-                        &host_lc,
-                        port,
-                        &binary_str,
-                        &decision,
-                        &reason,
-                        "ssrf",
-                    );
-                    respond(client, b"HTTP/1.1 403 Forbidden\r\n\r\n").await?;
-                    return Ok(());
-                }
-            },
-            Err(reason) => {
-                warn!(
-                    dst_host = %host_lc,
-                    dst_port = port,
-                    reason = %reason,
-                    "FORWARD blocked: invalid allowed_ips in policy"
-                );
-                emit_denial_simple(
-                    denial_tx,
-                    &host_lc,
-                    port,
-                    &binary_str,
-                    &decision,
-                    &reason,
-                    "ssrf",
-                );
-                respond(client, b"HTTP/1.1 403 Forbidden\r\n\r\n").await?;
-                return Ok(());
-            }
-        }
-    } else {
-        // No allowed_ips: reject internal IPs, allow public IPs through.
-        match resolve_and_reject_internal(&host, port).await {
+    let resolved_addrs =
+        match resolve_destination_addrs(&host, port, &endpoint_settings.allowed_ips).await {
             Ok(addrs) => addrs,
             Err(reason) => {
                 warn!(
                     dst_host = %host_lc,
                     dst_port = port,
                     reason = %reason,
-                    "FORWARD blocked: internal IP without allowed_ips"
+                    "FORWARD blocked: destination validation failed"
                 );
                 emit_denial_simple(
                     denial_tx,
@@ -1777,17 +2202,98 @@ async fn handle_forward_proxy(
                 respond(client, b"HTTP/1.1 403 Forbidden\r\n\r\n").await?;
                 return Ok(());
             }
-        }
-    };
+        };
 
-    // 6. Connect upstream
-    let mut upstream = match TcpStream::connect(addrs.as_slice()).await {
-        Ok(s) => s,
-        Err(e) => {
+    if should_route_via_package_proxy(&endpoint_settings, package_proxy.as_ref(), &decision) {
+        let Some(package_proxy) = package_proxy.as_ref() else {
+            let reason = "package proxy route requested but sandbox package proxy is not configured";
+            emit_denial_simple(
+                denial_tx,
+                &host_lc,
+                port,
+                &binary_str,
+                &decision,
+                reason,
+                "package-proxy",
+            );
+            respond(client, b"HTTP/1.1 502 Bad Gateway\r\n\r\n").await?;
+            return Ok(());
+        };
+        let egress_profile = match resolve_package_proxy_profile(
+            endpoint_settings.egress_profile.as_deref(),
+            package_proxy,
+        ) {
+            Ok(profile) => profile,
+            Err(reason) => {
+                emit_denial_simple(
+                    denial_tx,
+                    &host_lc,
+                    port,
+                    &binary_str,
+                    &decision,
+                    &reason,
+                    "package-proxy",
+                );
+                respond(client, b"HTTP/1.1 502 Bad Gateway\r\n\r\n").await?;
+                return Ok(());
+            }
+        };
+        let mut upstream = match package_proxy.connect().await {
+            Ok(stream) => stream,
+            Err(error) => {
+                warn!(
+                    dst_host = %host_lc,
+                    dst_port = port,
+                    upstream_proxy = %package_proxy.upstream_url(),
+                    error = %error,
+                    "FORWARD upstream package proxy failed"
+                );
+                respond(client, b"HTTP/1.1 502 Bad Gateway\r\n\r\n").await?;
+                return Ok(());
+            }
+        };
+        info!(
+            src_addr = %peer_addr.ip(),
+            src_port = peer_addr.port(),
+            proxy_addr = %local_addr,
+            dst_host = %host_lc,
+            dst_port = port,
+            method = %method,
+            path = %path,
+            binary = %binary_str,
+            binary_pid = %pid_str,
+            ancestors = %ancestors_str,
+            cmdline = %cmdline_str,
+            action = "allow",
+            engine = "opa",
+            policy = %policy_str,
+            egress_via = "package_proxy",
+            egress_profile = %egress_profile,
+            upstream_proxy = %package_proxy.upstream_url(),
+            resolved_ips = ?resolved_addrs,
+            reason = "",
+            "FORWARD",
+        );
+        let rewritten = rewrite_forward_request_for_upstream_proxy(
+            buf,
+            used,
+            secret_resolver.as_deref(),
+            package_proxy,
+        );
+        upstream.write_all(&rewritten).await.into_diagnostic()?;
+        let _ = tokio::io::copy_bidirectional(client, &mut upstream)
+            .await
+            .into_diagnostic()?;
+        return Ok(());
+    }
+
+    let mut upstream = match TcpStream::connect(resolved_addrs.as_slice()).await {
+        Ok(stream) => stream,
+        Err(error) => {
             warn!(
                 dst_host = %host_lc,
                 dst_port = port,
-                error = %e,
+                error = %error,
                 "FORWARD upstream connect failed"
             );
             respond(client, b"HTTP/1.1 502 Bad Gateway\r\n\r\n").await?;
@@ -1795,7 +2301,6 @@ async fn handle_forward_proxy(
         }
     };
 
-    // Log success
     info!(
         src_addr = %peer_addr.ip(),
         src_port = peer_addr.port(),
@@ -1811,19 +2316,19 @@ async fn handle_forward_proxy(
         action = "allow",
         engine = "opa",
         policy = %policy_str,
+        egress_via = "direct",
+        egress_profile = "-",
+        upstream_proxy = "-",
+        resolved_ips = ?resolved_addrs,
         reason = "",
         "FORWARD",
     );
 
-    // 9. Rewrite request and forward to upstream
     let rewritten = rewrite_forward_request(buf, used, &path, secret_resolver.as_deref());
     upstream.write_all(&rewritten).await.into_diagnostic()?;
-
-    // 8. Relay remaining traffic bidirectionally (supports streaming)
     let _ = tokio::io::copy_bidirectional(client, &mut upstream)
         .await
         .into_diagnostic()?;
-
     Ok(())
 }
 
@@ -1863,6 +2368,7 @@ fn is_benign_relay_error(err: &miette::Report) -> bool {
 mod tests {
     use super::*;
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+    use temp_env::with_vars;
 
     // -- is_internal_ip: IPv4 --
 
@@ -2497,6 +3003,175 @@ mod tests {
         let result_str = String::from_utf8_lossy(&result);
         assert!(result_str.contains("Authorization: Bearer sk-test"));
         assert!(!result_str.contains("openshell:resolve:env:ANTHROPIC_API_KEY"));
+    }
+
+    #[test]
+    fn package_proxy_config_parses_env() {
+        let auth_file = tempfile::NamedTempFile::new().expect("temp auth file");
+        std::fs::write(auth_file.path(), "Bearer proxy-token\n").expect("write auth file");
+
+        with_vars(
+            vec![
+                (PACKAGE_PROXY_ENABLED_ENV, Some("1")),
+                (PACKAGE_PROXY_PROFILE_ENV, Some("socket")),
+                (PACKAGE_PROXY_UPSTREAM_URL_ENV, Some("http://proxy.socket.dev:8080")),
+                (
+                    PACKAGE_PROXY_AUTHORIZATION_FILE_ENV,
+                    auth_file.path().to_str(),
+                ),
+                (PACKAGE_PROXY_CA_FILE_ENV, None),
+            ],
+            || {
+                let config = PackageProxyConfig::from_env()
+                    .expect("config parse")
+                    .expect("config should exist");
+                assert_eq!(config.profile(), "socket");
+                assert_eq!(config.upstream_url(), "http://proxy.socket.dev:8080");
+                assert_eq!(config.authorization(), Some("Bearer proxy-token"));
+                assert!(config.extra_ca_paths().is_empty());
+            },
+        );
+    }
+
+    #[test]
+    fn package_proxy_config_requires_upstream_url_when_enabled() {
+        with_vars(
+            vec![
+                (PACKAGE_PROXY_ENABLED_ENV, Some("1")),
+                (PACKAGE_PROXY_UPSTREAM_URL_ENV, None),
+                (PACKAGE_PROXY_PROFILE_ENV, None),
+                (PACKAGE_PROXY_CA_FILE_ENV, None),
+                (PACKAGE_PROXY_AUTHORIZATION_FILE_ENV, None),
+            ],
+            || {
+                let error = PackageProxyConfig::from_env().expect_err("missing URL should fail");
+                assert!(error.to_string().contains(PACKAGE_PROXY_UPSTREAM_URL_ENV));
+            },
+        );
+    }
+
+    #[test]
+    fn package_proxy_routes_known_package_manager_binaries_when_enabled() {
+        let decision = ConnectDecision {
+            action: NetworkAction::Allow {
+                matched_policy: Some("allow".to_string()),
+            },
+            binary: Some(PathBuf::from("/usr/bin/npm")),
+            binary_pid: Some(1234),
+            ancestors: Vec::new(),
+            cmdline_paths: Vec::new(),
+        };
+        let endpoint_settings = EndpointSettings::default();
+        let package_proxy = PackageProxyConfig {
+            profile: "generic".to_string(),
+            upstream_url: "http://proxy.socket.dev:8080".to_string(),
+            upstream_host: "proxy.socket.dev".to_string(),
+            upstream_port: 8080,
+            scheme: PackageProxyScheme::Http,
+            authorization: None,
+            extra_ca_paths: Vec::new(),
+            upstream_tls_config: None,
+        };
+
+        assert!(should_route_via_package_proxy(
+            &endpoint_settings,
+            Some(&package_proxy),
+            &decision,
+        ));
+    }
+
+    #[test]
+    fn package_proxy_routes_known_package_manager_cmdline_paths_when_enabled() {
+        let decision = ConnectDecision {
+            action: NetworkAction::Allow {
+                matched_policy: Some("allow".to_string()),
+            },
+            binary: Some(PathBuf::from("/usr/bin/node")),
+            binary_pid: Some(1234),
+            ancestors: Vec::new(),
+            cmdline_paths: vec![PathBuf::from("/usr/lib/node_modules/npm/bin/npm-cli.js")],
+        };
+        let endpoint_settings = EndpointSettings::default();
+        let package_proxy = PackageProxyConfig {
+            profile: "generic".to_string(),
+            upstream_url: "http://proxy.socket.dev:8080".to_string(),
+            upstream_host: "proxy.socket.dev".to_string(),
+            upstream_port: 8080,
+            scheme: PackageProxyScheme::Http,
+            authorization: None,
+            extra_ca_paths: Vec::new(),
+            upstream_tls_config: None,
+        };
+
+        assert!(should_route_via_package_proxy(
+            &endpoint_settings,
+            Some(&package_proxy),
+            &decision,
+        ));
+    }
+
+    #[test]
+    fn package_proxy_does_not_route_non_package_binaries_without_endpoint_override() {
+        let decision = ConnectDecision {
+            action: NetworkAction::Allow {
+                matched_policy: Some("allow".to_string()),
+            },
+            binary: Some(PathBuf::from("/usr/bin/curl")),
+            binary_pid: Some(1234),
+            ancestors: vec![PathBuf::from("/usr/bin/bash")],
+            cmdline_paths: Vec::new(),
+        };
+        let endpoint_settings = EndpointSettings::default();
+        let package_proxy = PackageProxyConfig {
+            profile: "generic".to_string(),
+            upstream_url: "http://proxy.socket.dev:8080".to_string(),
+            upstream_host: "proxy.socket.dev".to_string(),
+            upstream_port: 8080,
+            scheme: PackageProxyScheme::Http,
+            authorization: None,
+            extra_ca_paths: Vec::new(),
+            upstream_tls_config: None,
+        };
+
+        assert!(!should_route_via_package_proxy(
+            &endpoint_settings,
+            Some(&package_proxy),
+            &decision,
+        ));
+    }
+
+    #[test]
+    fn rewrite_forward_request_for_upstream_proxy_injects_proxy_authorization() {
+        let auth_file = tempfile::NamedTempFile::new().expect("temp auth file");
+        std::fs::write(auth_file.path(), "Bearer proxy-token\n").expect("write auth file");
+        with_vars(
+            vec![
+                (PACKAGE_PROXY_ENABLED_ENV, Some("1")),
+                (PACKAGE_PROXY_UPSTREAM_URL_ENV, Some("http://proxy.socket.dev:8080")),
+                (
+                    PACKAGE_PROXY_AUTHORIZATION_FILE_ENV,
+                    auth_file.path().to_str(),
+                ),
+                (PACKAGE_PROXY_CA_FILE_ENV, None),
+                (PACKAGE_PROXY_PROFILE_ENV, None),
+            ],
+            || {
+                let package_proxy = PackageProxyConfig::from_env()
+                    .expect("config parse")
+                    .expect("config should exist");
+                let raw = b"GET http://registry.npmjs.org/pkg HTTP/1.1\r\nHost: registry.npmjs.org\r\nProxy-Authorization: Basic old\r\n\r\n";
+                let rewritten = rewrite_forward_request_for_upstream_proxy(
+                    raw,
+                    raw.len(),
+                    None,
+                    &package_proxy,
+                );
+                let rewritten = String::from_utf8_lossy(&rewritten);
+                assert!(rewritten.starts_with("GET http://registry.npmjs.org/pkg HTTP/1.1\r\n"));
+                assert!(rewritten.contains("Proxy-Authorization: Bearer proxy-token"));
+                assert!(!rewritten.contains("Basic old"));
+            },
+        );
     }
 
     // --- Forward proxy SSRF defence tests ---

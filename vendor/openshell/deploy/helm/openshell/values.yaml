@@ -79,6 +79,12 @@ server:
   # Extended resource name requested on sandbox pods for FUSE device injection.
   # When set, the gateway adds `resources.limits[<name>] = 1` to each sandbox pod.
   sandboxFuseResourceName: ""
+  packageProxy:
+    enabled: false
+    profile: socket
+    upstreamUrl: ""
+    caSecretName: ""
+    authSecretName: ""
   # gRPC endpoint for sandboxes to callback to OpenShell (must be reachable from pods)
   grpcEndpoint: "https://openshell.openshell.svc.cluster.local:8080"
   # Public host/port returned to CLI clients for SSH proxy CONNECT requests.

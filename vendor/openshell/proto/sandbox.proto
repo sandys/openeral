@@ -85,6 +85,12 @@ message NetworkEndpoint {
   // If `port` is set and `ports` is empty, `port` is normalized to `ports: [port]`.
   // If both are set, `ports` takes precedence.
   repeated uint32 ports = 9;
+  // Egress route for allowed traffic. Empty/default means direct egress.
+  // Supported values include "direct" and "package_proxy".
+  string egress_via = 10;
+  // Optional routing profile metadata for the selected egress path.
+  // For package proxy routing this can identify the backend, for example "socket".
+  string egress_profile = 11;
 }
 
 // An L7 policy rule (allow-only).

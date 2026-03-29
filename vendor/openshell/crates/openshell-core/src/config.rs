@@ -90,6 +90,26 @@ pub struct Config {
     /// resource limit of `1`, which triggers kubelet device-plugin allocation.
     #[serde(default)]
     pub sandbox_fuse_resource_name: String,
+
+    /// Whether sandbox pods should default to package-proxy routing support.
+    #[serde(default)]
+    pub package_proxy_enabled: bool,
+
+    /// Routing profile for package-proxy endpoints (for example `socket`).
+    #[serde(default)]
+    pub package_proxy_profile: String,
+
+    /// Upstream proxy URL used for `egress_via=package_proxy` endpoints.
+    #[serde(default)]
+    pub package_proxy_upstream_url: String,
+
+    /// Kubernetes secret name containing the package-proxy CA bundle for sandbox pods.
+    #[serde(default)]
+    pub package_proxy_ca_secret_name: String,
+
+    /// Kubernetes secret name containing package-proxy auth material for sandbox pods.
+    #[serde(default)]
+    pub package_proxy_auth_secret_name: String,
 }
 
 /// TLS configuration.
@@ -140,6 +160,11 @@ impl Config {
             client_tls_secret_name: String::new(),
             host_gateway_ip: String::new(),
             sandbox_fuse_resource_name: String::new(),
+            package_proxy_enabled: false,
+            package_proxy_profile: String::new(),
+            package_proxy_upstream_url: String::new(),
+            package_proxy_ca_secret_name: String::new(),
+            package_proxy_auth_secret_name: String::new(),
         }
     }
 
@@ -259,6 +284,41 @@ impl Config {
     #[must_use]
     pub fn with_sandbox_fuse_resource_name(mut self, name: impl Into<String>) -> Self {
         self.sandbox_fuse_resource_name = name.into();
+        self
+    }
+
+    /// Set whether sandbox pods should default to package-proxy routing support.
+    #[must_use]
+    pub const fn with_package_proxy_enabled(mut self, enabled: bool) -> Self {
+        self.package_proxy_enabled = enabled;
+        self
+    }
+
+    /// Set the package-proxy routing profile.
+    #[must_use]
+    pub fn with_package_proxy_profile(mut self, profile: impl Into<String>) -> Self {
+        self.package_proxy_profile = profile.into();
+        self
+    }
+
+    /// Set the upstream proxy URL used for package-proxy routing.
+    #[must_use]
+    pub fn with_package_proxy_upstream_url(mut self, url: impl Into<String>) -> Self {
+        self.package_proxy_upstream_url = url.into();
+        self
+    }
+
+    /// Set the secret name containing the package-proxy CA bundle.
+    #[must_use]
+    pub fn with_package_proxy_ca_secret_name(mut self, name: impl Into<String>) -> Self {
+        self.package_proxy_ca_secret_name = name.into();
+        self
+    }
+
+    /// Set the secret name containing package-proxy auth material.
+    #[must_use]
+    pub fn with_package_proxy_auth_secret_name(mut self, name: impl Into<String>) -> Self {
+        self.package_proxy_auth_secret_name = name.into();
         self
     }
 }
