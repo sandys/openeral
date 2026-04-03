@@ -35,6 +35,8 @@ OpenEral FUSE support uses three custom runtime images:
   - requests the FUSE device resource
 - `sandbox`
   - contains `openeral`, `fuse3`, and `/etc/fstab`
+  - installs this repo's `sandboxes/openeral/policy.yaml` as
+    `/etc/openshell/policy.yaml`
 
 Only two refs are user-facing:
 
@@ -52,6 +54,40 @@ Unsupported combinations:
 - upstream `cluster` + openeral `sandbox`
 
 The vendored OpenShell source in this repo exists to build the custom `cluster` and `gateway` images. It is not the supported source of the user-facing CLI.
+
+## Sandbox Policy Is Image-Owned
+
+The openeral sandbox image ships its own full OpenShell policy file:
+
+```text
+/etc/openshell/policy.yaml
+```
+
+This is copied from:
+
+```text
+sandboxes/openeral/policy.yaml
+```
+
+That file is not just a small addon. It is the authoritative sandbox policy for
+the openeral image.
+
+Why the override exists:
+
+- the upstream base sandbox policy was not enough for the current
+  placeholder-based Claude auth path
+- openeral needs the child process to keep seeing
+  `openshell:resolve:env:ANTHROPIC_API_KEY`
+- the proxy then needs an explicit secret-injection rule to rewrite that
+  placeholder into the outbound `x-api-key` header for Anthropic
+
+Today the image policy contains two important Anthropic-related rules:
+
+- `claude_code`
+  - for the normal Claude Code runtime path
+  - secret injection on `x-api-key`
+- `anthropic_secret_test`
+  - for direct `curl`-based live verification with `GET /v1/models`
 
 ## Optional Package Proxy
 
@@ -116,6 +152,13 @@ Migration note:
 - plain `HTTP_PROXY` forward-proxy requests no longer rewrite
   `openshell:resolve:env:*` placeholders
 - placeholder-based auth must use the CONNECT + REST + TLS-terminate path
+
+Current Anthropic detail:
+
+- the openeral sandbox policy rewrites `ANTHROPIC_API_KEY` into the
+  `x-api-key` header for Claude traffic to `api.anthropic.com`
+- this is what allows the stock `claude` CLI to run successfully while the
+  child environment still contains only the placeholder value
 
 ### Local Development
 
@@ -230,6 +273,36 @@ This is the preferred and supported user flow:
 
 The same rule applies in CI: release smoke installs the upstream released `openshell` CLI and drives the published openeral images through that CLI path.
 
+## Live-Proven Checks
+
+The current sandbox image was live-tested with these checks:
+
+### Claude path
+
+```bash
+HOME=/home/agent claude -p 'Reply with READY and nothing else.'
+```
+
+Expected properties during that run:
+
+- `ANTHROPIC_API_KEY=openshell:resolve:env:ANTHROPIC_API_KEY` inside the child
+- Claude returns `READY`
+- `.claude*` rows appear in `_openeral.workspace_files`
+
+### Direct secret-injection path
+
+```bash
+curl -fsS https://api.anthropic.com/v1/models \
+  -H "x-api-key: $ANTHROPIC_API_KEY" \
+  -H 'anthropic-version: 2023-06-01'
+```
+
+Expected properties during that run:
+
+- `$ANTHROPIC_API_KEY` is still the placeholder value in the child env
+- the request succeeds through the proxy rewrite path
+- the response contains Anthropic model data
+
 ## Database Migrations
 
 `openeral` carries its own embedded PostgreSQL migrations with `refinery`.
@@ -255,6 +328,8 @@ When the sandbox is healthy:
 - `/db` is mounted read-only by `openeral`
 - Claude runs with `HOME=/home/agent`
 - `.claude` files are written into PostgreSQL-backed storage
+- `/etc/openshell/policy.yaml` comes from this repo's sandbox image, not from
+  the upstream base image unchanged
 
 The sandbox image declares these mounts in `/etc/fstab`:
 

@@ -29,6 +29,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Copy openeral binary
 COPY --from=builder /build/target/release/openeral /usr/local/bin/openeral
 
+# Override the upstream base policy with the openeral sandbox policy so the
+# stock Claude path keeps working with placeholder credentials under boundary
+# secret injection.
+COPY sandboxes/openeral/policy.yaml /etc/openshell/policy.yaml
+
 # Allow non-root FUSE mounts
 RUN echo "user_allow_other" >> /etc/fuse.conf
 
