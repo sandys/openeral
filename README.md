@@ -27,12 +27,14 @@ Same machine = same workspace (keyed to hostname by default).
 
 ```bash
 # Session 1: Claude writes a file
-npx openeral -- -p 'Write "hello" to ~/notes.txt'
+npx openeral -- -p 'Write "hello" to $HOME/notes.txt' --dangerously-skip-permissions
 
 # Session 2: it's still there
-npx openeral -- -p 'Read ~/notes.txt'
+npx openeral -- -p 'Run: cat $HOME/notes.txt' --dangerously-skip-permissions
 # → hello
 ```
+
+Use `$HOME/` (not `~/`) in prompts — Claude Code's file tools resolve `~` to the OS user home, but `$HOME` correctly points to the persistent workspace.
 
 Override the workspace ID to manage multiple workspaces:
 

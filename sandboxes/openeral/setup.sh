@@ -25,8 +25,8 @@ export WORKSPACE_ID="${OPENSHELL_SANDBOX_ID:-default}"
 
 echo "setup.sh: running migrations..."
 node -e "
-  import('$OPENERAL_DIR/src/db/pool.js').then(async ({ createPool }) => {
-    const { runMigrations } = await import('$OPENERAL_DIR/src/db/migrations.js');
+  import('$OPENERAL_DIR/dist/db/pool.js').then(async ({ createPool }) => {
+    const { runMigrations } = await import('$OPENERAL_DIR/dist/db/migrations.js');
     const pool = createPool(process.env.DATABASE_URL);
     await runMigrations(pool);
     await pool.end();
@@ -39,9 +39,9 @@ node -e "
 
 echo "setup.sh: seeding workspace $WORKSPACE_ID..."
 node -e "
-  import('$OPENERAL_DIR/src/db/pool.js').then(async ({ createPool }) => {
-    const { runMigrations } = await import('$OPENERAL_DIR/src/db/migrations.js');
-    const ws = await import('$OPENERAL_DIR/src/db/workspace-queries.js');
+  import('$OPENERAL_DIR/dist/db/pool.js').then(async ({ createPool }) => {
+    const { runMigrations } = await import('$OPENERAL_DIR/dist/db/migrations.js');
+    const ws = await import('$OPENERAL_DIR/dist/db/workspace-queries.js');
     const pool = createPool(process.env.DATABASE_URL);
 
     // Ensure workspace config exists

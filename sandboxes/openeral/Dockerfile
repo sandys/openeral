@@ -14,9 +14,9 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/*
 
-# Install openeral-js
+# Install openeral-js: install all deps (including devDeps for tsc), build, then prune
 COPY openeral-js/ /opt/openeral/
-RUN cd /opt/openeral && npm install --omit=dev
+RUN cd /opt/openeral && npm install && npm run build && npm prune --omit=dev
 
 # openeral-bash: drop-in bash replacement routed through just-bash
 COPY sandboxes/openeral/openeral-bash.mjs /opt/openeral/openeral-bash.mjs

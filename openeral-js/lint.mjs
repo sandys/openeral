@@ -195,6 +195,39 @@ if (shellSrc.includes("defineCommand('pg'") || shellSrc.includes('defineCommand(
 }
 
 // ---------------------------------------------------------------------------
+// Lint 9: Sandbox scripts must import from dist/, not src/
+// Catches: importing .ts source instead of compiled .js in container
+// ---------------------------------------------------------------------------
+console.log('\n--- Lint: sandbox imports use dist/ ---');
+
+for (const f of ['../sandboxes/openeral/setup.sh', '../sandboxes/openeral/openeral-bash.mjs']) {
+  try {
+    const content = readFileSync(f, 'utf8');
+    if (/\/opt\/openeral\/src\//.test(content)) {
+      fail(f, 'imports from /opt/openeral/src/ — must use /opt/openeral/dist/');
+    }
+  } catch {}
+}
+pass('sandbox scripts import from dist/');
+
+// ---------------------------------------------------------------------------
+// Lint 10: Dockerfile must build TypeScript
+// Catches: forgetting npm run build in the Dockerfile
+// ---------------------------------------------------------------------------
+console.log('\n--- Lint: Dockerfile builds TypeScript ---');
+
+try {
+  const dockerfile = readFileSync('../sandboxes/openeral/Dockerfile', 'utf8');
+  if (!dockerfile.includes('npm run build')) {
+    fail('sandboxes/openeral/Dockerfile', 'must run "npm run build" to compile TypeScript');
+  } else {
+    pass('Dockerfile builds TypeScript');
+  }
+} catch {
+  pass('Dockerfile not found (skipped)');
+}
+
+// ---------------------------------------------------------------------------
 // Summary
 // ---------------------------------------------------------------------------
 

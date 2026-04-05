@@ -27,7 +27,7 @@ const SOCKET_PATH = '/tmp/openeral-bash.sock';
 // ---------------------------------------------------------------------------
 
 async function startDaemon() {
-  const { createOpeneralShell } = await import('/opt/openeral/src/shell.js');
+  const { createOpeneralShell } = await import('/opt/openeral/dist/shell.js');
 
   const connectionString = process.env.DATABASE_URL || process.env.OPENERAL_DATABASE_URL;
   if (!connectionString) {
@@ -145,7 +145,7 @@ function execViaDaemon(command) {
 // ---------------------------------------------------------------------------
 
 async function execStandalone(command) {
-  const { createOpeneralShell } = await import('/opt/openeral/src/shell.js');
+  const { createOpeneralShell } = await import('/opt/openeral/dist/shell.js');
 
   const connectionString = process.env.DATABASE_URL || process.env.OPENERAL_DATABASE_URL;
   if (!connectionString) {
