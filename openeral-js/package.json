@@ -9,10 +9,12 @@
     "build": "tsc",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "lint": "node lint.mjs",
+    "check": "npm run typecheck && npm run lint && npm run test"
   },
   "dependencies": {
-    "just-bash": "^0.1.0",
+    "just-bash": "^2.14.0",
     "pg": "^8.13.0"
   },
   "devDependencies": {

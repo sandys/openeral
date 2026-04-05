@@ -97,6 +97,18 @@ export async function createOpeneralShell(opts: OpeneralShellOptions): Promise<B
     await runMigrations(pool);
   }
 
+  // Ensure workspace config exists
+  await pool.query(
+    `INSERT INTO _openeral.workspace_config (id, display_name, config)
+     VALUES ($1, $2, '{}'::jsonb)
+     ON CONFLICT (id) DO NOTHING`,
+    [opts.workspaceId, opts.workspaceId],
+  );
+
+  // Seed root directory if it doesn't exist
+  const { seedFromConfig } = await import('./db/workspace-queries.js');
+  await seedFromConfig(pool, opts.workspaceId, { autoDirs: ['/'], seedFiles: {} });
+
   const pgFs = new PgFs(pool, {
     pageSize: opts.pageSize,
     cacheTtlMs: opts.cacheTtlMs,
@@ -104,10 +116,10 @@ export async function createOpeneralShell(opts: OpeneralShellOptions): Promise<B
   const wsFs = new WorkspaceFs(pool, opts.workspaceId);
 
   const fs = new MountableFs({
-    base: new InMemoryFs({ '/tmp': {} }),
+    base: new InMemoryFs({ '/tmp': {} } as any),
     mounts: [
-      { mountPoint: '/db', filesystem: pgFs },
-      { mountPoint: '/home/agent', filesystem: wsFs },
+      { mountPoint: '/db', filesystem: pgFs as any },
+      { mountPoint: '/home/agent', filesystem: wsFs as any },
     ],
   });
 
