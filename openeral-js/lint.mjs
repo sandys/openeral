@@ -242,6 +242,45 @@ if (/writePgHelper\([^)]*connStr|writePgHelper\([^)]*url|writePgHelper\([^)]*dat
 }
 
 // ---------------------------------------------------------------------------
+// Lint 12: No hardcoded connection strings in test files
+// Catches: test files with fallback DATABASE_URL defaults
+// ---------------------------------------------------------------------------
+console.log('\n--- Lint: no hardcoded creds in test files ---');
+
+for (const testFile of ['test-integration.mjs', 'test-e2e-claude.mjs']) {
+  try {
+    const content = readFileSync(testFile, 'utf8');
+    // Match patterns like: || 'postgresql://...' or = 'postgresql://...'
+    if (/['"]postgresql:\/\/[^'"]*password[^'"]*['"]/.test(content)) {
+      fail(testFile, 'contains hardcoded PostgreSQL connection string with password');
+    }
+    if (/['"]sk-ant-[^'"]*['"]/.test(content)) {
+      fail(testFile, 'contains hardcoded Anthropic API key');
+    }
+  } catch {}
+}
+pass('test files have no hardcoded credentials');
+
+// ---------------------------------------------------------------------------
+// Lint 13: Sandbox scripts must not contain literal connection strings
+// Catches: setup.sh or openeral-bash.mjs baking credentials
+// ---------------------------------------------------------------------------
+console.log('\n--- Lint: no creds in sandbox scripts ---');
+
+for (const f of ['../sandboxes/openeral/setup.sh', '../sandboxes/openeral/openeral-bash.mjs']) {
+  try {
+    const content = readFileSync(f, 'utf8');
+    if (/postgresql:\/\/[^$][^'"]*@/.test(content)) {
+      fail(f, 'contains literal PostgreSQL connection string');
+    }
+    if (/sk-ant-/.test(content)) {
+      fail(f, 'contains literal Anthropic API key');
+    }
+  } catch {}
+}
+pass('sandbox scripts have no hardcoded credentials');
+
+// ---------------------------------------------------------------------------
 // Summary
 // ---------------------------------------------------------------------------
 
