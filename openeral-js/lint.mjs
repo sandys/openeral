@@ -551,6 +551,48 @@ try {
 } catch {}
 
 // ---------------------------------------------------------------------------
+// Lint 28: setup.sh must clean stale .npmrc when SOCKET_TOKEN is absent
+// Catches: persisted placeholder token breaking npm in later sessions
+// ---------------------------------------------------------------------------
+console.log('\n--- Lint: stale .npmrc cleanup ---');
+
+try {
+  const setup = readFileSync('../sandboxes/openeral/setup.sh', 'utf8');
+  if (setup.includes('SOCKET_TOKEN') && !setup.includes('rm -f /home/agent/.npmrc')) {
+    fail('sandboxes/openeral/setup.sh', 'must rm -f /home/agent/.npmrc when SOCKET_TOKEN is absent');
+  } else {
+    pass('setup.sh cleans stale .npmrc');
+  }
+} catch {
+  pass('setup.sh not found (skipped)');
+}
+
+// ---------------------------------------------------------------------------
+// Lint 29: skill must not unconditionally include --provider socket
+// Catches: making optional Socket provider mandatory in the launch command
+// ---------------------------------------------------------------------------
+console.log('\n--- Lint: skill socket provider is conditional ---');
+
+try {
+  const skill = readFileSync('../.claude/skills/openeral-shell/SKILL.md', 'utf8');
+  // Find the openshell sandbox create line in Step 3c
+  if (skill.includes('--provider socket --auto-providers')) {
+    // Check it's inside a conditional block
+    const socketIdx = skill.indexOf('--provider socket');
+    const precedingBlock = skill.slice(Math.max(0, socketIdx - 300), socketIdx);
+    if (!precedingBlock.includes('SOCKET_TOKEN')) {
+      fail('.claude/skills/openeral-shell/SKILL.md', '--provider socket must be conditional on SOCKET_TOKEN');
+    } else {
+      pass('skill socket provider is conditional');
+    }
+  } else {
+    pass('skill socket provider is conditional (not in launch command)');
+  }
+} catch {
+  pass('skill not found (skipped)');
+}
+
+// ---------------------------------------------------------------------------
 // Summary
 // ---------------------------------------------------------------------------
 

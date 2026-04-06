@@ -78,6 +78,11 @@ if [ -n "${SOCKET_TOKEN:-}" ]; then
 registry=https://registry.socket.dev/npm/
 //registry.socket.dev/npm/:_authToken=${SOCKET_TOKEN}
 NPMRC
+else
+  # Remove stale .npmrc from a previous session that had SOCKET_TOKEN.
+  # A persisted placeholder token causes npm to fail with HTTP 500
+  # when the Socket provider is not attached to this session.
+  rm -f /home/agent/.npmrc
 fi
 
 echo "setup.sh: starting openeral-bash daemon..."

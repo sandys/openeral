@@ -80,11 +80,17 @@ If `/opt/openeral/` doesn't exist:
 which openshell || echo "Install openshell: https://github.com/NVIDIA/OpenShell"
 openshell gateway list 2>/dev/null | grep -q running || openshell gateway start
 openshell provider create --name db --type generic --credential DATABASE_URL 2>/dev/null || true
-# Optional: Socket.dev package scanning
-openshell provider create --name socket --type generic --credential SOCKET_TOKEN 2>/dev/null || true
+
+# Build provider list — socket is only added if SOCKET_TOKEN is set
+PROVIDERS="--provider db --provider claude"
+if [ -n "${SOCKET_TOKEN:-}" ]; then
+  openshell provider create --name socket --type generic --credential SOCKET_TOKEN 2>/dev/null || true
+  PROVIDERS="$PROVIDERS --provider socket"
+fi
+
 openshell sandbox create \
   --from ghcr.io/sandys/openeral/sandbox:just-bash \
-  --provider db --provider claude --provider socket --auto-providers \
+  $PROVIDERS --auto-providers \
   -- /opt/openeral/setup.sh
 ```
 

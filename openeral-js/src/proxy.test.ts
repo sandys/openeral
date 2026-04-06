@@ -83,4 +83,13 @@ describe('setup.sh Socket.dev integration', () => {
   it('Socket.dev config is conditional (only when SOCKET_TOKEN is set)', () => {
     expect(setup).toMatch(/if \[ -n "\$\{SOCKET_TOKEN:-\}"/);
   });
+
+  it('removes stale .npmrc when SOCKET_TOKEN is absent', () => {
+    expect(setup).toContain('rm -f /home/agent/.npmrc');
+    // The rm must be in the else branch (when SOCKET_TOKEN is NOT set)
+    const elseIdx = setup.indexOf('else');
+    const rmIdx = setup.indexOf('rm -f /home/agent/.npmrc');
+    expect(elseIdx).toBeGreaterThan(-1);
+    expect(rmIdx).toBeGreaterThan(elseIdx);
+  });
 });
