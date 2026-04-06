@@ -483,6 +483,74 @@ try {
 }
 
 // ---------------------------------------------------------------------------
+// Lint 25: Socket.dev policy must be read-only (least privilege)
+// Catches: access: full on registry that only needs GET for npm install
+// ---------------------------------------------------------------------------
+console.log('\n--- Lint: Socket.dev is read-only ---');
+
+try {
+  const policy = readFileSync('../sandboxes/openeral/policy.yaml', 'utf8');
+  if (policy.includes('registry.socket.dev')) {
+    const socketStart = policy.indexOf('socket_packages:');
+    const nextPol = policy.indexOf('\n  #', socketStart + 1);
+    const socketBlock = policy.slice(socketStart, nextPol > 0 ? nextPol : undefined);
+    if (socketBlock.includes('access: full')) {
+      fail('sandboxes/openeral/policy.yaml', 'Socket.dev policy must use access: read-only, not access: full');
+    } else {
+      pass('Socket.dev policy is read-only');
+    }
+  } else {
+    pass('no Socket.dev endpoint (skipped)');
+  }
+} catch {
+  pass('policy.yaml not found (skipped)');
+}
+
+// ---------------------------------------------------------------------------
+// Lint 26: setup.sh must write .npmrc to /home/agent, not use npm config set
+// Catches: npm config writing to wrong HOME (sandbox default vs /home/agent)
+// ---------------------------------------------------------------------------
+console.log('\n--- Lint: npm config targets /home/agent ---');
+
+try {
+  const setup = readFileSync('../sandboxes/openeral/setup.sh', 'utf8');
+  if (setup.includes('SOCKET_TOKEN')) {
+    if (setup.includes('npm config set')) {
+      fail('sandboxes/openeral/setup.sh', 'must write /home/agent/.npmrc directly, not use npm config set (wrong HOME)');
+    } else if (!setup.includes('/home/agent/.npmrc')) {
+      fail('sandboxes/openeral/setup.sh', 'Socket.dev config must write to /home/agent/.npmrc');
+    } else {
+      pass('npm config targets /home/agent/.npmrc');
+    }
+  } else {
+    pass('no Socket.dev config (skipped)');
+  }
+} catch {
+  pass('setup.sh not found (skipped)');
+}
+
+// ---------------------------------------------------------------------------
+// Lint 27: no stale test files referencing vendor/ or fork-specific fields
+// Catches: tests that depend on the removed vendor/openshell/ tree
+// ---------------------------------------------------------------------------
+console.log('\n--- Lint: no stale vendor test scripts ---');
+
+try {
+  const { readdirSync } = await import('node:fs');
+  const testDir = '../tests';
+  try {
+    const tests = readdirSync(testDir);
+    for (const t of tests) {
+      const content = readFileSync(`${testDir}/${t}`, 'utf8');
+      if (content.includes('vendor/openshell')) {
+        fail(`tests/${t}`, 'references vendor/openshell which no longer exists');
+      }
+    }
+  } catch {}
+  pass('no stale vendor test scripts');
+} catch {}
+
+// ---------------------------------------------------------------------------
 // Summary
 // ---------------------------------------------------------------------------
 
