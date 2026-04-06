@@ -6,29 +6,41 @@
  * watchAndSync: continuous background sync via fs.watch
  */
 
-import { mkdirSync, writeFileSync, readFileSync, readdirSync, statSync, chmodSync, existsSync, watch } from 'node:fs';
-import { join, dirname } from 'node:path';
+import { mkdirSync, writeFileSync, readFileSync, readdirSync, statSync, chmodSync, unlinkSync, rmSync, existsSync, watch } from 'node:fs';
+import { join, dirname, relative } from 'node:path';
 import type pg from 'pg';
 
 function nowNs(): bigint {
   return BigInt(Date.now()) * 1_000_000n;
 }
 
+/** Default directories to skip — exact basename matches only. */
+const DEFAULT_EXCLUDE_DIRS = new Set(['node_modules', '.git']);
+
+function shouldExclude(name: string, excludeDirs: Set<string>): boolean {
+  return excludeDirs.has(name);
+}
+
 /**
  * Dump all workspace_files rows to a real directory.
  * Creates directories and writes file content, preserving stored modes.
+ * Removes local files that are not in the database.
  */
 export async function syncToFs(
   pool: pg.Pool,
   workspaceId: string,
   targetDir: string,
+  opts?: { excludeDirs?: Set<string> },
 ): Promise<number> {
+  const excludeDirs = opts?.excludeDirs ?? DEFAULT_EXCLUDE_DIRS;
+
   const { rows } = await pool.query(
     `SELECT path, is_dir, content, mode FROM _openeral.workspace_files
      WHERE workspace_id = $1 ORDER BY path`,
     [workspaceId],
   );
 
+  const dbPaths = new Set(rows.map((r: any) => r.path as string));
   let count = 0;
 
   // Create directories first (sorted by path ensures parents before children)
@@ -36,7 +48,6 @@ export async function syncToFs(
     if (!row.is_dir) continue;
     const fullPath = join(targetDir, row.path);
     mkdirSync(fullPath, { recursive: true });
-    // Apply stored mode (strip file-type bits, keep permission bits)
     try { chmodSync(fullPath, row.mode & 0o7777); } catch {}
     count++;
   }
@@ -48,12 +59,57 @@ export async function syncToFs(
     mkdirSync(dirname(fullPath), { recursive: true });
     const content = row.content ?? Buffer.alloc(0);
     writeFileSync(fullPath, content);
-    // Apply stored mode (strip file-type bits, keep permission bits)
     try { chmodSync(fullPath, row.mode & 0o7777); } catch {}
     count++;
   }
 
+  // Remove local files/dirs not present in DB (prune stale leftovers)
+  pruneLocal(targetDir, '/', dbPaths, excludeDirs);
+
   return count;
+}
+
+/**
+ * Recursively remove local entries not in dbPaths.
+ * Walks bottom-up so children are removed before parents.
+ */
+function pruneLocal(
+  baseDir: string,
+  dbParent: string,
+  dbPaths: Set<string>,
+  excludeDirs: Set<string>,
+): void {
+  const fullDir = join(baseDir, dbParent);
+  let entries: string[];
+  try {
+    entries = readdirSync(fullDir);
+  } catch {
+    return;
+  }
+
+  for (const name of entries) {
+    if (shouldExclude(name, excludeDirs)) continue;
+
+    const fullPath = join(fullDir, name);
+    const dbPath = dbParent === '/' ? `/${name}` : `${dbParent}/${name}`;
+
+    let st;
+    try {
+      st = statSync(fullPath);
+    } catch {
+      continue;
+    }
+
+    if (st.isDirectory()) {
+      // Recurse first, then check if dir should be removed
+      pruneLocal(baseDir, dbPath, dbPaths, excludeDirs);
+      if (!dbPaths.has(dbPath)) {
+        try { rmSync(fullPath, { recursive: true }); } catch {}
+      }
+    } else if (!dbPaths.has(dbPath)) {
+      try { unlinkSync(fullPath); } catch {}
+    }
+  }
 }
 
 /**
@@ -64,9 +120,9 @@ export async function syncFromFs(
   pool: pg.Pool,
   workspaceId: string,
   sourceDir: string,
-  opts?: { exclude?: RegExp },
+  opts?: { excludeDirs?: Set<string> },
 ): Promise<number> {
-  const exclude = opts?.exclude ?? /node_modules|\.git/;
+  const excludeDirs = opts?.excludeDirs ?? DEFAULT_EXCLUDE_DIRS;
   const seenPaths = new Set<string>(['/']);
   let count = 0;
 
@@ -79,7 +135,7 @@ export async function syncFromFs(
     }
 
     for (const name of entries) {
-      if (exclude.test(name)) continue;
+      if (shouldExclude(name, excludeDirs)) continue;
 
       const fullPath = join(dirPath, name);
       const dbPath = dbParent === '/' ? `/${name}` : `${dbParent}/${name}`;
@@ -155,10 +211,10 @@ export function watchAndSync(
   pool: pg.Pool,
   workspaceId: string,
   dir: string,
-  opts?: { debounceMs?: number; exclude?: RegExp },
+  opts?: { debounceMs?: number; excludeDirs?: Set<string> },
 ): () => void {
   const debounceMs = opts?.debounceMs ?? 2000;
-  const exclude = opts?.exclude ?? /node_modules|\.git/;
+  const excludeDirs = opts?.excludeDirs ?? DEFAULT_EXCLUDE_DIRS;
   let timer: ReturnType<typeof setTimeout> | null = null;
   let syncing = false;
 
@@ -168,7 +224,11 @@ export function watchAndSync(
     const watcher = watch(dir, { recursive: true, signal: ac.signal });
 
     watcher.on('change', (_event, filename) => {
-      if (typeof filename === 'string' && exclude.test(filename)) return;
+      if (typeof filename === 'string') {
+        // Check each path segment against excludeDirs
+        const segments = filename.split('/');
+        if (segments.some(s => shouldExclude(s, excludeDirs))) return;
+      }
 
       // Debounce: wait for changes to settle before syncing
       if (timer) clearTimeout(timer);
@@ -176,7 +236,7 @@ export function watchAndSync(
         if (syncing) return;
         syncing = true;
         try {
-          await syncFromFs(pool, workspaceId, dir, { exclude });
+          await syncFromFs(pool, workspaceId, dir, { excludeDirs });
         } catch (err: any) {
           process.stderr.write(`openeral: sync error: ${err.message}\n`);
         } finally {

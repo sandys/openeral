@@ -331,6 +331,32 @@ if (!syncToFsSection.includes('chmodSync') || !syncToFsSection.includes('row.mod
 }
 
 // ---------------------------------------------------------------------------
+// Lint 16: Exclude must use exact dir name matching, not regex substring
+// Catches: regex like /\.git/ that also matches .gitignore, .github
+// ---------------------------------------------------------------------------
+console.log('\n--- Lint: exclude uses exact matching ---');
+
+if (syncContent.includes('.test(name)') && syncContent.includes('/node_modules|\\.git/')) {
+  fail('src/sync.ts', 'exclude uses regex substring matching — .gitignore and .github would be wrongly excluded');
+} else if (!syncContent.includes('excludeDirs.has(name)')) {
+  fail('src/sync.ts', 'exclude must use Set.has() for exact directory name matching');
+} else {
+  pass('exclude uses exact Set-based matching');
+}
+
+// ---------------------------------------------------------------------------
+// Lint 17: syncToFs must prune local files not in DB
+// Catches: stale local files persisting across sessions on reused home dirs
+// ---------------------------------------------------------------------------
+console.log('\n--- Lint: syncToFs prunes stale local files ---');
+
+if (!syncToFsSection.includes('pruneLocal') && !syncToFsSection.includes('unlinkSync')) {
+  fail('src/sync.ts', 'syncToFs must remove local files not present in DB (stale leftovers)');
+} else {
+  pass('syncToFs prunes stale local files');
+}
+
+// ---------------------------------------------------------------------------
 // Summary
 // ---------------------------------------------------------------------------
 
