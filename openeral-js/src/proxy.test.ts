@@ -49,14 +49,13 @@ describe('proxy policy (PROXY-PLAN compliance)', () => {
     expect(socketSection).not.toContain('access: full');
   });
 
-  it('Socket.dev policy only allows npm binary (least privilege)', () => {
+  it('Socket.dev policy allows npm and node (node is the actual exe for npm shebang)', () => {
     const socketStart = policy.indexOf('socket_packages:');
     const nextPolicy = policy.indexOf('\n  #', socketStart + 1);
     const socketBlock = policy.slice(socketStart, nextPolicy > 0 ? nextPolicy : undefined);
-    // Must allow npm
     expect(socketBlock).toContain('/usr/bin/npm');
-    // Must NOT allow node or npx (too broad)
-    expect(socketBlock).not.toContain('/usr/bin/node');
+    expect(socketBlock).toContain('/usr/bin/node');
+    // Must NOT allow npx (not needed for npm install)
     expect(socketBlock).not.toContain('/usr/bin/npx');
   });
 });
