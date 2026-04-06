@@ -1,6 +1,6 @@
 ---
 name: openeral-dev
-description: Develop openeral-js — persistent /home/agent + read-only /db for AI agents via just-bash + PostgreSQL
+description: Develop openeral-js — isolated home + optional PostgreSQL persistence + database access for AI agents
 disable-model-invocation: false
 user-invocable: true
 allowed-tools: Read, Grep, Glob, Bash
@@ -9,12 +9,14 @@ argument-hint: [task description]
 
 # OpenEral Development
 
-OpenEral gives AI agents persistent `/home/agent` and read-only `/db`, backed by PostgreSQL, via just-bash. Works with stock OpenShell — no custom cluster or gateway.
+OpenEral gives AI agents an isolated home directory with optional PostgreSQL-backed persistence and database access. Works with stock OpenShell or standalone via `npx openeral`.
 
 ## Key Files
 
 ```
 openeral-js/src/
+  cli.ts                      # npx openeral entry point (persistence optional)
+  sync.ts                     # PostgreSQL ↔ real filesystem sync
   pg-fs/pg-fs.ts              # PgFs: read-only IFileSystem → SQL queries
   pg-fs/path-parser.ts        # parsePath() → PgNode discriminated union
   workspace-fs/workspace-fs.ts # WorkspaceFs: read-write → workspace_files table
@@ -26,31 +28,24 @@ openeral-js/src/
 
 sandboxes/openeral/
   Dockerfile                  # Stock OpenShell base + Node.js + openeral-js
-  openeral-bash.mjs           # Daemon/client bridge for Claude Code
-  setup.sh                    # Entry point: migrate → seed → daemon → claude
-  policy.yaml                 # Network policy + boundary secret injection
+  openeral-bash.mjs           # Daemon/client bridge for custom agents
+  setup.sh                    # Sandbox entry point
+  policy.yaml                 # Network policy
 ```
 
 ## Build & Verify
 
 ```bash
 cd openeral-js
-pnpm check                                      # typecheck + lint + unit tests
+pnpm install && pnpm build
+pnpm check                                      # typecheck + 20 lints + unit tests
 DATABASE_URL='...' node test-integration.mjs     # 34 tests against live PostgreSQL
-DATABASE_URL='...' ANTHROPIC_API_KEY='...' node test-e2e-claude.mjs  # 45 tests, 3 sessions
+DATABASE_URL='...' ANTHROPIC_API_KEY='...' node test-e2e-claude.mjs  # 45+ tests, 3 sessions
 ```
 
-## Structural Lints (lint.mjs)
+## Structural Lints (lint.mjs — 20 rules)
 
-8 rules that prevent known bug classes:
-1. All local imports resolve to existing .ts files
-2. All named imports match actual exports
-3. just-bash version >= 2.x
-4. shell.ts auto-creates workspace_config and seeds root
-5. PgFs write methods throw EROFS
-6. No write-back buffering in WorkspaceFs
-7. No FUSE references in sandbox Dockerfile
-8. pg custom command defined in shell.ts
+Key rules: imports resolve, exports match, just-bash >=2.x, PgFs throws EROFS, no write-back buffering, no FUSE in Dockerfile, no hardcoded credentials, sync persists deletions, sync preserves modes, exclude uses exact matching, syncToFs prunes stale files, syncToFs prunes before creating, pruneLocal handles type conflicts, README includes build steps.
 
 ## Conventions
 
@@ -59,13 +54,10 @@ DATABASE_URL='...' ANTHROPIC_API_KEY='...' node test-e2e-claude.mjs  # 45 tests,
 - Path parsing replaces FUSE inodes: `parsePath()` → PgNode
 - SQL uses `quoteIdent()` + `$N` params + `::text` casts
 - `pg` command: complex SQL must be double-quoted
-- Command safety: AST walk + regex fallback (pi-coding-agent pattern)
-- Shell factory: MountableFs + customCommands + executionLimits + defenseInDepth (Supabase pattern)
-
-## Sandbox
-
-Uses stock OpenShell base image. No custom cluster or gateway images. The openeral-bash daemon holds a persistent just-bash shell on a Unix socket — each `bash -c` from Claude Code connects, executes, streams output.
+- Command safety: AST walk + regex fallback
+- Persistence is optional — CLI works without DATABASE_URL (local-only mode)
+- Never hardcode credentials — always read from environment at runtime
 
 ## Migrations
 
-Auto-run in `createOpeneralShell()`. Schema: `_openeral` with tables `workspace_config`, `workspace_files`, `schema_version`, `mount_log`, `cache_hints`. Must be idempotent.
+Auto-run in `createOpeneralShell()` and CLI. Schema: `_openeral` with tables `workspace_config`, `workspace_files`, `schema_version`, `mount_log`, `cache_hints`. Must be idempotent.

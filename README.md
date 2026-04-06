@@ -55,12 +55,13 @@ Stock OpenShell — no custom cluster or gateway images.
 
 ## What you get
 
-- **Persistent home** — files written to `$HOME` survive across sessions, backed by PostgreSQL
-- **Database access** — `pg "SELECT * FROM users LIMIT 5"` from Claude's bash
-- **Automatic sync** — file changes sync to PostgreSQL in the background, final save on exit
+- **Isolated home** — Claude Code runs in its own `$HOME`, separate from your system
+- **Persistent home** (with `DATABASE_URL`) — files survive across sessions, backed by PostgreSQL
+- **Database access** (with `DATABASE_URL`) — `pg "SELECT * FROM users LIMIT 5"` from Claude's bash
+- **Automatic sync** (with `DATABASE_URL`) — file changes sync to PostgreSQL in the background
 - **Session isolation** — different `OPENERAL_WORKSPACE_ID` = different workspace
 
-## Persistence
+## Persistence (requires DATABASE_URL)
 
 Same machine = same workspace (keyed to hostname by default).
 
@@ -81,7 +82,7 @@ Multiple workspaces:
 OPENERAL_WORKSPACE_ID=project-alpha npx openeral
 ```
 
-## Database access
+## Database access (requires DATABASE_URL)
 
 Claude can query the connected database:
 
@@ -97,7 +98,7 @@ The `pg` command is automatically available — OpenEral writes a `CLAUDE.md` th
 
 | Variable | Default | Description |
 |---|---|---|
-| `DATABASE_URL` | (required) | PostgreSQL connection string |
+| `DATABASE_URL` | (optional) | PostgreSQL connection string — enables persistence and `pg` |
 | `ANTHROPIC_API_KEY` | (required for Claude) | Anthropic API key |
 | `OPENERAL_WORKSPACE_ID` | hostname | Workspace identifier |
 | `OPENERAL_HOME` | `/tmp/openeral-<id>` | Local workspace directory |

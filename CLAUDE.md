@@ -4,8 +4,8 @@
 
 ```bash
 cd openeral-js
-pnpm install
-pnpm check                    # typecheck + lint + unit tests
+pnpm install && pnpm build
+pnpm check                    # typecheck + 20 lints + unit tests
 
 # Integration (requires PostgreSQL)
 DATABASE_URL='...' node test-integration.mjs
@@ -16,37 +16,40 @@ DATABASE_URL='...' ANTHROPIC_API_KEY='...' node test-e2e-claude.mjs
 
 ## Project Structure
 
-- `openeral-js/` — TypeScript package (just-bash + PostgreSQL virtual filesystem)
+- `openeral-js/` — TypeScript package
+  - `src/cli.ts` — `npx openeral` entry point (persistence optional)
+  - `src/sync.ts` — PostgreSQL ↔ real filesystem sync
   - `src/pg-fs/` — PgFs: read-only IFileSystem backed by SQL queries
   - `src/workspace-fs/` — WorkspaceFs: read-write IFileSystem backed by workspace_files
   - `src/db/` — SQL queries, migrations, pool, types
   - `src/safety.ts` — command safety analysis via just-bash parse() AST
   - `src/shell.ts` — createOpeneralShell(), createToolHandler()
   - `src/index.ts` — public API
-  - `lint.mjs` — 8 structural lint rules
+  - `lint.mjs` — 20 structural lint rules
 - `sandboxes/openeral/` — OpenShell sandbox image (stock base, no FUSE)
   - `Dockerfile` — Node.js + openeral-js on stock OpenShell base
-  - `openeral-bash.mjs` — daemon/client bridge for Claude Code's bash
-  - `setup.sh` — entry point: migrate, seed, daemon, exec claude
-  - `policy.yaml` — network policy with boundary secret injection
-- `crates/` — original Rust implementation (reference, not used in sandbox)
+  - `openeral-bash.mjs` — daemon/client bridge for custom agents
+  - `setup.sh` — sandbox entry point
+  - `policy.yaml` — network policy
+- `crates/` — original Rust implementation (reference, not used)
 
 ## Conventions
 
+- Persistence is optional — CLI works without DATABASE_URL (local-only mode)
 - IFileSystem implementations are path-based (no inodes)
 - `parsePath()` returns a `PgNode` discriminated union
 - SQL queries use `quoteIdent()` for identifiers, `$N` params for values, `::text` casts
 - PgFs throws EROFS on all write methods
 - WorkspaceFs receives complete content per writeFile() — no write-back buffering
 - Command safety: just-bash parse() AST walk with regex fallback
-- `pg` command: SQL with parens or quotes must be double-quoted (`pg "SELECT count(*) ..."`)
+- `pg` command: SQL with parens or quotes must be double-quoted
 
 ## Hard Rules
 
 - **Never fix forward from the middle.** Stop and restart the flow from scratch.
 - **Never delete, move, or overwrite user files without explicit permission.**
 - **If a file appears risky, stop and ask first.**
-- **Never hardcode credentials, connection strings, or secrets into files.** Always read from environment variables at runtime. This is critical for OpenShell's compliance model — providers inject credentials via env vars, and baking them into scripts bypasses the boundary secret injection path and leaks secrets to disk.
+- **Never hardcode credentials, connection strings, or secrets into files.** Always read from environment variables at runtime.
 
 ## Commit Style
 
