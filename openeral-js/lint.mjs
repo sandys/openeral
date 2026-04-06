@@ -406,6 +406,36 @@ try {
 }
 
 // ---------------------------------------------------------------------------
+// Lint 21: Migrations must use advisory lock for concurrent safety
+// Catches: race condition when two shells start on a fresh database
+// ---------------------------------------------------------------------------
+console.log('\n--- Lint: migrations use advisory lock ---');
+
+const migrationsContent = readFileSync('src/db/migrations.ts', 'utf8');
+if (!migrationsContent.includes('pg_advisory_lock')) {
+  fail('src/db/migrations.ts', 'runMigrations must use pg_advisory_lock to serialize concurrent callers');
+} else {
+  pass('migrations use advisory lock');
+}
+
+// ---------------------------------------------------------------------------
+// Lint 22: Skill bootstrap must check node_modules, not just dist
+// Catches: skill treating dist/-present but node_modules/-missing tree as launch-ready
+// ---------------------------------------------------------------------------
+console.log('\n--- Lint: skill checks node_modules ---');
+
+try {
+  const skill = readFileSync('../.claude/skills/openeral-shell/SKILL.md', 'utf8');
+  if (skill.includes('[ -d dist ]') && !skill.includes('node_modules')) {
+    fail('.claude/skills/openeral-shell/SKILL.md', 'bootstrap check must verify node_modules exists, not just dist');
+  } else {
+    pass('skill checks node_modules');
+  }
+} catch {
+  pass('skill not found (skipped)');
+}
+
+// ---------------------------------------------------------------------------
 // Summary
 // ---------------------------------------------------------------------------
 

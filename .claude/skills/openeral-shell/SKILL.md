@@ -49,9 +49,9 @@ pnpm install && pnpm build
 OPENERAL_DIR=/tmp/openeral-clone/openeral-js
 ```
 
-3. If found but no `dist/`, build:
+3. If found but missing `dist/` or `node_modules/`, install and build:
 ```bash
-cd "$OPENERAL_DIR" && [ -d dist ] || (pnpm install && pnpm build)
+cd "$OPENERAL_DIR" && [ -d dist ] && [ -d node_modules ] || (pnpm install && pnpm build)
 ```
 
 4. Launch:
