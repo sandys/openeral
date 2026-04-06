@@ -70,19 +70,17 @@ node -e "
 # The token value is a placeholder (openshell:resolve:env:SOCKET_TOKEN) —
 # the OpenShell proxy resolves it to the real token in auth headers.
 #
-# Write to /home/agent/.npmrc explicitly — the final exec sets HOME=/home/agent,
-# so npm must find the config there, not under /sandbox (the default HOME).
+# Uses a separate openeral-managed file (/tmp/openeral-npmrc), NOT the user's
+# ~/.npmrc, to avoid clobbering user config. Passed to npm via NPM_CONFIG_USERCONFIG.
+OPENERAL_NPMRC=/tmp/openeral-npmrc
+rm -f "$OPENERAL_NPMRC"
 if [ -n "${SOCKET_TOKEN:-}" ]; then
   echo "setup.sh: configuring npm to use Socket.dev registry..."
-  cat > /home/agent/.npmrc <<NPMRC
+  cat > "$OPENERAL_NPMRC" <<NPMRC
 registry=https://registry.socket.dev/npm/
 //registry.socket.dev/npm/:_authToken=${SOCKET_TOKEN}
 NPMRC
-else
-  # Remove stale .npmrc from a previous session that had SOCKET_TOKEN.
-  # A persisted placeholder token causes npm to fail with HTTP 500
-  # when the Socket provider is not attached to this session.
-  rm -f /home/agent/.npmrc
+  export NPM_CONFIG_USERCONFIG="$OPENERAL_NPMRC"
 fi
 
 echo "setup.sh: starting openeral-bash daemon..."

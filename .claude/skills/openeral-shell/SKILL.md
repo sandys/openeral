@@ -23,7 +23,9 @@ echo "ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:+(set)}"
 echo "OPENSHELL_SANDBOX=${OPENSHELL_SANDBOX:-0}"
 ```
 
-- If `DATABASE_URL` is not set, **continue** — persistence is optional. Tell the user: "Running without persistence. Set DATABASE_URL to enable it."
+- If `DATABASE_URL` is not set:
+  - **Local path (Step 3a)**: continue without persistence — it's optional locally.
+  - **OpenShell paths (Step 3b/3c)**: stop — `DATABASE_URL` is required for OpenShell sandbox setup. Tell the user to set it.
 - If `ANTHROPIC_API_KEY` is not set, warn but continue.
 
 ### Step 2: Detect environment

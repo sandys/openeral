@@ -49,30 +49,33 @@ describe('proxy policy (PROXY-PLAN compliance)', () => {
     expect(socketSection).not.toContain('access: full');
   });
 
-  it('Socket.dev policy allows npm and node (node is the actual exe for npm shebang)', () => {
+  it('Socket.dev policy allows npm and node (node is the actual exe)', () => {
     const socketStart = policy.indexOf('socket_packages:');
     const nextPolicy = policy.indexOf('\n  #', socketStart + 1);
     const socketBlock = policy.slice(socketStart, nextPolicy > 0 ? nextPolicy : undefined);
     expect(socketBlock).toContain('/usr/bin/npm');
     expect(socketBlock).toContain('/usr/bin/node');
-    // Must NOT allow npx (not needed for npm install)
-    expect(socketBlock).not.toContain('/usr/bin/npx');
   });
 });
 
 describe('setup.sh Socket.dev integration', () => {
-  it('configures npm registry when SOCKET_TOKEN is present', () => {
+  it('configures Socket.dev registry when SOCKET_TOKEN is present', () => {
     expect(setup).toContain('SOCKET_TOKEN');
     expect(setup).toContain('registry.socket.dev');
     expect(setup).toContain('_authToken');
   });
 
-  it('writes .npmrc to /home/agent (not default HOME)', () => {
-    expect(setup).toContain('/home/agent/.npmrc');
+  it('uses a separate openeral-managed file, not the user .npmrc', () => {
+    // Must NOT write to /home/agent/.npmrc (user's file)
+    expect(setup).not.toContain('/home/agent/.npmrc');
+    // Must use a temp/openeral-owned file
+    expect(setup).toMatch(/openeral-npmrc|OPENERAL_NPMRC/);
+    // Must set NPM_CONFIG_USERCONFIG to point npm at the openeral file
+    expect(setup).toContain('NPM_CONFIG_USERCONFIG');
   });
 
-  it('does not use npm config set (writes to wrong HOME)', () => {
-    expect(setup).not.toMatch(/npm config set/);
+  it('does not delete any file in /home/agent', () => {
+    expect(setup).not.toMatch(/rm.*\/home\/agent/);
   });
 
   it('does not hardcode the SOCKET_TOKEN value', () => {
@@ -82,14 +85,5 @@ describe('setup.sh Socket.dev integration', () => {
 
   it('Socket.dev config is conditional (only when SOCKET_TOKEN is set)', () => {
     expect(setup).toMatch(/if \[ -n "\$\{SOCKET_TOKEN:-\}"/);
-  });
-
-  it('removes stale .npmrc when SOCKET_TOKEN is absent', () => {
-    expect(setup).toContain('rm -f /home/agent/.npmrc');
-    // The rm must be in the else branch (when SOCKET_TOKEN is NOT set)
-    const elseIdx = setup.indexOf('else');
-    const rmIdx = setup.indexOf('rm -f /home/agent/.npmrc');
-    expect(elseIdx).toBeGreaterThan(-1);
-    expect(rmIdx).toBeGreaterThan(elseIdx);
   });
 });

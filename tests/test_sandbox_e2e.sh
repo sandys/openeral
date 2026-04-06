@@ -67,32 +67,34 @@ else
 fi
 
 echo ""
-echo "=== Test 3: .npmrc written to /home/agent when SOCKET_TOKEN is set ==="
+echo "=== Test 3: openeral-npmrc written to /tmp when SOCKET_TOKEN is set ==="
 out=$(run_in_image '
-  cat > /home/agent/.npmrc <<NPMRC
+  OPENERAL_NPMRC=/tmp/openeral-npmrc
+  rm -f "$OPENERAL_NPMRC"
+  cat > "$OPENERAL_NPMRC" <<NPMRC
 registry=https://registry.socket.dev/npm/
 //registry.socket.dev/npm/:_authToken=${SOCKET_TOKEN}
 NPMRC
-  cat /home/agent/.npmrc
+  cat "$OPENERAL_NPMRC"
 ')
 if echo "$out" | grep -q 'registry.socket.dev'; then
-  pass ".npmrc contains registry.socket.dev"
+  pass "openeral-npmrc contains registry.socket.dev"
 else
-  fail ".npmrc missing registry.socket.dev: $out"
+  fail "openeral-npmrc missing registry.socket.dev: $out"
 fi
 if echo "$out" | grep -q '_authToken=placeholder-for-test'; then
-  pass ".npmrc contains SOCKET_TOKEN placeholder"
+  pass "openeral-npmrc contains SOCKET_TOKEN placeholder"
 else
-  fail ".npmrc missing token: $out"
+  fail "openeral-npmrc missing token: $out"
 fi
 
 echo ""
-echo "=== Test 4: npm reads registry from /home/agent/.npmrc ==="
+echo "=== Test 4: npm reads registry via NPM_CONFIG_USERCONFIG ==="
 out=$(run_in_image '
-  cat > /home/agent/.npmrc <<NPMRC
+  cat > /tmp/openeral-npmrc <<NPMRC
 registry=https://registry.socket.dev/npm/
 NPMRC
-  HOME=/home/agent npm config get registry 2>/dev/null || echo "npm-config-failed"
+  NPM_CONFIG_USERCONFIG=/tmp/openeral-npmrc npm config get registry 2>/dev/null || echo "npm-config-failed"
 ')
 if echo "$out" | grep -q 'registry.socket.dev'; then
   pass "npm config reads Socket.dev registry"
@@ -180,39 +182,25 @@ else
 fi
 
 echo ""
-echo "=== Test 9: stale .npmrc removed when SOCKET_TOKEN is absent ==="
+echo "=== Test 9: user .npmrc is never touched ==="
 out=$(run_in_image '
-  # Simulate a previous session that wrote .npmrc
-  cat > /home/agent/.npmrc <<NPMRC
+  # Create a user .npmrc
+  echo "user-config=true" > /home/agent/.npmrc
+  # Simulate openeral Socket.dev config (writes to /tmp, not /home/agent)
+  OPENERAL_NPMRC=/tmp/openeral-npmrc
+  rm -f "$OPENERAL_NPMRC"
+  if [ -n "${SOCKET_TOKEN:-}" ]; then
+    cat > "$OPENERAL_NPMRC" <<NPMRC
 registry=https://registry.socket.dev/npm/
-//registry.socket.dev/npm/:_authToken=openshell:resolve:env:SOCKET_TOKEN
 NPMRC
-  echo "before: $(cat /home/agent/.npmrc | head -1)"
+  fi
+  # User .npmrc must be untouched
+  cat /home/agent/.npmrc
 ')
-# Now run without SOCKET_TOKEN — the stale .npmrc should be cleaned up
-out2=$(docker run --rm --network host \
-  -e DATABASE_URL="$DB_URL" \
-  -e WORKSPACE_ID="e2e-sandbox-$$" \
-  --user sandbox \
-  --entrypoint /bin/sh \
-  "$IMAGE" -c '
-    # Simulate stale .npmrc from previous session
-    cat > /home/agent/.npmrc <<NPMRC
-registry=https://registry.socket.dev/npm/
-//registry.socket.dev/npm/:_authToken=openshell:resolve:env:SOCKET_TOKEN
-NPMRC
-    # Source the cleanup logic from setup.sh (without running full setup)
-    if [ -n "${SOCKET_TOKEN:-}" ]; then
-      echo "would-write"
-    else
-      rm -f /home/agent/.npmrc
-    fi
-    [ -f /home/agent/.npmrc ] && echo "npmrc-still-exists" || echo "npmrc-cleaned"
-  ' 2>&1)
-if echo "$out2" | grep -q 'npmrc-cleaned'; then
-  pass "stale .npmrc removed when SOCKET_TOKEN is absent"
+if echo "$out" | grep -q 'user-config=true'; then
+  pass "user .npmrc preserved (not clobbered or deleted)"
 else
-  fail "stale .npmrc not cleaned: $out2"
+  fail "user .npmrc was modified: $out"
 fi
 
 # Cleanup test workspace

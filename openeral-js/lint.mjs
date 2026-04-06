@@ -507,23 +507,19 @@ try {
 }
 
 // ---------------------------------------------------------------------------
-// Lint 26: setup.sh must write .npmrc to /home/agent, not use npm config set
-// Catches: npm config writing to wrong HOME (sandbox default vs /home/agent)
+// Lint 26: setup.sh must not touch user's .npmrc
+// Catches: clobbering or deleting user-managed /home/agent/.npmrc
 // ---------------------------------------------------------------------------
-console.log('\n--- Lint: npm config targets /home/agent ---');
+console.log('\n--- Lint: setup.sh does not touch user .npmrc ---');
 
 try {
   const setup = readFileSync('../sandboxes/openeral/setup.sh', 'utf8');
-  if (setup.includes('SOCKET_TOKEN')) {
-    if (setup.includes('npm config set')) {
-      fail('sandboxes/openeral/setup.sh', 'must write /home/agent/.npmrc directly, not use npm config set (wrong HOME)');
-    } else if (!setup.includes('/home/agent/.npmrc')) {
-      fail('sandboxes/openeral/setup.sh', 'Socket.dev config must write to /home/agent/.npmrc');
-    } else {
-      pass('npm config targets /home/agent/.npmrc');
-    }
+  if (setup.includes('/home/agent/.npmrc')) {
+    fail('sandboxes/openeral/setup.sh', 'must not write or delete /home/agent/.npmrc — use a separate openeral-managed file + NPM_CONFIG_USERCONFIG');
+  } else if (setup.includes('npm config set')) {
+    fail('sandboxes/openeral/setup.sh', 'must not use npm config set (writes to user HOME)');
   } else {
-    pass('no Socket.dev config (skipped)');
+    pass('setup.sh does not touch user .npmrc');
   }
 } catch {
   pass('setup.sh not found (skipped)');
@@ -551,17 +547,17 @@ try {
 } catch {}
 
 // ---------------------------------------------------------------------------
-// Lint 28: setup.sh must clean stale .npmrc when SOCKET_TOKEN is absent
-// Catches: persisted placeholder token breaking npm in later sessions
+// Lint 28: setup.sh must use NPM_CONFIG_USERCONFIG for Socket.dev config
+// Catches: writing npm config to user's HOME instead of a temp file
 // ---------------------------------------------------------------------------
-console.log('\n--- Lint: stale .npmrc cleanup ---');
+console.log('\n--- Lint: Socket.dev uses NPM_CONFIG_USERCONFIG ---');
 
 try {
   const setup = readFileSync('../sandboxes/openeral/setup.sh', 'utf8');
-  if (setup.includes('SOCKET_TOKEN') && !setup.includes('rm -f /home/agent/.npmrc')) {
-    fail('sandboxes/openeral/setup.sh', 'must rm -f /home/agent/.npmrc when SOCKET_TOKEN is absent');
+  if (setup.includes('SOCKET_TOKEN') && !setup.includes('NPM_CONFIG_USERCONFIG')) {
+    fail('sandboxes/openeral/setup.sh', 'must set NPM_CONFIG_USERCONFIG to point npm at the openeral-managed file');
   } else {
-    pass('setup.sh cleans stale .npmrc');
+    pass('setup.sh uses NPM_CONFIG_USERCONFIG');
   }
 } catch {
   pass('setup.sh not found (skipped)');
