@@ -4,8 +4,6 @@ Persistent home directory and database access for AI agents, backed by PostgreSQ
 
 ## Run Claude Code with OpenEral
 
-You need two things: a PostgreSQL database and an Anthropic API key.
-
 ### Quickest: inside Claude Code
 
 If you're already in Claude Code, just say:
@@ -21,13 +19,21 @@ git clone https://github.com/sandys/openeral.git
 cd openeral/openeral-js
 pnpm install && pnpm build
 
-export DATABASE_URL='postgresql://user:pass@host:5432/dbname'
 export ANTHROPIC_API_KEY='sk-ant-...'
 
 npx openeral
 ```
 
-That's it. Claude Code starts with a home directory that persists to PostgreSQL.
+That's it. Claude Code launches with an isolated home directory.
+
+**Add persistence** by setting `DATABASE_URL` — files then survive across sessions:
+
+```bash
+export DATABASE_URL='postgresql://user:pass@host:5432/dbname'
+npx openeral
+```
+
+Without `DATABASE_URL`, OpenEral still works — Claude Code runs normally with a local temp home, just without cross-session persistence or database access.
 
 ### Via OpenShell
 

@@ -63,13 +63,13 @@ async function main() {
 
   // --- Validate env ---
   const databaseUrl = process.env.DATABASE_URL;
-  if (!databaseUrl) {
+  const persistenceEnabled = !!databaseUrl;
+
+  if (!persistenceEnabled) {
     process.stderr.write(
-      '\x1b[31mopeneral: DATABASE_URL is required\x1b[0m\n\n' +
-      'Set it to your PostgreSQL connection string:\n' +
-      '  export DATABASE_URL=\'postgresql://user:pass@host:5432/dbname\'\n\n',
+      '\x1b[33mopeneral: DATABASE_URL not set — running without persistence\x1b[0m\n' +
+      '\x1b[2m  Set DATABASE_URL to enable PostgreSQL-backed home directory\x1b[0m\n',
     );
-    process.exit(1);
   }
 
   if (!process.env.ANTHROPIC_API_KEY) {
@@ -82,39 +82,42 @@ async function main() {
   const homeDir = process.env.OPENERAL_HOME || `/tmp/openeral-${workspaceId}`;
   mkdirSync(homeDir, { recursive: true });
 
-  process.stderr.write(`\x1b[2mopeneral: workspace ${workspaceId}\x1b[0m\n`);
-  process.stderr.write(`\x1b[2mopeneral: home      ${homeDir}\x1b[0m\n`);
+  process.stderr.write(`\x1b[2mopeneral: workspace  ${workspaceId}\x1b[0m\n`);
+  process.stderr.write(`\x1b[2mopeneral: home       ${homeDir}\x1b[0m\n`);
+  process.stderr.write(`\x1b[2mopeneral: persist    ${persistenceEnabled ? 'PostgreSQL' : 'local only'}\x1b[0m\n`);
 
-  // --- Database setup ---
-  const pool = createPool(databaseUrl);
+  // --- Database setup (only if DATABASE_URL is set) ---
+  let pool: import('pg').Pool | null = null;
+  let stopWatch: (() => void) | null = null;
 
-  process.stderr.write('\x1b[2mopeneral: running migrations...\x1b[0m\n');
-  await runMigrations(pool);
+  if (persistenceEnabled) {
+    pool = createPool(databaseUrl);
 
-  // Ensure workspace config exists
-  await pool.query(
-    `INSERT INTO _openeral.workspace_config (id, display_name, config)
-     VALUES ($1, $2, '{}'::jsonb)
-     ON CONFLICT (id) DO NOTHING`,
-    [workspaceId, workspaceId],
-  );
+    process.stderr.write('\x1b[2mopeneral: running migrations...\x1b[0m\n');
+    await runMigrations(pool);
 
-  // --- Sync from PostgreSQL → filesystem ---
-  process.stderr.write('\x1b[2mopeneral: syncing workspace...\x1b[0m\n');
-  const synced = await syncToFs(pool, workspaceId, homeDir);
-  process.stderr.write(`\x1b[2mopeneral: restored ${synced} files\x1b[0m\n`);
+    // Ensure workspace config exists
+    await pool.query(
+      `INSERT INTO _openeral.workspace_config (id, display_name, config)
+       VALUES ($1, $2, '{}'::jsonb)
+       ON CONFLICT (id) DO NOTHING`,
+      [workspaceId, workspaceId],
+    );
 
-  // --- Write pg helper ---
-  const pgHelper = join(homeDir, '.local', 'bin', 'pg');
-  mkdirSync(join(homeDir, '.local', 'bin'), { recursive: true });
-  // Bake the connection string directly so it works regardless of
-  // whether Claude Code's Bash tool propagates DATABASE_URL.
-  writePgHelper(pgHelper);
+    // Sync from PostgreSQL → filesystem
+    process.stderr.write('\x1b[2mopeneral: syncing workspace...\x1b[0m\n');
+    const synced = await syncToFs(pool, workspaceId, homeDir);
+    process.stderr.write(`\x1b[2mopeneral: restored ${synced} files\x1b[0m\n`);
 
-  // --- Write CLAUDE.md ---
-  const claudeMdPath = join(homeDir, 'CLAUDE.md');
-  if (!existsSync(claudeMdPath)) {
-    writeFileSync(claudeMdPath, `# OpenEral
+    // Write pg helper
+    const pgHelper = join(homeDir, '.local', 'bin', 'pg');
+    mkdirSync(join(homeDir, '.local', 'bin'), { recursive: true });
+    writePgHelper(pgHelper);
+
+    // Write CLAUDE.md
+    const claudeMdPath = join(homeDir, 'CLAUDE.md');
+    if (!existsSync(claudeMdPath)) {
+      writeFileSync(claudeMdPath, `# OpenEral
 
 Your home directory persists across sessions.
 
@@ -128,11 +131,12 @@ Query the connected database:
 
 The \`pg\` command uses psql if available, otherwise Node.js pg.
 `);
-  }
+    }
 
-  // --- Start file watcher ---
-  process.stderr.write('\x1b[2mopeneral: watching for changes...\x1b[0m\n');
-  const stopWatch = watchAndSync(pool, workspaceId, homeDir);
+    // Start file watcher
+    process.stderr.write('\x1b[2mopeneral: watching for changes...\x1b[0m\n');
+    stopWatch = watchAndSync(pool, workspaceId, homeDir);
+  }
 
   // --- Launch Claude Code ---
   process.stderr.write('\x1b[2mopeneral: starting Claude Code\x1b[0m\n\n');
@@ -160,16 +164,17 @@ The \`pg\` command uses psql if available, otherwise Node.js pg.
   });
 
   child.on('exit', async (code) => {
-    // Final sync
-    stopWatch();
-    process.stderr.write('\n\x1b[2mopeneral: saving workspace...\x1b[0m\n');
-    try {
-      const saved = await syncFromFs(pool, workspaceId, homeDir);
-      process.stderr.write(`\x1b[2mopeneral: saved ${saved} files\x1b[0m\n`);
-    } catch (err: any) {
-      process.stderr.write(`\x1b[31mopeneral: sync failed: ${err.message}\x1b[0m\n`);
+    if (pool && stopWatch) {
+      stopWatch();
+      process.stderr.write('\n\x1b[2mopeneral: saving workspace...\x1b[0m\n');
+      try {
+        const saved = await syncFromFs(pool, workspaceId, homeDir);
+        process.stderr.write(`\x1b[2mopeneral: saved ${saved} files\x1b[0m\n`);
+      } catch (err: any) {
+        process.stderr.write(`\x1b[31mopeneral: sync failed: ${err.message}\x1b[0m\n`);
+      }
+      await pool.end();
     }
-    await pool.end();
     process.exit(code ?? 0);
   });
 
