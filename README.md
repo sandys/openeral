@@ -5,13 +5,16 @@ Persistent home directory and database access for AI agents, backed by PostgreSQ
 ## Claude Code
 
 ```bash
+git clone https://github.com/sandys/openeral.git && cd openeral
+cd openeral-js && pnpm install && pnpm build
+
 export DATABASE_URL='postgresql://user:pass@host:5432/dbname'
 export ANTHROPIC_API_KEY='sk-ant-...'
 
-cd openeral-js && npx openeral
+npx openeral
 ```
 
-That's it. Claude Code starts with a persistent home directory backed by PostgreSQL. Files survive across sessions. A `pg` command gives Claude direct database access.
+Claude Code starts with a persistent home directory backed by PostgreSQL. Files survive across sessions. A `pg` command gives Claude direct database access.
 
 ### What happens
 
@@ -27,10 +30,10 @@ Same machine = same workspace (keyed to hostname by default).
 
 ```bash
 # Session 1: Claude writes a file
-cd openeral-js && npx openeral -- -p 'Write "hello" to $HOME/notes.txt' --dangerously-skip-permissions
+npx openeral -- -p 'Write "hello" to $HOME/notes.txt' --dangerously-skip-permissions
 
 # Session 2: it's still there
-cd openeral-js && npx openeral -- -p 'Run: cat $HOME/notes.txt' --dangerously-skip-permissions
+npx openeral -- -p 'Run: cat $HOME/notes.txt' --dangerously-skip-permissions
 # → hello
 ```
 
@@ -39,7 +42,7 @@ Use `$HOME/` (not `~/`) in prompts — Claude Code's file tools resolve `~` to t
 Override the workspace ID to manage multiple workspaces:
 
 ```bash
-cd openeral-js && OPENERAL_WORKSPACE_ID=project-alpha npx openeral
+OPENERAL_WORKSPACE_ID=project-alpha npx openeral
 ```
 
 ### Database access

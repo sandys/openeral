@@ -54,9 +54,27 @@ describe('sync.ts structural checks', () => {
   });
 
   it('.gitignore and .github are NOT excluded', () => {
-    // The shouldExclude function checks exact names against the Set
-    // '.gitignore' !== '.git' and '.github' !== '.git'
-    // Verify no regex pattern that would match substrings
     expect(syncSrc).not.toContain('/node_modules|\\.git/');
+  });
+
+  it('syncToFs prunes BEFORE creating (handles type conflicts)', () => {
+    const syncToFsBody = syncSrc.slice(
+      syncSrc.indexOf('export async function syncToFs'),
+      syncSrc.indexOf('export async function syncFromFs'),
+    );
+    const pruneIdx = syncToFsBody.indexOf('pruneLocal');
+    const mkdirIdx = syncToFsBody.indexOf('mkdirSync(fullPath');
+    const writeIdx = syncToFsBody.indexOf('writeFileSync(fullPath');
+    // pruneLocal must appear BEFORE mkdir and writeFile
+    expect(pruneIdx).toBeGreaterThan(-1);
+    expect(mkdirIdx).toBeGreaterThan(pruneIdx);
+    expect(writeIdx).toBeGreaterThan(pruneIdx);
+  });
+
+  it('pruneLocal handles type conflicts (file↔dir)', () => {
+    // pruneLocal must check dbTypes for type mismatches, not just presence
+    expect(syncSrc).toContain('dbTypes');
+    expect(syncSrc).toContain('dbIsDir === false');
+    expect(syncSrc).toContain('dbIsDir === true');
   });
 });

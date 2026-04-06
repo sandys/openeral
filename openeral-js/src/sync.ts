@@ -41,9 +41,15 @@ export async function syncToFs(
   );
 
   const dbPaths = new Set(rows.map((r: any) => r.path as string));
+  const dbTypes = new Map(rows.map((r: any) => [r.path as string, r.is_dir as boolean]));
   let count = 0;
 
-  // Create directories first (sorted by path ensures parents before children)
+  // Step 1: Prune stale local entries AND resolve type conflicts BEFORE creating.
+  // A path that changed type (file↔dir) between sessions would cause EEXIST/EISDIR
+  // if we tried to create first.
+  pruneLocal(targetDir, '/', dbPaths, dbTypes, excludeDirs);
+
+  // Step 2: Create directories (sorted by path ensures parents before children)
   for (const row of rows) {
     if (!row.is_dir) continue;
     const fullPath = join(targetDir, row.path);
@@ -52,7 +58,7 @@ export async function syncToFs(
     count++;
   }
 
-  // Then write files
+  // Step 3: Write files
   for (const row of rows) {
     if (row.is_dir) continue;
     const fullPath = join(targetDir, row.path);
@@ -63,20 +69,21 @@ export async function syncToFs(
     count++;
   }
 
-  // Remove local files/dirs not present in DB (prune stale leftovers)
-  pruneLocal(targetDir, '/', dbPaths, excludeDirs);
-
   return count;
 }
 
 /**
- * Recursively remove local entries not in dbPaths.
+ * Recursively remove local entries that are either:
+ * - not in dbPaths (stale leftovers), or
+ * - present but with wrong type (file in DB but dir on disk, or vice versa)
+ *
  * Walks bottom-up so children are removed before parents.
  */
 function pruneLocal(
   baseDir: string,
   dbParent: string,
   dbPaths: Set<string>,
+  dbTypes: Map<string, boolean>,
   excludeDirs: Set<string>,
 ): void {
   const fullDir = join(baseDir, dbParent);
@@ -100,14 +107,28 @@ function pruneLocal(
       continue;
     }
 
+    const inDb = dbPaths.has(dbPath);
+    const dbIsDir = dbTypes.get(dbPath);
+
     if (st.isDirectory()) {
-      // Recurse first, then check if dir should be removed
-      pruneLocal(baseDir, dbPath, dbPaths, excludeDirs);
-      if (!dbPaths.has(dbPath)) {
+      // Recurse first so children are cleaned before we potentially remove this dir
+      pruneLocal(baseDir, dbPath, dbPaths, dbTypes, excludeDirs);
+
+      if (!inDb) {
+        // Stale directory — remove entirely
+        try { rmSync(fullPath, { recursive: true }); } catch {}
+      } else if (dbIsDir === false) {
+        // Type conflict: local is dir but DB says file — remove dir
         try { rmSync(fullPath, { recursive: true }); } catch {}
       }
-    } else if (!dbPaths.has(dbPath)) {
-      try { unlinkSync(fullPath); } catch {}
+    } else {
+      if (!inDb) {
+        // Stale file — remove
+        try { unlinkSync(fullPath); } catch {}
+      } else if (dbIsDir === true) {
+        // Type conflict: local is file but DB says dir — remove file
+        try { unlinkSync(fullPath); } catch {}
+      }
     }
   }
 }

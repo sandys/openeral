@@ -357,6 +357,33 @@ if (!syncToFsSection.includes('pruneLocal') && !syncToFsSection.includes('unlink
 }
 
 // ---------------------------------------------------------------------------
+// Lint 18: syncToFs must prune BEFORE creating (type conflict safety)
+// Catches: EEXIST/EISDIR when a path changed type between sessions
+// ---------------------------------------------------------------------------
+console.log('\n--- Lint: syncToFs prunes before creating ---');
+
+const pruneIdx = syncToFsSection.indexOf('pruneLocal');
+const firstMkdir = syncToFsSection.indexOf('mkdirSync(fullPath');
+const firstWrite = syncToFsSection.indexOf('writeFileSync(fullPath');
+if (pruneIdx < 0 || firstMkdir < 0 || pruneIdx > firstMkdir) {
+  fail('src/sync.ts', 'syncToFs must call pruneLocal BEFORE mkdirSync/writeFileSync to handle type conflicts');
+} else {
+  pass('syncToFs prunes before creating');
+}
+
+// ---------------------------------------------------------------------------
+// Lint 19: pruneLocal must handle type conflicts (file↔dir)
+// Catches: pruneLocal only checking presence, not type match
+// ---------------------------------------------------------------------------
+console.log('\n--- Lint: pruneLocal handles type conflicts ---');
+
+if (!syncContent.includes('dbTypes') || !syncContent.includes('dbIsDir === false') || !syncContent.includes('dbIsDir === true')) {
+  fail('src/sync.ts', 'pruneLocal must check dbTypes for file↔dir conflicts, not just presence');
+} else {
+  pass('pruneLocal handles type conflicts');
+}
+
+// ---------------------------------------------------------------------------
 // Summary
 // ---------------------------------------------------------------------------
 
