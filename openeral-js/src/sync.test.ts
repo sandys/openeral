@@ -1,7 +1,10 @@
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { dirname, join } from 'node:path';
 
-const syncSrc = readFileSync('src/sync.ts', 'utf8');
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const syncSrc = readFileSync(join(__dirname, 'sync.ts'), 'utf8');
 
 describe('sync.ts structural checks', () => {
   it('syncFromFs tracks seen paths for deletion', () => {

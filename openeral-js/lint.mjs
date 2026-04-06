@@ -384,6 +384,28 @@ if (!syncContent.includes('dbTypes') || !syncContent.includes('dbIsDir === false
 }
 
 // ---------------------------------------------------------------------------
+// Lint 20: README quickstart must include install+build steps
+// Catches: telling users "npx openeral" without showing pnpm install && pnpm build
+// ---------------------------------------------------------------------------
+console.log('\n--- Lint: README includes build steps ---');
+
+try {
+  const readme = readFileSync('../README.md', 'utf8');
+  // The first code block that mentions npx openeral must also mention pnpm install
+  const firstOpeneral = readme.indexOf('npx openeral');
+  const blockStart = readme.lastIndexOf('```', firstOpeneral);
+  const blockEnd = readme.indexOf('```', firstOpeneral);
+  const block = readme.slice(blockStart, blockEnd);
+  if (!block.includes('pnpm install') && !block.includes('npm install')) {
+    fail('README.md', 'quickstart code block with npx openeral must include install+build steps');
+  } else {
+    pass('README quickstart includes install+build');
+  }
+} catch {
+  pass('README not found (skipped)');
+}
+
+// ---------------------------------------------------------------------------
 // Summary
 // ---------------------------------------------------------------------------
 
