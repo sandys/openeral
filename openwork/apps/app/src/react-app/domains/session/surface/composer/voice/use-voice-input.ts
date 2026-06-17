@@ -5,7 +5,7 @@
 // ever sees it. onError, when provided, is called with a human-readable string
 // whenever recording/transcription fails, so callers can show it inline.
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
   WHISPER_SAMPLE_RATE,
   type VoiceWorkerRequest,
@@ -56,7 +56,10 @@ export function useVoiceInput(
 
   const onTranscriptRef = useRef(onTranscript);
   const onErrorRef = useRef(onError);
-  useEffect(() => {
+  // Sync the latest callbacks synchronously after commit (before paint and
+  // before any worker-message task), so a transcript result never runs an
+  // older closure — which would otherwise append to a stale draft snapshot.
+  useLayoutEffect(() => {
     onTranscriptRef.current = onTranscript;
     onErrorRef.current = onError;
   }, [onTranscript, onError]);
@@ -128,16 +131,16 @@ export function useVoiceInput(
 
   const transcribeBlob = useCallback(
     async (blob: Blob) => {
+      let ctx: AudioContext | null = null;
       try {
         const AudioCtx =
           window.AudioContext ??
           (window as unknown as { webkitAudioContext: typeof AudioContext })
             .webkitAudioContext;
-        const ctx = new AudioCtx({ sampleRate: WHISPER_SAMPLE_RATE });
+        ctx = new AudioCtx({ sampleRate: WHISPER_SAMPLE_RATE });
         const decoded = await ctx.decodeAudioData(await blob.arrayBuffer());
         // Mono: the mic is single-channel; channel 0 is all we need.
         const audio = new Float32Array(decoded.getChannelData(0));
-        void ctx.close();
 
         if (audio.length === 0) {
           setStatus("idle");
@@ -147,10 +150,21 @@ export function useVoiceInput(
         const id = ++requestIdRef.current;
         pendingIdRef.current = id;
         const request: VoiceWorkerRequest = { type: "transcribe", id, audio };
-        // A few seconds of 16kHz PCM is small, so a structured-clone copy is fine.
-        ensureWorker().postMessage(request);
+        // Transfer the PCM buffer instead of cloning it — `audio` is not used
+        // after this, so handing ownership to the worker avoids copying the
+        // full recording (which can be large for long-form dictation).
+        ensureWorker().postMessage(request, [audio.buffer as ArrayBuffer]);
       } catch (err) {
         fail(err instanceof Error ? err.message : String(err));
+      } finally {
+        // Always release the AudioContext, even when decodeAudioData rejects.
+        if (ctx) {
+          try {
+            await ctx.close();
+          } catch {
+            /* already closed / closing — ignore */
+          }
+        }
       }
     },
     [ensureWorker, fail],

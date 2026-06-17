@@ -1990,15 +1990,59 @@ async function createMainWindow() {
     },
   });
 
-  // Allow microphone capture for on-device voice dictation in the composer.
-  // Scope the grant to media/audio only; everything else stays denied.
-  const isMediaPermission = (permission) =>
-    permission === "media" || permission === "audioCapture";
+  // Microphone capture for on-device voice dictation. Grant narrowly:
+  //  - only the `media`/`audioCapture` permissions (everything else denied),
+  //  - only from the app's own content (the file:// bundle or the trusted dev
+  //    server), never arbitrary remote frames, and
+  //  - only audio — any request that includes video (camera) is denied.
+  const trustedStartOrigin = (() => {
+    const raw =
+      process.env.OPENWORK_ELECTRON_START_URL?.trim() ||
+      process.env.ELECTRON_START_URL?.trim();
+    if (!raw) return null;
+    try {
+      return new URL(raw).origin;
+    } catch {
+      return null;
+    }
+  })();
+  const isTrustedVoiceOrigin = (url) => {
+    if (typeof url !== "string" || url.length === 0) return false;
+    // Packaged build serves the renderer over file://.
+    if (url.startsWith("file://")) return true;
+    // Local dev server (Vite binds IPv4 loopback; localhost covers both).
+    if (url.startsWith("http://127.0.0.1") || url.startsWith("http://localhost")) {
+      return true;
+    }
+    if (trustedStartOrigin) {
+      try {
+        return new URL(url).origin === trustedStartOrigin;
+      } catch {
+        return false;
+      }
+    }
+    return false;
+  };
+  const isAudioOnlyMediaPermission = (permission, details) => {
+    if (permission !== "media" && permission !== "audioCapture") return false;
+    // Request handler exposes mediaTypes[]; the check handler exposes mediaType.
+    if (Array.isArray(details?.mediaTypes) && details.mediaTypes.includes("video")) {
+      return false;
+    }
+    if (details?.mediaType === "video") return false;
+    return true;
+  };
   mainWindow.webContents.session.setPermissionRequestHandler(
-    (_webContents, permission, callback) => callback(isMediaPermission(permission)),
+    (_webContents, permission, callback, details) => {
+      const url = details?.requestingUrl || details?.securityOrigin || "";
+      callback(isAudioOnlyMediaPermission(permission, details) && isTrustedVoiceOrigin(url));
+    },
   );
   mainWindow.webContents.session.setPermissionCheckHandler(
-    (_webContents, permission) => isMediaPermission(permission),
+    (_webContents, permission, requestingOrigin, details) => {
+      const url = details?.requestingUrl || requestingOrigin || details?.securityOrigin || "";
+      return isAudioOnlyMediaPermission(permission, details) && isTrustedVoiceOrigin(url);
+    },
   );
 
   mainWindow.once("ready-to-show", () => {
