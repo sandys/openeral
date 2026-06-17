@@ -8,6 +8,7 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
   WHISPER_SAMPLE_RATE,
+  getVoiceProvider,
   type VoiceWorkerRequest,
   type VoiceWorkerResponse,
 } from "./config";
@@ -129,7 +130,8 @@ export function useVoiceInput(
     chunksRef.current = [];
   }, []);
 
-  const transcribeBlob = useCallback(
+  // On-device path: decode to 16kHz mono PCM and run Whisper in the worker.
+  const transcribeWithWhisper = useCallback(
     async (blob: Blob) => {
       let ctx: AudioContext | null = null;
       try {
@@ -168,6 +170,50 @@ export function useVoiceInput(
       }
     },
     [ensureWorker, fail],
+  );
+
+  // Cloud path: hand the raw recording to the main process, which holds the
+  // ElevenLabs key and performs the request (no decode/resample needed).
+  const transcribeWithElevenLabs = useCallback(
+    async (blob: Blob) => {
+      try {
+        const bridge = (
+          window as unknown as {
+            __OPENWORK_ELECTRON__?: {
+              invokeDesktop?: (command: string, ...args: unknown[]) => Promise<unknown>;
+            };
+          }
+        ).__OPENWORK_ELECTRON__;
+        if (!bridge?.invokeDesktop) {
+          throw new Error("ElevenLabs voice input is only available in the desktop app.");
+        }
+        const audio = await blob.arrayBuffer();
+        const id = ++requestIdRef.current;
+        pendingIdRef.current = id;
+        const result = (await bridge.invokeDesktop("voiceTranscribe", {
+          audio,
+          mimeType: blob.type || "audio/webm",
+        })) as { text?: string };
+        if (pendingIdRef.current !== id) return; // superseded by a newer request
+        pendingIdRef.current = null;
+        const text = (result?.text ?? "").trim();
+        if (text) onTranscriptRef.current(text);
+        setStatus("idle");
+      } catch (err) {
+        const raw = err instanceof Error ? err.message : String(err);
+        // Strip Electron's "Error invoking remote method '...': Error: " wrapper.
+        fail(raw.replace(/^Error invoking remote method '[^']*':\s*Error:\s*/, ""));
+      }
+    },
+    [fail],
+  );
+
+  const transcribeBlob = useCallback(
+    (blob: Blob) =>
+      getVoiceProvider() === "elevenlabs"
+        ? transcribeWithElevenLabs(blob)
+        : transcribeWithWhisper(blob),
+    [transcribeWithElevenLabs, transcribeWithWhisper],
   );
 
   const start = useCallback(() => {

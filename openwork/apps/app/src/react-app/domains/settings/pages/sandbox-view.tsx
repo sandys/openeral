@@ -5,6 +5,7 @@ import { AlertTriangle, CheckCircle2, CircleDashed, Loader2, RefreshCcw, XCircle
 import type { SandboxBackend, SandboxProfile } from "../../../../app/lib/desktop";
 import { Button } from "../../../design-system/button";
 import { OpenEralTerminal } from "../../session/surface/openeral-terminal";
+import type { VoiceProvider } from "../../session/surface/composer/voice/config";
 import type {
   OpenEralCredentialKey,
   OpenEralCredentialStatus,
@@ -74,11 +75,36 @@ const PROFILE_OPTIONS: ProfileOption[] = [
   },
 ];
 
+type VoiceEngineOption = {
+  value: VoiceProvider;
+  label: string;
+  summary: string;
+  badge?: string;
+};
+
+const VOICE_ENGINE_OPTIONS: VoiceEngineOption[] = [
+  {
+    value: "whisper",
+    label: "On-device (Whisper)",
+    summary:
+      "Runs locally via Hugging Face Transformers.js. Audio never leaves your machine. Downloads a small model on first use.",
+    badge: "Default",
+  },
+  {
+    value: "elevenlabs",
+    label: "ElevenLabs (cloud)",
+    summary:
+      "Sends recorded audio to the ElevenLabs Scribe API for higher-accuracy transcription. Requires an API key.",
+  },
+];
+
 export type SandboxViewProps = {
   selectedBackend: SandboxBackend;
   onSelectBackend: (next: SandboxBackend) => void;
   selectedProfile: SandboxProfile;
   onSelectProfile: (next: SandboxProfile) => void;
+  voiceProvider: VoiceProvider;
+  onSelectVoiceProvider: (next: VoiceProvider) => void;
   doctor: OpenShellDoctorResult | null;
   doctorLoading: boolean;
   doctorError: string | null;
@@ -225,6 +251,72 @@ export function SandboxView(props: SandboxViewProps) {
             );
           })}
         </div>
+      </div>
+
+      <div className={`${settingsPanelClass} space-y-3`}>
+        <div>
+          <div className="text-sm font-medium text-gray-12">Voice input (speech-to-text)</div>
+          <div className="text-xs text-gray-10">
+            Engine used by the microphone button in the OpenEral terminal and the chat composer.
+          </div>
+        </div>
+        <div className="grid gap-2">
+          {VOICE_ENGINE_OPTIONS.map((option) => {
+            const checked = props.voiceProvider === option.value;
+            return (
+              <label
+                key={option.value}
+                className={`flex cursor-pointer items-start gap-3 rounded-2xl border p-3 transition-colors ${
+                  checked
+                    ? "border-dls-text/70 bg-gray-3/50"
+                    : "border-dls-border bg-dls-surface hover:bg-gray-2/30"
+                }`}
+              >
+                <input
+                  type="radio"
+                  name="voice-engine"
+                  className="mt-1"
+                  value={option.value}
+                  checked={checked}
+                  onChange={() => props.onSelectVoiceProvider(option.value)}
+                />
+                <div className="space-y-0.5">
+                  <div className="flex items-center gap-2">
+                    <span className="text-sm font-medium text-gray-12">{option.label}</span>
+                    {option.badge ? (
+                      <span className="rounded-full border border-green-7/60 bg-green-3/30 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wider text-green-12">
+                        {option.badge}
+                      </span>
+                    ) : null}
+                  </div>
+                  <div className="text-xs text-gray-10">{option.summary}</div>
+                </div>
+              </label>
+            );
+          })}
+        </div>
+        {props.voiceProvider === "elevenlabs" ? (
+          <>
+            <div className="rounded-xl border border-amber-7/50 bg-amber-2/30 p-3 text-xs text-amber-12">
+              Cloud engine — your recorded audio is sent to ElevenLabs for transcription. Switch to
+              on-device Whisper to keep audio on your machine.
+            </div>
+            <CredentialRow
+              label="ELEVENLABS_API_KEY"
+              description="ElevenLabs API key for the Scribe speech-to-text model. Required while the ElevenLabs engine is selected."
+              placeholder="sk_..."
+              statusKey="elevenLabsApiKey"
+              status={props.credentialStatus}
+              busy={props.actionBusy}
+              onSet={(v) => props.onSetCredential("elevenLabsApiKey", v)}
+              onClear={() => props.onClearCredential("elevenLabsApiKey")}
+            />
+          </>
+        ) : (
+          <div className="rounded-xl border border-dls-border bg-gray-2/30 p-3 text-xs text-gray-10">
+            Runs fully on-device. No API key needed and audio never leaves your machine.
+          </div>
+        )}
       </div>
 
       {showOpenShellPanel ? (

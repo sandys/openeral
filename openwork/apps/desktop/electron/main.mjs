@@ -1654,6 +1654,45 @@ async function handleDesktopInvoke(event, command, ...args) {
       await openeralCredentials.clearCredential(key);
       return openeralCredentials.getCredentialStatus();
     }
+    case "voiceTranscribe": {
+      // Cloud speech-to-text for the composer/terminal mic when the voice
+      // engine is set to ElevenLabs. The renderer captures audio and posts the
+      // raw bytes here; the API key stays in the main process (never shipped to
+      // the renderer) and this also sidesteps browser CORS to ElevenLabs.
+      const input = args[0] ?? {};
+      const audio = input.audio;
+      const mimeType =
+        typeof input.mimeType === "string" && input.mimeType ? input.mimeType : "audio/webm";
+      if (!audio) throw new Error("No audio was provided for transcription.");
+      const apiKey = await openeralCredentials.getCredential("elevenLabsApiKey");
+      if (!apiKey) {
+        throw new Error("ElevenLabs API key not configured. Add it in Settings → Sandbox.");
+      }
+      const bytes = audio instanceof Uint8Array ? audio : new Uint8Array(audio);
+      const form = new FormData();
+      form.append("model_id", "scribe_v1");
+      form.append("file", new Blob([bytes], { type: mimeType }), "audio.webm");
+      const response = await fetch("https://api.elevenlabs.io/v1/speech-to-text", {
+        method: "POST",
+        // Do NOT set Content-Type — fetch derives the multipart boundary from
+        // the FormData body automatically.
+        headers: { "xi-api-key": apiKey },
+        body: form,
+      });
+      if (!response.ok) {
+        let detail = "";
+        try {
+          detail = (await response.text()).slice(0, 300);
+        } catch {
+          // ignore
+        }
+        throw new Error(
+          `ElevenLabs transcription failed (${response.status} ${response.statusText}). ${detail}`.trim(),
+        );
+      }
+      const result = await response.json();
+      return { text: typeof result?.text === "string" ? result.text : "" };
+    }
     case "openeralTestDatabase": {
       // Runs psql via a transient postgres:16-alpine container inside
       // the openwork-openshell distro. Lazy-pulls the image on first

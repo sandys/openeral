@@ -49,12 +49,14 @@ export type OpenShellInstallStatus = {
 export type OpenEralCredentialKey =
   | "databaseUrl"
   | "anthropicApiKey"
-  | "stringcostApiKey";
+  | "stringcostApiKey"
+  | "elevenLabsApiKey";
 
 export type OpenEralCredentialStatus = {
   databaseUrl: "set" | "unset";
   anthropicApiKey: "set" | "unset";
   stringcostApiKey: "set" | "unset";
+  elevenLabsApiKey: "set" | "unset";
   encryptionAvailable: boolean;
 };
 

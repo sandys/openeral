@@ -52,6 +52,13 @@ export type LocalPreferences = {
    * with the named agent. Meaningless for other backends.
    */
   preferredSandboxProfile: SandboxProfile;
+  /**
+   * Speech-to-text engine for the mic button. "whisper" runs on-device
+   * (default, private); "elevenlabs" uses the ElevenLabs cloud API (requires
+   * an API key configured in Settings → Sandbox). Kept in sync with the
+   * `voiceProvider` read by the voice hook (voice/config.ts getVoiceProvider).
+   */
+  voiceProvider: "whisper" | "elevenlabs";
 };
 
 type LocalContextValue = {
@@ -77,6 +84,7 @@ const INITIAL_PREFS: LocalPreferences = {
   hasCompletedOnboarding: false,
   preferredSandboxBackend: "docker",
   preferredSandboxProfile: "openwork",
+  voiceProvider: "whisper",
 };
 
 function readPersisted<T>(key: string, fallback: T): T {

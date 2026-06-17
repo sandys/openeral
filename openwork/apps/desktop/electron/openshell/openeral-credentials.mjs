@@ -34,12 +34,15 @@ async function getSafeStorage() {
   return safeStorage;
 }
 
-/** @typedef {"databaseUrl" | "anthropicApiKey" | "stringcostApiKey"} CredentialKey */
+/** @typedef {"databaseUrl" | "anthropicApiKey" | "stringcostApiKey" | "elevenLabsApiKey"} CredentialKey */
 
 const CREDENTIAL_KEYS = /** @type {const} */ ([
   "databaseUrl",
   "anthropicApiKey",
   "stringcostApiKey",
+  // ElevenLabs Scribe API key — optional, only used when the voice-input
+  // engine is set to ElevenLabs (cloud) instead of on-device Whisper.
+  "elevenLabsApiKey",
 ]);
 
 function isKnownKey(key) {

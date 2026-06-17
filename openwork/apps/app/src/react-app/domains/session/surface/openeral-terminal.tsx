@@ -5,6 +5,7 @@ import { AlertTriangle, ExternalLink, Loader2, MessageSquare, Mic, MoreHorizonta
 import type { SandboxProfile } from "../../../../app/lib/desktop";
 import { Button } from "../../../design-system/button";
 import { useVoiceInput } from "./composer/voice/use-voice-input";
+import { VoiceEngineMenu } from "./composer/voice/voice-engine-menu";
 
 // Shared flat "ghost" toolbar button, matching the chat session header so the
 // OpenEral terminal toolbar reads as the same product surface.
@@ -983,6 +984,7 @@ function TerminalMicButton(props: {
           <Mic size={16} />
         )}
       </button>
+      <VoiceEngineMenu direction="down" align="right" />
     </div>
   );
 }

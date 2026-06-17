@@ -15,6 +15,29 @@ export const WHISPER_MODEL = "onnx-community/whisper-base";
 // Whisper always operates on 16kHz mono PCM.
 export const WHISPER_SAMPLE_RATE = 16000;
 
+// --- Speech-to-text engine selection -------------------------------------
+
+// Which engine the mic button uses. "whisper" runs on-device (default,
+// private); "elevenlabs" sends audio to the ElevenLabs cloud API.
+export type VoiceProvider = "whisper" | "elevenlabs";
+
+// Mirrors PREFS_STORAGE_KEY in kernel/local-provider.tsx. Read directly here
+// so the voice hook doesn't depend on the React Local context (which isn't
+// mounted in every surface that renders the mic button, e.g. storybook).
+const PREFS_STORAGE_KEY = "openwork.preferences";
+
+export function getVoiceProvider(): VoiceProvider {
+  if (typeof window === "undefined") return "whisper";
+  try {
+    const raw = window.localStorage.getItem(PREFS_STORAGE_KEY);
+    if (!raw) return "whisper";
+    const parsed = JSON.parse(raw) as { voiceProvider?: unknown };
+    return parsed?.voiceProvider === "elevenlabs" ? "elevenlabs" : "whisper";
+  } catch {
+    return "whisper";
+  }
+}
+
 // --- Worker message contract ---------------------------------------------
 
 // Renderer → worker.
