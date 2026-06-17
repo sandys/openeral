@@ -71,13 +71,33 @@ function getTranscriber(): Promise<Transcriber> {
         : ("q8" as const);
     // eslint-disable-next-line no-console
     console.log(`[voice] loading ${WHISPER_MODEL} on ${device} (dtype=${JSON.stringify(dtype)})`);
+    // Aggregate per-file download progress into one overall fraction so the
+    // UI shows a single smooth 0→100% instead of each file restarting at 0.
+    const fileProgress = new Map<string, { loaded: number; total: number }>();
     const t = await pipeline("automatic-speech-recognition", WHISPER_MODEL, {
       device,
       dtype,
       progress_callback: (item: unknown) => {
-        const p = item as { status?: string; progress?: number };
-        if (p?.status === "progress" && typeof p.progress === "number") {
-          post({ type: "model-progress", progress: p.progress / 100 });
+        const p = item as {
+          status?: string;
+          file?: string;
+          loaded?: number;
+          total?: number;
+        };
+        if (
+          p?.status === "progress" &&
+          p.file &&
+          typeof p.loaded === "number" &&
+          typeof p.total === "number"
+        ) {
+          fileProgress.set(p.file, { loaded: p.loaded, total: p.total });
+          let loaded = 0;
+          let total = 0;
+          for (const v of fileProgress.values()) {
+            loaded += v.loaded;
+            total += v.total;
+          }
+          if (total > 0) post({ type: "model-progress", progress: loaded / total });
         }
       },
     });

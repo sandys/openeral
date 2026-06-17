@@ -883,42 +883,54 @@ function TerminalMicButton(props: {
   onError?: (message: string) => void;
   disabled?: boolean;
 }) {
-  const { status, error, modelProgress, start, stop } = useVoiceInput(props.onText, props.onError);
+  const { status, error, modelProgress, modelReady, start, stop } = useVoiceInput(
+    props.onText,
+    props.onError,
+  );
   if (status === "unsupported") return null;
 
   const recording = status === "recording";
   const transcribing = status === "transcribing";
+  // First-run only: the model is still downloading/loading. Subsequent runs
+  // have modelReady === true and just show a brief spinner.
+  const loadingModel = transcribing && !modelReady;
+  const pct = modelProgress != null ? Math.round(modelProgress * 100) : null;
 
   let title = "Dictate into the terminal (on-device voice)";
   if (recording) title = "Stop recording";
-  else if (transcribing)
-    title =
-      modelProgress != null
-        ? `Loading speech model… ${Math.round(modelProgress * 100)}%`
-        : "Transcribing…";
+  else if (loadingModel)
+    title = pct != null ? `Downloading speech model… ${pct}%` : "Loading speech model…";
+  else if (transcribing) title = "Transcribing…";
   else if (status === "error" && error) title = `${error} — click to try again`;
 
   return (
-    <Button
-      variant="outline"
-      className={`h-7 w-7 !rounded-full !p-0 shrink-0 ${recording ? "border-red-7/60 text-red-12" : ""}`}
-      onClick={() => {
-        if (props.disabled || transcribing) return;
-        if (recording) stop();
-        else start();
-      }}
-      onMouseDown={(e) => e.preventDefault()}
-      disabled={props.disabled || transcribing}
-      title={title}
-    >
-      {transcribing ? (
-        <Loader2 size={13} className="animate-spin" />
-      ) : recording ? (
-        <Square size={11} fill="currentColor" className="animate-pulse" />
-      ) : (
-        <Mic size={13} />
-      )}
-    </Button>
+    <div className="flex items-center gap-1.5">
+      {loadingModel ? (
+        <span className="whitespace-nowrap text-[11px] tabular-nums text-amber-11">
+          {pct != null ? `Downloading speech model… ${pct}%` : "Loading speech model…"}
+        </span>
+      ) : null}
+      <Button
+        variant="outline"
+        className={`h-7 w-7 !rounded-full !p-0 shrink-0 ${recording ? "border-red-7/60 text-red-12" : ""}`}
+        onClick={() => {
+          if (props.disabled || transcribing) return;
+          if (recording) stop();
+          else start();
+        }}
+        onMouseDown={(e) => e.preventDefault()}
+        disabled={props.disabled || transcribing}
+        title={title}
+      >
+        {transcribing ? (
+          <Loader2 size={13} className="animate-spin" />
+        ) : recording ? (
+          <Square size={11} fill="currentColor" className="animate-pulse" />
+        ) : (
+          <Mic size={13} />
+        )}
+      </Button>
+    </div>
   );
 }
 

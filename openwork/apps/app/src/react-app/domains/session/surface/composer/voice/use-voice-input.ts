@@ -24,6 +24,8 @@ type UseVoiceInput = {
   error: string | null;
   /** First-run model download progress (0..1), or null when not downloading. */
   modelProgress: number | null;
+  /** True once the Whisper model has finished loading (subsequent runs skip the download). */
+  modelReady: boolean;
   start: () => void;
   stop: () => void;
   cancel: () => void;
@@ -50,6 +52,7 @@ export function useVoiceInput(
   );
   const [error, setError] = useState<string | null>(null);
   const [modelProgress, setModelProgress] = useState<number | null>(null);
+  const [modelReady, setModelReady] = useState(false);
 
   const onTranscriptRef = useRef(onTranscript);
   const onErrorRef = useRef(onError);
@@ -89,6 +92,7 @@ export function useVoiceInput(
           break;
         case "model-ready":
           setModelProgress(null);
+          setModelReady(true);
           break;
         case "result":
           if (message.id !== pendingIdRef.current) return;
@@ -209,5 +213,5 @@ export function useVoiceInput(
     };
   }, []);
 
-  return { status, error, modelProgress, start, stop, cancel };
+  return { status, error, modelProgress, modelReady, start, stop, cancel };
 }
