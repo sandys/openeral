@@ -1,10 +1,15 @@
 /** @jsxImportSource react */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { AlertTriangle, ExternalLink, Loader2, MessageSquare, Mic, Pencil, Power, RotateCcw, Settings, Square, Trash2 } from "lucide-react";
+import { AlertTriangle, ExternalLink, Loader2, MessageSquare, Mic, MoreHorizontal, Pencil, Power, RotateCcw, Settings, Square, Trash2 } from "lucide-react";
 
 import type { SandboxProfile } from "../../../../app/lib/desktop";
 import { Button } from "../../../design-system/button";
 import { useVoiceInput } from "./composer/voice/use-voice-input";
+
+// Shared flat "ghost" toolbar button, matching the chat session header so the
+// OpenEral terminal toolbar reads as the same product surface.
+const TOOLBAR_BTN =
+  "flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-[13px] font-medium text-gray-10 transition-colors hover:bg-gray-2/70 hover:text-dls-text disabled:cursor-not-allowed disabled:opacity-60";
 
 // xterm.js is loaded dynamically so it doesn't bloat the workspace
 // dashboard bundle for users who never open an OpenEral session.
@@ -102,6 +107,28 @@ export function OpenEralTerminal(props: OpenEralTerminalProps) {
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [popoutBusy, setPopoutBusy] = useState(false);
   const [popoutError, setPopoutError] = useState<string | null>(null);
+
+  // Overflow ("⋮") menu for secondary/management actions, so the main toolbar
+  // stays to its essentials.
+  const [menuOpen, setMenuOpen] = useState(false);
+  const menuRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (!menuOpen) return;
+    const onPointerDown = (event: MouseEvent) => {
+      if (menuRef.current && !menuRef.current.contains(event.target as Node)) {
+        setMenuOpen(false);
+      }
+    };
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setMenuOpen(false);
+    };
+    document.addEventListener("mousedown", onPointerDown);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onPointerDown);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [menuOpen]);
 
   // User-editable display name for the sandbox. The actual sandbox name
   // used by openshell never changes — this is purely cosmetic.
@@ -641,8 +668,8 @@ export function OpenEralTerminal(props: OpenEralTerminalProps) {
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <div className="flex items-center justify-between gap-3 border-b border-dls-border bg-dls-surface px-4 py-2 text-xs">
-        <div className="flex items-center gap-3 min-w-0">
+      <div className="flex h-12 shrink-0 items-center justify-between gap-3 border-b border-dls-border bg-dls-surface px-4">
+        <div className="flex min-w-0 items-center gap-2.5">
           <span
             className={`inline-block h-2 w-2 shrink-0 rounded-full ${
               phase === "connected"
@@ -651,11 +678,12 @@ export function OpenEralTerminal(props: OpenEralTerminalProps) {
                   ? "bg-red-9"
                   : "bg-amber-9"
             }`}
+            title={phaseLabel(phase)}
           />
           {isRenaming ? (
             <input
               autoFocus
-              className="h-6 rounded border border-dls-border bg-dls-hover px-2 font-mono text-xs text-gray-12 outline-none"
+              className="h-7 rounded-md border border-dls-border bg-dls-hover px-2 font-mono text-[13px] text-dls-text outline-none focus:ring-2 focus:ring-[rgba(var(--dls-accent-rgb),0.2)]"
               value={renameValue}
               onChange={(e) => setRenameValue(e.target.value)}
               onKeyDown={(e) => {
@@ -666,7 +694,7 @@ export function OpenEralTerminal(props: OpenEralTerminalProps) {
             />
           ) : (
             <button
-              className="group flex items-center gap-1 min-w-0 text-left"
+              className="group flex min-w-0 items-center gap-1.5 text-left"
               title={
                 sandboxName
                   ? `Display label (cosmetic only)\nActual sandbox: ${sandboxName}\n\nClick to rename`
@@ -677,25 +705,18 @@ export function OpenEralTerminal(props: OpenEralTerminalProps) {
                 setIsRenaming(true);
               }}
             >
-              <span className="font-mono text-gray-12 truncate">{displayName || sandboxName || expectedSandboxName}</span>
-              <Pencil size={10} className="shrink-0 text-gray-8 opacity-0 group-hover:opacity-100 transition-opacity" />
+              <span className="truncate font-mono text-[13px] font-medium text-dls-text">
+                {displayName || sandboxName || expectedSandboxName}
+              </span>
+              <Pencil size={11} className="shrink-0 text-dls-secondary opacity-0 transition-opacity group-hover:opacity-100" />
             </button>
           )}
-          {/* When a custom display label has been set, show the real sandbox
-              name as a small secondary label so the user can see why terminal
-              error messages reference a different (internal) name. */}
-          {sandboxName && displayName && displayName !== sandboxName ? (
-            <span
-              className="hidden sm:block shrink-0 font-mono text-[10px] text-gray-7 truncate max-w-[120px]"
-              title={`Actual openshell sandbox: ${sandboxName}`}
-            >
-              {sandboxName.length > 22 ? `${sandboxName.slice(0, 22)}…` : sandboxName}
-            </span>
-          ) : null}
-          <span className="text-gray-9 shrink-0">·</span>
-          <span className="text-gray-10 shrink-0">{phaseLabel(phase)}</span>
+          <span className="hidden shrink-0 text-[12px] text-dls-secondary sm:inline">
+            {phaseLabel(phase)}
+          </span>
         </div>
-        <div className="flex items-center gap-1.5">
+
+        <div className="flex shrink-0 items-center gap-1">
           {phase === "connected" ? (
             <TerminalMicButton
               onText={(text) => {
@@ -723,10 +744,11 @@ export function OpenEralTerminal(props: OpenEralTerminalProps) {
               }}
             />
           ) : null}
+
           {phase === "exited" || phase === "error" ? (
-            <Button
-              variant="outline"
-              className="h-7 rounded-full px-3 text-xs"
+            <button
+              type="button"
+              className={TOOLBAR_BTN}
               onClick={errorNeedsDelete ? () => void deleteAndReconnect() : handleLaunch}
               onMouseDown={(e) => e.preventDefault()}
               title={
@@ -737,83 +759,108 @@ export function OpenEralTerminal(props: OpenEralTerminalProps) {
                     : "Launch a new session"
               }
             >
-              <RotateCcw size={12} className="mr-1" />
-              {errorNeedsDelete ? "Delete & relaunch" : hasEverConnected ? "Reconnect" : "Launch session"}
-            </Button>
+              <RotateCcw size={16} />
+              <span>
+                {errorNeedsDelete ? "Delete & relaunch" : hasEverConnected ? "Reconnect" : "Launch session"}
+              </span>
+            </button>
           ) : phase !== "connected" ? (
-            /* During provisioning — show a Cancel button so the user is never
-               stuck at the spinner with no escape. Mirrors the "Close session"
-               button in Settings → Sandbox → Test session launch. */
-            <Button
-              variant="outline"
-              className="h-7 rounded-full px-3 text-xs"
+            // During provisioning — show a Cancel button so the user is never
+            // stuck at the spinner with no escape.
+            <button
+              type="button"
+              className={TOOLBAR_BTN}
               onClick={handleAbort}
               onMouseDown={(e) => e.preventDefault()}
               title="Cancel provisioning and return to the launch screen"
             >
-              Cancel
-            </Button>
+              <span>Cancel</span>
+            </button>
           ) : null}
-          {phase === "connected" ? (
-            <Button
-              variant="outline"
-              className="h-7 w-7 !rounded-full !p-0 shrink-0"
-              onClick={() => void endSession()}
-              onMouseDown={(e) => e.preventDefault()}
-              title="End this session (stops the agent process). The sandbox and Postgres-backed files persist; Reconnect starts a fresh session. Just navigating away keeps the session running."
-            >
-              <Power size={13} />
-            </Button>
-          ) : null}
-          {props.onSwitchToChat ? (
-            <Button
-              variant="outline"
-              className="h-7 rounded-full px-3 text-xs"
+
+          {phase === "connected" && props.onSwitchToChat ? (
+            <button
+              type="button"
+              className={TOOLBAR_BTN}
               onClick={props.onSwitchToChat}
               onMouseDown={(e) => e.preventDefault()}
               title="Switch to the regular OpenWork chat UI. The session keeps running — switch back to resume it instantly."
             >
-              <MessageSquare size={12} className="mr-1" />
-              Chat
-            </Button>
+              <MessageSquare size={16} />
+              <span className="hidden lg:inline">Chat</span>
+            </button>
           ) : null}
-          {/* Icon-only buttons — use !p-0 !rounded-full to override the
-              Button base class which sets px-4 py-2 rounded-lg and would
-              otherwise win in Tailwind's stylesheet ordering, squashing the
-              content area to zero width and hiding the icon. onMouseDown
-              preventDefault stops the button from stealing keyboard focus
-              from xterm.js so the PTY keeps receiving keystrokes. */}
-          <Button
-            variant="outline"
-            className="h-7 w-7 !rounded-full !p-0 shrink-0"
-            onClick={() => void popOut()}
-            onMouseDown={(e) => e.preventDefault()}
-            disabled={(!sandboxName && !lastKnownSandboxNameRef.current) || popoutBusy}
-            title="Open the same sandbox in a separate OS terminal window"
-          >
-            {popoutBusy ? <Loader2 size={13} className="animate-spin" /> : <ExternalLink size={13} />}
-          </Button>
-          {props.onOpenSettings ? (
-            <Button
-              variant="outline"
-              className="h-7 w-7 !rounded-full !p-0 shrink-0"
-              onClick={props.onOpenSettings}
+
+          {phase === "connected" ? (
+            <button
+              type="button"
+              className={TOOLBAR_BTN}
+              onClick={() => void endSession()}
               onMouseDown={(e) => e.preventDefault()}
-              title="Open Settings → Sandbox"
+              title="End this session (stops the agent process). The sandbox and Postgres-backed files persist; Reconnect starts a fresh session. Just navigating away keeps the session running."
             >
-              <Settings size={13} />
-            </Button>
+              <Power size={16} />
+              <span className="hidden lg:inline">End</span>
+            </button>
           ) : null}
-          <Button
-            variant="outline"
-            className="h-7 w-7 !rounded-full !p-0 shrink-0 border-red-7/50 text-red-12 hover:bg-red-2/30"
-            onClick={() => void deleteSandbox()}
-            onMouseDown={(e) => e.preventDefault()}
-            disabled={!sandboxName && !lastKnownSandboxNameRef.current}
-            title="Delete the sandbox. Postgres-backed /home/agent files persist."
-          >
-            <Trash2 size={13} />
-          </Button>
+
+          {/* Overflow menu for secondary / management actions. onMouseDown
+              preventDefault keeps keyboard focus on xterm.js. */}
+          <div ref={menuRef} className="relative">
+            <button
+              type="button"
+              className="flex h-8 w-8 items-center justify-center rounded-md text-gray-9 transition-colors hover:bg-gray-2/70 hover:text-dls-text"
+              aria-label="More actions"
+              aria-haspopup="menu"
+              aria-expanded={menuOpen}
+              onClick={() => setMenuOpen((open) => !open)}
+              onMouseDown={(e) => e.preventDefault()}
+            >
+              <MoreHorizontal size={16} />
+            </button>
+            {menuOpen ? (
+              <div className="absolute right-0 top-[calc(100%+6px)] z-20 w-52 rounded-[18px] border border-dls-border bg-dls-surface p-1.5 shadow-[var(--dls-shell-shadow)]">
+                <button
+                  type="button"
+                  className="flex w-full items-center gap-2.5 rounded-xl px-3 py-2 text-left text-sm text-gray-11 transition-colors hover:bg-gray-2 disabled:cursor-not-allowed disabled:opacity-50"
+                  disabled={(!sandboxName && !lastKnownSandboxNameRef.current) || popoutBusy}
+                  onClick={() => {
+                    setMenuOpen(false);
+                    void popOut();
+                  }}
+                >
+                  {popoutBusy ? <Loader2 size={15} className="animate-spin" /> : <ExternalLink size={15} />}
+                  Open in OS terminal
+                </button>
+                {props.onOpenSettings ? (
+                  <button
+                    type="button"
+                    className="flex w-full items-center gap-2.5 rounded-xl px-3 py-2 text-left text-sm text-gray-11 transition-colors hover:bg-gray-2"
+                    onClick={() => {
+                      setMenuOpen(false);
+                      props.onOpenSettings?.();
+                    }}
+                  >
+                    <Settings size={15} />
+                    Sandbox settings
+                  </button>
+                ) : null}
+                <div className="my-1 h-px bg-dls-border" />
+                <button
+                  type="button"
+                  className="flex w-full items-center gap-2.5 rounded-xl px-3 py-2 text-left text-sm text-red-11 transition-colors hover:bg-red-1/40 disabled:cursor-not-allowed disabled:opacity-50"
+                  disabled={!sandboxName && !lastKnownSandboxNameRef.current}
+                  onClick={() => {
+                    setMenuOpen(false);
+                    void deleteSandbox();
+                  }}
+                >
+                  <Trash2 size={15} />
+                  Delete sandbox
+                </button>
+              </div>
+            ) : null}
+          </div>
         </div>
       </div>
       {popoutError ? (
@@ -910,9 +957,13 @@ function TerminalMicButton(props: {
           {pct != null ? `Downloading speech model… ${pct}%` : "Loading speech model…"}
         </span>
       ) : null}
-      <Button
-        variant="outline"
-        className={`h-7 w-7 !rounded-full !p-0 shrink-0 ${recording ? "border-red-7/60 text-red-12" : ""}`}
+      <button
+        type="button"
+        className={`flex items-center justify-center rounded-md p-1.5 transition-colors disabled:cursor-not-allowed disabled:opacity-60 ${
+          recording
+            ? "bg-red-3 text-red-11 hover:bg-red-4"
+            : "text-gray-10 hover:bg-gray-2/70 hover:text-dls-text"
+        }`}
         onClick={() => {
           if (props.disabled || transcribing) return;
           if (recording) stop();
@@ -921,15 +972,17 @@ function TerminalMicButton(props: {
         onMouseDown={(e) => e.preventDefault()}
         disabled={props.disabled || transcribing}
         title={title}
+        aria-label={title}
+        aria-pressed={recording}
       >
         {transcribing ? (
-          <Loader2 size={13} className="animate-spin" />
+          <Loader2 size={16} className="animate-spin" />
         ) : recording ? (
-          <Square size={11} fill="currentColor" className="animate-pulse" />
+          <Square size={13} fill="currentColor" className="animate-pulse" />
         ) : (
-          <Mic size={13} />
+          <Mic size={16} />
         )}
-      </Button>
+      </button>
     </div>
   );
 }
