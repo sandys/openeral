@@ -203,6 +203,30 @@ else
   fail "user .npmrc was modified: $out"
 fi
 
+echo ""
+echo "=== Test 10: OpenClaw pre-warm caches baked into image ==="
+# The Dockerfile pre-warm ends in `|| true` at every step, so a
+# network-restricted build can silently produce empty caches. The Dockerfile
+# now hard-fails on an empty plugin cache, but verify the shipped image too:
+# without staged plugins the sandbox gateway must npm-install ~35 bundled
+# deps at runtime (network-restricted) and hangs, so /readyz never comes up.
+out=$(run_in_image '
+  [ -n "$(ls -A /opt/openclaw-plugin-cache 2>/dev/null)" ] && echo "plugin-cache-ok" || echo "plugin-cache-empty"
+  [ -n "$(ls -A /opt/openclaw-compile-cache 2>/dev/null)" ] && echo "compile-cache-ok" || echo "compile-cache-empty"
+')
+if echo "$out" | grep -q 'plugin-cache-ok'; then
+  pass "/opt/openclaw-plugin-cache is populated"
+else
+  fail "/opt/openclaw-plugin-cache is empty — gateway will hang staging deps at runtime"
+fi
+if echo "$out" | grep -q 'compile-cache-ok'; then
+  pass "/opt/openclaw-compile-cache is populated"
+else
+  # Compile cache is a latency optimization, not correctness — warn via fail
+  # is too harsh; count it as pass with a note.
+  pass "/opt/openclaw-compile-cache is empty (latency optimization missing, not fatal)"
+fi
+
 # Cleanup test workspace
 node -e "
   import('pg').then(async({default:pg})=>{

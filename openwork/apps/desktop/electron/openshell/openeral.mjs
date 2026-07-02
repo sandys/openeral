@@ -13,11 +13,13 @@
 //      Provisions the container, uploads /sandbox/db-url, returns as
 //      soon as /bin/true exits (≈ container-ready time).
 //
-//   2. `openshell sandbox exec <name> --tty -- openeral`
+//   2. `openshell sandbox connect <name>`
 //      Spawned by openeral-pty.mjs (node-pty) or openeral-terminal.mjs
 //      (external terminal emulator). Both give the wsl.exe child a
-//      real PTY, so Claude Code's prompt is answerable on first run
-//      and /home/agent persists the answer for re-connects.
+//      real PTY. connect starts an interactive bash that sources
+//      /sandbox/.bashrc, where configureAgentLaunch installed the
+//      launch block: Claude Code execs directly; OpenClaw execs
+//      `openeral` (the image's setup.sh) so the tested bootstrap runs.
 //
 // Other invariants:
 //   - DATABASE_URL is staged as a FILE (one file, not a directory) in
@@ -590,10 +592,12 @@ async function ensureOpensshClient(onProgress) {
  *     unset the OpenShell placeholder ANTHROPIC_API_KEY (StringCost auths via
  *     the token embedded in the proxy URL and bills the real key stored with
  *     the presign);
- *   - `exec <agent>` so Claude Code / OpenClaw starts directly. The guard
- *     (OPENWORK_AGENT_LAUNCHED + a tty check) makes sure only the top-level
- *     interactive shell auto-launches — nested shells the agent itself spawns
- *     inherit OPENWORK_AGENT_LAUNCHED=1 and fall through to a normal shell.
+ *   - auto-launch the agent. The guard (OPENWORK_AGENT_LAUNCHED + a tty
+ *     check) makes sure only the top-level interactive shell auto-launches —
+ *     nested shells the agent itself spawns inherit OPENWORK_AGENT_LAUNCHED=1
+ *     and fall through to a normal shell. Claude Code is exec'd directly;
+ *     OpenClaw is launched via `exec openeral` (the image's setup.sh) so the
+ *     full tested bootstrap runs — see buildLaunchBlock for the rationale.
  * For Claude Code we also merge ANTHROPIC_BASE_URL into ~/.claude/settings.json
  * so it applies even if a launch isn't an interactive bash.
  *
@@ -609,21 +613,29 @@ async function ensureOpensshClient(onProgress) {
  * Exported via __testing so the block content can be verified without calling
  * wslRun. configureAgentLaunch delegates to this.
  *
- * For openclaw, the block follows the same flow as setup.sh:
- *   1. Load API key + set runtime env (OPENCLAW_NO_RESPAWN, compile cache, etc.)
- *   2. Write minimal openclaw.json (gateway.mode=local, handshakeTimeoutMs=30000)
- *   3. Run `openclaw onboard` once (creates auth-profiles.json; does NOT need
- *      the gateway to be running — setup.sh also runs onboard before starting
- *      the gateway)
- *   4. Start gateway with `setsid` so it survives after `exec openclaw` replaces
- *      bash. Without setsid the gateway is in the same session and receives SIGHUP
- *      when the terminal disconnects, killing it between reconnects.
- *   5. Wait up to 600 s for /readyz with visible progress messages so the user
- *      doesn't see a black screen.
- *   6. exec env -u OPENCLAW_PLUGIN_STAGE_DIR ... openclaw
- *      OPENCLAW_PLUGIN_STAGE_DIR must NOT reach the TUI process: forwarding it
- *      causes openclaw to run its own concurrent staging loop that saturates the
- *      event loop and makes the terminal unresponsive.
+ * For openclaw, the block delegates to the image's tested entry point
+ * (`openeral` → /opt/openeral/setup.sh) instead of re-implementing the
+ * bootstrap inline:
+ *   1. Export the real ANTHROPIC_API_KEY (embedded + /sandbox/anthropic-api-key
+ *      override), STRINGCOST_PROXY_URL (setup.sh's highest-priority presign
+ *      source), and OPENERAL_AGENT=openclaw for setup.sh's agent gate.
+ *   2. Reconnect fast path: the gateway from a previous session survives PTY
+ *      disconnects (setup.sh starts it with setsid). When /readyz is healthy,
+ *      exec the TUI directly — mirrors setup.sh's own final exec.
+ *   3. Otherwise kill any zombie gateway and `exec openeral`.
+ *
+ * History: an earlier version of this block wrote auth-profiles.json and
+ * openclaw.json by hand and started the gateway itself. That failed three
+ * ways on openclaw 2026.4.29: the hand-written auth profile was rejected
+ * ("ignored invalid auth profile entries during store load"), the meta-less
+ * config was backed up and overwritten by the gateway ("Config write anomaly:
+ * missing-meta-before-write"), and the cold gateway had to stage all 35
+ * bundled runtime deps at startup inside the network-restricted sandbox —
+ * hanging /readyz past the 600 s budget ("gateway keeps crashing"). setup.sh
+ * avoids all three by running `openclaw onboard` (schema-correct profile +
+ * foreground plugin staging) BEFORE the gateway starts, and it also brings up
+ * the openeral runtime this block previously skipped entirely: DB migrations,
+ * workspace seeding, and the openeral-bash daemon.
  *
  * @param {string} profile
  * @param {string | null} proxyBase  StringCost proxy base URL, or null
@@ -634,255 +646,43 @@ function buildLaunchBlock(profile, proxyBase, apiKey = null) {
   const block = ["# >>> openwork launch >>>"];
 
   if (proxyBase) {
-    block.push(
-      `export ANTHROPIC_BASE_URL="${proxyBase}"`,
-      'export ANTHROPIC_AUTH_TOKEN="openwork-stringcost"',
-    );
     if (isClaude) {
-      // Claude Code auths via the proxy URL token — the real key is not needed.
-      block.push("unset ANTHROPIC_API_KEY");
+      block.push(
+        `export ANTHROPIC_BASE_URL="${proxyBase}"`,
+        'export ANTHROPIC_AUTH_TOKEN="openwork-stringcost"',
+        // Claude Code auths via the proxy URL token — the real key is not needed.
+        "unset ANTHROPIC_API_KEY",
+      );
+    } else {
+      // OpenClaw: setup.sh owns the StringCost wiring. STRINGCOST_PROXY_URL is
+      // its highest-priority source — it normalizes the URL, persists the
+      // presign to the workspace, and registers the stringcost provider in
+      // openclaw.json itself. The presign uploaded to
+      // /sandbox/openeral-input/presign.json by configureAgentLaunch remains
+      // as setup.sh's file-based fallback.
+      block.push(`export STRINGCOST_PROXY_URL="${proxyBase}"`);
     }
-    // OpenClaw keeps ANTHROPIC_API_KEY: it needs the real key for `openclaw onboard`.
   }
 
   if (!isClaude) {
     block.push(
-      // ── Step 1: load real API key and runtime env ──────────────────────
-      // Embed key directly as primary source so the key is always available
-      // even if the file upload timed out at launch time.
+      // Real API key for setup.sh's onboard step. Embed as primary source so
+      // the key is available even if the file upload timed out at launch time,
+      // then prefer the uploaded file (newer on key rotation). setup.sh reads
+      // /sandbox/anthropic-api-key itself only when the env var is empty or an
+      // openshell:resolve:env:* placeholder.
       ...(apiKey ? [`export ANTHROPIC_API_KEY=${shellQuote(apiKey)}`] : []),
-      // Override from file if a newer key was uploaded to the sandbox.
       "if [ -f /sandbox/anthropic-api-key ]; then",
       "  _fk=\"$(tr -d '[:space:]' < /sandbox/anthropic-api-key)\"",
-      "  [ -n \"$_fk\" ] && export ANTHROPIC_API_KEY=\"$_fk\"",
+      '  [ -n "$_fk" ] && export ANTHROPIC_API_KEY="$_fk"',
       "fi",
-      "export HOME=/home/agent",
-      "export OPENCLAW_NO_RESPAWN=1",
-      "export NODE_COMPILE_CACHE=/tmp/openclaw-compile-cache",
-      // OPENCLAW_PLUGIN_STAGE_DIR is for the gateway + onboard ONLY.
-      // Must be unset before exec'ing the TUI (see exec block below).
-      "export OPENCLAW_PLUGIN_STAGE_DIR=/tmp/openclaw-plugin-runtime-deps",
-      "export GIT_SSL_NO_VERIFY=true",
-      "export npm_config_strict_ssl=false",
-      "mkdir -p /tmp/openclaw-compile-cache /tmp/openclaw-plugin-runtime-deps",
-      // Seed V8 bytecode cache from image-baked copy (drastically reduces cold start).
-      "[ -d /opt/openclaw-compile-cache ] && cp -rn /opt/openclaw-compile-cache/. /tmp/openclaw-compile-cache/ 2>/dev/null || true",
-      // Seed plugin stage dir from image-baked cache BEFORE onboard runs.
-      // Without this, openclaw onboard tries to stage plugins via npm-via-git
-      // (git+ssh:// URLs) which is blocked by the sandbox's port-22 policy — even
-      // with git URL rewrites the native-binary packages can stall for the full
-      // timeout. Pre-seeding from /opt/openclaw-plugin-cache (the Dockerfile-baked
-      // copy) means onboard finds everything already staged and completes in seconds.
-      "[ -d /opt/openclaw-plugin-cache ] && cp -rn /opt/openclaw-plugin-cache/. /tmp/openclaw-plugin-runtime-deps/ 2>/dev/null || true",
-      // Git URL rewrites: npm-via-git uses ssh:// URLs that are blocked in the
-      // sandbox (port 22). Rewrite to https:// so OpenShell's TLS proxy handles them.
-      "HOME=/home/agent git config --global --unset-all 'url.https://github.com/.insteadOf' 2>/dev/null || true",
-      "HOME=/home/agent git config --global --add 'url.https://github.com/.insteadOf' 'ssh://git@github.com/' 2>/dev/null || true",
-      "HOME=/home/agent git config --global --add 'url.https://github.com/.insteadOf' 'git@github.com:' 2>/dev/null || true",
-      "HOME=/home/agent git config --global --add 'url.https://github.com/.insteadOf' 'git+ssh://git@github.com/' 2>/dev/null || true",
-      "HOME=/home/agent git config --global http.sslVerify false 2>/dev/null || true",
-      // ── Step 2: write auth-profiles.json directly (no openclaw onboard) ─────
-      // openclaw onboard --non-interactive blocks for 10–30 min because it
-      // triggers openclaw's plugin staging machinery which tries to npm-install
-      // native packages via git+ssh:// URLs (e.g. libsignal-node). Port 22 is
-      // blocked by the sandbox network policy; git URL rewrites help for some
-      // deps but not all, so the install stalls until the 600 s timeout fires.
-      //
-      // auth-profiles.json is the ONLY file the agent runtime needs from onboard.
-      // We write it directly in the exact same JSON shape openclaw onboard
-      // produces, as documented in openclaw's auth profile schema. The gateway,
-      // provider config, and model settings are all handled in openclaw.json
-      // (Step 3 below), which openclaw onboard would have clobbered anyway.
-      "_auth=/home/agent/.openclaw/agents/main/agent/auth-profiles.json",
-      "if [ ! -s \"$_auth\" ] && [ -n \"${ANTHROPIC_API_KEY:-}\" ]; then",
-      "  printf '\\r\\033[K\\033[33m[OpenWork] Writing OpenClaw auth profile...\\033[0m\\n'",
-      "  node -e \"",
-      "const fs = require('fs'), path = require('path');",
-      "const f = process.argv[1];",
-      "const k = process.env.ANTHROPIC_API_KEY || '';",
-      "if (!k || k.startsWith('openshell:')) process.exit(0);",
-      "const p = {version:1,profiles:{anthropic:{provider:'anthropic',authType:'apiKey',apiKey:k,createdAt:new Date().toISOString(),source:'openwork-direct'}},defaultProfile:'anthropic'};",
-      "fs.mkdirSync(path.dirname(f), {recursive:true, mode:0o700});",
-      "fs.writeFileSync(f, JSON.stringify(p,null,2), {mode:0o600});",
-      "\" \"$_auth\" 2>/dev/null || true",
-      "fi",
-      // ── Steps 3–5c: run ONLY when gateway is not already running ─────────────
-      // CRITICAL architectural fix (mirrors setup.sh exactly):
-      //   openclaw.json is written INSIDE this block so it is never touched while
-      //   the gateway is live. Writing the file while the gateway runs triggers
-      //   its inotify watcher → live config reload → gateway crash. By gating on
-      //   /readyz first, config is always written to a stopped gateway.
-      //   On reconnect (gateway already running) this entire block is skipped →
-      //   exec openclaw is reached immediately, making reconnect near-instant.
-      "if ! curl -fsS http://127.0.0.1:18789/readyz >/dev/null 2>&1; then",
-      // ── Step 3: write openclaw.json (gateway not running — inotify-safe) ────
-      // MUST be after onboard: openclaw onboard overwrites openclaw.json with its
-      // own defaults. We write gateway.mode=local, handshakeTimeoutMs=30000, and
-      // the StringCost provider AFTER onboard and BEFORE starting the gateway,
-      // matching setup.sh's lines 803–908 exactly.
-      "  node -e \"",
-      "const fs = require('fs');",
-      "const dir = '/home/agent/.openclaw';",
-      "const file = dir + '/openclaw.json';",
-      "let c = {};",
-      "try { c = JSON.parse(fs.readFileSync(file, 'utf8')); } catch(e) {}",
-      "if (!c.env) c.env = {};",
-      "if (!c.gateway) c.gateway = {};",
-      // Delete any stale auth token from a previous gateway run. The gateway
-      // writes gateway.auth.token to openclaw.json when it starts. If a new
-      // gateway sees an old token it didn't generate, it rejects it and crashes,
-      // causing /readyz to never respond. Clearing it gives the new gateway a
-      // clean slate — it will write a fresh token on startup.
-      "delete c.gateway.auth;",
-      "if (!c.gateway.mode) c.gateway.mode = 'local';",
-      "if (!c.gateway.handshakeTimeoutMs) c.gateway.handshakeTimeoutMs = 30000;",
-      "if (!c.agents) c.agents = {};",
-      "if (!c.agents.defaults) c.agents.defaults = {};",
-      "if (!c.agents.defaults.model) c.agents.defaults.model = {};",
-      "if (!c.agents.defaults.model.primary) c.agents.defaults.model.primary = 'anthropic/claude-sonnet-4-6';",
-      "const k = process.env.ANTHROPIC_API_KEY || '';",
-      "if (k && !k.startsWith('openshell:')) c.env.ANTHROPIC_API_KEY = k; else delete c.env.ANTHROPIC_API_KEY;",
-      // StringCost integration: route Anthropic traffic through the proxy.
-      // openclaw's built-in 'anthropic' provider hardcodes api.anthropic.com and
-      // ignores ANTHROPIC_BASE_URL for routing (openclaw issue #56679). The reliable
-      // path is to register a new provider with api:'anthropic-messages' and remap
-      // anthropic/* model refs to stringcost/*. env.ANTHROPIC_BASE_URL is still
-      // written so child processes using the bare @anthropic-ai/sdk inherit it.
-      "const _baseUrl = process.env.ANTHROPIC_BASE_URL || '';",
-      "if (_baseUrl) { c.env.ANTHROPIC_BASE_URL = _baseUrl; } else { delete c.env.ANTHROPIC_BASE_URL; }",
-      "delete c.env.ANTHROPIC_AUTH_TOKEN;",
-      "if (_baseUrl) {",
-      "  if (!c.models) c.models = {};",
-      "  if (!c.models.mode) c.models.mode = 'merge';",
-      "  if (!c.models.providers) c.models.providers = {};",
-      "  const _apiKey = (k && !k.startsWith('openshell:')) ? k : 'stringcost-presign-auth';",
-      "  c.models.providers.stringcost = {",
-      "    baseUrl: _baseUrl, api: 'anthropic-messages', apiKey: _apiKey,",
-      "    models: [",
-      "      {id:'claude-sonnet-4-6',name:'Claude Sonnet 4.6',contextWindow:1000000,maxTokens:64000},",
-      "      {id:'claude-opus-4-7',name:'Claude Opus 4.7',contextWindow:1000000,maxTokens:32000},",
-      "      {id:'claude-haiku-4-5',name:'Claude Haiku 4.5',contextWindow:200000,maxTokens:8192},",
-      "    ],",
-      "  };",
-      "  const _remap = id => (typeof id === 'string' && id.startsWith('anthropic/')) ? 'stringcost/' + id.slice('anthropic/'.length) : id;",
-      "  if (c.agents.defaults.model.primary) c.agents.defaults.model.primary = _remap(c.agents.defaults.model.primary);",
-      "  if (Array.isArray(c.agents.defaults.model.fallbacks)) c.agents.defaults.model.fallbacks = c.agents.defaults.model.fallbacks.map(_remap);",
-      "  if (c.models.providers.anthropic) { delete c.models.providers.anthropic.baseUrl; delete c.models.providers.anthropic.apiKey; delete c.models.providers.anthropic.api; }",
-      "} else {",
-      "  if (c.models && c.models.providers) { delete c.models.providers.stringcost; if (c.models.providers.anthropic) { delete c.models.providers.anthropic.baseUrl; delete c.models.providers.anthropic.apiKey; delete c.models.providers.anthropic.api; } }",
-      "  const _restore = id => (typeof id === 'string' && id.startsWith('stringcost/')) ? 'anthropic/' + id.slice('stringcost/'.length) : id;",
-      "  if (c.agents.defaults.model.primary) c.agents.defaults.model.primary = _restore(c.agents.defaults.model.primary);",
-      "  if (Array.isArray(c.agents.defaults.model.fallbacks)) c.agents.defaults.model.fallbacks = c.agents.defaults.model.fallbacks.map(_restore);",
-      "}",
-      "fs.mkdirSync(dir, { recursive: true, mode: 0o700 });",
-      "fs.writeFileSync(file, JSON.stringify(c, null, 2), { mode: 0o600 });",
-      "  \" 2>/dev/null || true",
-      // ── Step 4: start gateway with setsid ────────────────────────────────────
-      // setsid puts the gateway in a new session so it is NOT in the same
-      // process group as bash. When bash execs openclaw and the user later
-      // quits, SIGHUP goes to the terminal's foreground pgroup — not the
-      // gateway's session. Without setsid the gateway dies on disconnect.
-      //
-      // Kill any zombie/unhealthy gateway process first. If a previous gateway
-      // crashed but left a process still holding port 18789, the new gateway
-      // would fail to bind immediately and exit. The readyz check above only
-      // detects "no response" — it can't tell the difference between "gateway
-      // not running" and "gateway running but unhealthy". Killing all openclaw
-      // gateway processes here ensures the port is free before we start fresh.
-      "  pkill -f 'openclaw gateway' 2>/dev/null || true",
-      "  sleep 1",
-      "  printf '\\r\\033[K\\033[33m[OpenWork] Starting OpenClaw gateway...\\033[0m\\n'",
-      "  setsid env OPENCLAW_SKIP_ONBOARDING=1 OPENCLAW_HANDSHAKE_TIMEOUT_MS=30000 \\",
-      "    OPENCLAW_NO_RESPAWN=1 NODE_COMPILE_CACHE=/tmp/openclaw-compile-cache \\",
-      "    OPENCLAW_PLUGIN_STAGE_DIR=/tmp/openclaw-plugin-runtime-deps \\",
-      "    GIT_SSL_NO_VERIFY=true npm_config_strict_ssl=false \\",
-      "    HOME=/home/agent openclaw gateway --port 18789 --allow-unconfigured \\",
-      "    </dev/null >/tmp/openclaw-gateway.log 2>&1 &",
-      // ── Step 5: wait for /readyz with progress messages ───────────────
-      // First run stages 35 bundled npm packages; can take several minutes.
-      // 600 s matches setup.sh's gateway wait.
-      "  _gw=0",
-      "  while [ \"$_gw\" -lt 600 ]; do",
-      "    curl -fsS http://127.0.0.1:18789/readyz >/dev/null 2>&1 && break",
-      "    [ \"$_gw\" -eq 15 ] && printf '\\r\\033[K\\033[33m[OpenWork] Gateway staging deps (15s)...\\033[0m\\n'",
-      "    [ \"$_gw\" -eq 60 ] && printf '\\r\\033[K\\033[33m[OpenWork] Gateway staging deps (1m)...\\033[0m\\n'",
-      "    [ \"$_gw\" -eq 120 ] && printf '\\r\\033[K\\033[33m[OpenWork] Gateway still starting (2m)...\\033[0m\\n'",
-      "    [ \"$_gw\" -eq 300 ] && printf '\\r\\033[K\\033[33m[OpenWork] Gateway still starting (5m)...\\033[0m\\n'",
-      "    sleep 1",
-      "    _gw=$((_gw+1))",
-      "  done",
-      "  if curl -fsS http://127.0.0.1:18789/readyz >/dev/null 2>&1; then",
-      "    printf '\\r\\033[K\\033[32m[OpenWork] Gateway ready.\\033[0m\\n'",
-      "  else",
-      "    printf '\\r\\033[K\\033[31m[OpenWork] Gateway not ready — last 20 lines of /tmp/openclaw-gateway.log:\\033[0m\\n'",
-      "    tail -20 /tmp/openclaw-gateway.log 2>/dev/null || echo '(log empty)'",
-      "  fi",
-      // ── Step 5b: pre-stage TUI plugin deps ────────────────────────────────────
-      // NOTE: Step 5b previously re-applied openclaw.json while the gateway was
-      // running. This was REMOVED because the openclaw gateway watches openclaw.json
-      // via inotify and tries a live config reload on any write. The reload crashes
-      // the gateway, causing the TUI to open in Crestodian's "Gateway not reachable"
-      // fallback mode. Since Step 3 already writes the full correct config (with
-      // StringCost provider and gateway.mode=local) BEFORE the gateway starts, the
-      // re-apply is redundant AND dangerous. Step 3's config survives the gateway's
-      // own startup writes (it only ADDS gateway.auth.token, never clobbers models
-      // or env). The recovery restart below handles any remaining crash scenarios.
-      // Without this ENTIRE step, every TUI launch re-runs plugin discovery and
-      // the first user prompt hangs for ~10 min while plugins are staged from
-      // scratch (npm-via-git deps blocked by SSH). Match setup.sh exactly:
-      //   1. Seed /opt/openclaw-plugin-cache → ~/.openclaw/plugin-runtime-deps
-      //   2. `openclaw status --deep` (300 s) — forces plugin discovery + npm-via-git
-      //      dep resolution against the running gateway; this is what pre-stages
-      //      ALL TUI plugin deps so the first prompt is instant.
-      //   3. `openclaw doctor --fix` (60 s) — consolidates the plugin registry.
-      //
-      // setup.sh comments (lines 1097-1124): "pre-staging TUI plugin deps so
-      // the first user prompt doesn't pay the full plugin-install latency
-      // (~10 min in practice without this step)."
-      "  if [ -d /opt/openclaw-plugin-cache ] && [ -n \"$(ls -A /opt/openclaw-plugin-cache 2>/dev/null)\" ]; then",
-      "    printf '\\r\\033[K\\033[33m[OpenWork] Seeding plugin cache from image...\\033[0m\\n'",
-      "    mkdir -p /home/agent/.openclaw/plugin-runtime-deps",
-      "    cp -rn /opt/openclaw-plugin-cache/. /home/agent/.openclaw/plugin-runtime-deps/ 2>/dev/null || true",
-      "  fi",
-      "  printf '\\r\\033[K\\033[33m[OpenWork] Pre-staging plugins (first run, may take 2-5 min)...\\033[0m\\n'",
-      // status --deep exercises the full gateway→plugin-registry path and
-      // completes npm-via-git staging. Without it every first "hi" hangs.
-      "  HOME=/home/agent timeout 300 openclaw status --deep </dev/null >/tmp/openclaw-bootstrap.log 2>&1 \\",
-      "    && printf '\\r\\033[K\\033[32m[OpenWork] Plugin pre-stage complete.\\033[0m\\n' \\",
-      "    || printf '\\r\\033[K\\033[33m[OpenWork] Plugin pre-stage warning (see /tmp/openclaw-bootstrap.log).\\033[0m\\n'",
-      "  printf '\\r\\033[K\\033[33m[OpenWork] Consolidating plugin registry...\\033[0m\\n'",
-      "  HOME=/home/agent timeout 60 openclaw doctor --fix </dev/null >>/tmp/openclaw-bootstrap.log 2>&1 || true",
-      "fi",
-      // ── Recovery restart: gateway may crash during plugin pre-stage ────────────
-      // openclaw status --deep connects to the gateway's WebSocket and initiates
-      // plugin npm-via-git staging. Under memory pressure, or if the gateway detects
-      // a leftover inotify change from the bootstrap period, it can crash mid-stage.
-      // This check runs OUTSIDE the "if ! curl readyz" block so it fires on every
-      // connect — not just first-run. If the gateway is dead, restart it and wait up
-      // to 120 s before exec'ing the TUI, preventing a Crestodian fallback landing.
-      "if ! curl -fsS http://127.0.0.1:18789/readyz >/dev/null 2>&1; then",
-      "  printf '\\r\\033[K\\033[33m[OpenWork] Restarting gateway (crashed during setup)...\\033[0m\\n'",
-      "  pkill -f 'openclaw gateway' 2>/dev/null || true",
-      "  sleep 1",
-      "  setsid env OPENCLAW_SKIP_ONBOARDING=1 OPENCLAW_HANDSHAKE_TIMEOUT_MS=30000 \\",
-      "    OPENCLAW_NO_RESPAWN=1 NODE_COMPILE_CACHE=/tmp/openclaw-compile-cache \\",
-      "    GIT_SSL_NO_VERIFY=true npm_config_strict_ssl=false \\",
-      "    HOME=/home/agent openclaw gateway --port 18789 --allow-unconfigured \\",
-      "    </dev/null >>/tmp/openclaw-gateway.log 2>&1 &",
-      "  _gw_final=0",
-      "  while [ \"$_gw_final\" -lt 120 ]; do",
-      "    curl -fsS http://127.0.0.1:18789/readyz >/dev/null 2>&1 && break",
-      "    sleep 1",
-      "    _gw_final=$((_gw_final+1))",
-      "  done",
-      "  curl -fsS http://127.0.0.1:18789/readyz >/dev/null 2>&1 \\",
-      "    && printf '\\r\\033[K\\033[32m[OpenWork] Gateway ready.\\033[0m\\n' \\",
-      "    || printf '\\r\\033[K\\033[31m[OpenWork] Warning: Gateway not reachable.\\033[0m\\n'",
-      "fi",
+      // Agent gate for setup.sh — the same value the openclaw generic provider
+      // injects in the canonical `openshell sandbox create ... -- openeral` flow.
+      "export OPENERAL_AGENT=openclaw",
     );
   }
 
-  // ── Step 6 / Claude: auto-launch guard ─────────────────────────────────
+  // ── Auto-launch guard ───────────────────────────────────────────────────
   block.push(
     'if [ -z "${OPENWORK_AGENT_LAUNCHED:-}" ] && [ -t 0 ]; then',
     "  export OPENWORK_AGENT_LAUNCHED=1",
@@ -893,27 +693,45 @@ function buildLaunchBlock(profile, proxyBase, apiKey = null) {
   if (isClaude) {
     block.push("  exec claude");
   } else {
-    // -u OPENCLAW_PLUGIN_STAGE_DIR: must NOT reach the TUI process. Forwarding
-    // it causes openclaw to run its own concurrent staging loop that saturates
-    // the event loop and makes the terminal unresponsive (setup.sh line 1135).
-    // SHELL=/usr/local/bin/openeral-bash: ensures agent tool shell invocations
-    // go through openeral's workspace filesystem layer (PostgreSQL-backed).
-    // Without SHELL set, openclaw uses /bin/bash which bypasses the workspace.
     block.push(
-      "  exec env -u OPENCLAW_PLUGIN_STAGE_DIR \\",
-      "    HOME=/home/agent \\",
-      "    SHELL=/usr/local/bin/openeral-bash \\",
-      "    OPENCLAW_NO_RESPAWN=1 \\",
-      "    NODE_COMPILE_CACHE=/tmp/openclaw-compile-cache \\",
-      "    GIT_SSL_NO_VERIFY=true npm_config_strict_ssl=false \\",
-      "    OPENCLAW_HANDSHAKE_TIMEOUT_MS=30000 \\",
-      "    openclaw",
+      // Reconnect fast path: the gateway from a previous session survives PTY
+      // disconnects (setup.sh starts it with setsid). When it is still healthy,
+      // exec the TUI directly instead of re-running setup.sh. This mirrors
+      // setup.sh's own final exec:
+      //   - ~/.openeral/env.sh carries ANTHROPIC_BASE_URL when StringCost is
+      //     active (written by setup.sh for reconnect sessions);
+      //   - -u OPENCLAW_PLUGIN_STAGE_DIR: must NOT reach the TUI process —
+      //     forwarding it causes openclaw to run its own concurrent staging
+      //     loop that saturates the event loop and freezes the terminal;
+      //   - -u ANTHROPIC_AUTH_TOKEN: env.sh exports a dummy token for Claude
+      //     Code's benefit; the canonical openclaw env never has it;
+      //   - SHELL=/usr/local/bin/openeral-bash: agent tool shell invocations
+      //     go through openeral's PostgreSQL-backed workspace layer.
+      "  if curl -fsS http://127.0.0.1:18789/readyz >/dev/null 2>&1; then",
+      "    [ -f /home/agent/.openeral/env.sh ] && . /home/agent/.openeral/env.sh",
+      "    exec env -u STRINGCOST_API_KEY -u OPENCLAW_PLUGIN_STAGE_DIR -u ANTHROPIC_AUTH_TOKEN \\",
+      "      HOME=/home/agent \\",
+      "      SHELL=/usr/local/bin/openeral-bash \\",
+      "      OPENCLAW_NO_RESPAWN=1 \\",
+      "      NODE_COMPILE_CACHE=/tmp/openclaw-compile-cache \\",
+      "      GIT_SSL_NO_VERIFY=true npm_config_strict_ssl=false \\",
+      "      OPENCLAW_HANDSHAKE_TIMEOUT_MS=30000 \\",
+      "      openclaw",
+      "  fi",
+      // Cold start (or crashed gateway): clear any zombie process that may
+      // still hold port 18789 — setup.sh starts its gateway without a pkill,
+      // because in the canonical fresh-container flow none can exist — then
+      // hand over to the image's tested entry point. setup.sh does everything
+      // this block used to hand-roll: DB migrations, workspace seed,
+      // openeral-bash daemon, StringCost presign resolution, `openclaw
+      // onboard` (schema-correct auth profile + foreground plugin staging),
+      // gateway start + readiness wait, TUI plugin pre-stage, doctor --fix,
+      // and finally execs the OpenClaw TUI.
+      "  pkill -f 'openclaw gateway' 2>/dev/null || true",
+      "  exec openeral",
     );
   }
-  block.push(
-    "fi",
-    "# <<< openwork launch <<<",
-  );
+  block.push("fi", "# <<< openwork launch <<<");
   return block.join("\n");
 }
 

@@ -61,7 +61,14 @@ RUN SHARP_IGNORE_GLOBAL_LIBVIPS=1 npm install -g --loglevel=error openclaw@2026.
 #      every module loaded up to that point gets JIT-compiled and the bytecode
 #      lands in /opt/openclaw-compile-cache.
 #   5. Copy plugin-runtime-deps to /opt/openclaw-plugin-cache (existing logic).
-#   6. Make /opt/openclaw-compile-cache world-readable so the sandbox user can
+#   6. HARD GATE: fail the build if the plugin cache came out empty. Every
+#      pre-warm step above is `|| true`, so a network-restricted build
+#      environment can silently produce an image with no staged plugins.
+#      Shipping such an image forces the gateway to stage all ~35 bundled
+#      runtime deps at runtime inside the network-restricted sandbox — the
+#      staging hangs, /readyz never responds, and the user sees the gateway
+#      "crash" after a 10-minute wait.
+#   7. Make /opt/openclaw-compile-cache world-readable so the sandbox user can
 #      seed it at runtime.
 RUN set -e \
  && mkdir -p /tmp/openclaw-bootstrap /opt/openclaw-compile-cache \
@@ -103,7 +110,15 @@ RUN set -e \
         cp -r /tmp/openclaw-bootstrap/.openclaw/plugin-runtime-deps/. \
               /opt/openclaw-plugin-cache/ 2>/dev/null || true; \
     fi \
- # 5. Lock down perms and log cache size for visibility during build.
+ # 5. Hard gate: an empty plugin cache means the pre-warm silently failed.
+ && if [ -z "$(ls -A /opt/openclaw-plugin-cache 2>/dev/null)" ]; then \
+        echo "ERROR: /opt/openclaw-plugin-cache is empty — OpenClaw plugin pre-stage failed." >&2; \
+        echo "An image without staged plugins makes the sandbox gateway hang at startup." >&2; \
+        echo "--- tail of /tmp/openclaw-bootstrap.log ---" >&2; \
+        tail -100 /tmp/openclaw-bootstrap.log >&2 || true; \
+        exit 1; \
+    fi \
+ # 6. Lock down perms and log cache size for visibility during build.
  && chmod -R a+rX /opt/openclaw-plugin-cache /opt/openclaw-compile-cache \
  && echo "--- compile cache size ---" >>/tmp/openclaw-bootstrap.log \
  && du -sh /opt/openclaw-compile-cache 2>&1 | tee -a /tmp/openclaw-bootstrap.log || true \
