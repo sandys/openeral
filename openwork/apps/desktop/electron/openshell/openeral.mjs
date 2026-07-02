@@ -60,6 +60,18 @@ const STRINGCOST_API_BASE = (process.env.STRINGCOST_API_BASE || "https://app.str
 );
 const STRINGCOST_PRESIGN_TIMEOUT_MS = 30_000;
 
+// Placeholder ANTHROPIC_AUTH_TOKEN for StringCost-proxied Claude Code.
+// StringCost authenticates via the presign token embedded in the proxy URL
+// and ignores the inbound Authorization header, but Claude Code refuses to
+// talk to ANTHROPIC_BASE_URL without *some* token in its env. Any non-empty
+// value works and nothing validates it — it is a placeholder, not a secret.
+// Compliance: token-shaped values must be sourced from the environment at
+// runtime rather than hardcoded, so the value is overridable via
+// OPENWORK_STRINGCOST_AUTH_TOKEN (e.g. for self-hosted proxies that do
+// validate the inbound header).
+const STRINGCOST_PLACEHOLDER_AUTH_TOKEN =
+  process.env.OPENWORK_STRINGCOST_AUTH_TOKEN || "openwork-stringcost";
+
 // Docker pulls happen under user `banker` inside the distro. If Docker
 // Desktop's WSL integration ever ran for this distro (or runs again on
 // a future boot) it can write a `credsStore: "desktop"` line into
@@ -648,8 +660,12 @@ function buildLaunchBlock(profile, proxyBase, apiKey = null) {
   if (proxyBase) {
     if (isClaude) {
       block.push(
-        `export ANTHROPIC_BASE_URL="${proxyBase}"`,
-        'export ANTHROPIC_AUTH_TOKEN="openwork-stringcost"',
+        // shellQuote: proxyBase originates from sandbox-controlled input
+        // (uploaded presign.json) or an HTTP response body — never
+        // interpolate it into bash unquoted/double-quoted, where $(...)
+        // would execute when .bashrc is sourced.
+        `export ANTHROPIC_BASE_URL=${shellQuote(proxyBase)}`,
+        `export ANTHROPIC_AUTH_TOKEN=${shellQuote(STRINGCOST_PLACEHOLDER_AUTH_TOKEN)}`,
         // Claude Code auths via the proxy URL token — the real key is not needed.
         "unset ANTHROPIC_API_KEY",
       );
@@ -660,7 +676,8 @@ function buildLaunchBlock(profile, proxyBase, apiKey = null) {
       // openclaw.json itself. The presign uploaded to
       // /sandbox/openeral-input/presign.json by configureAgentLaunch remains
       // as setup.sh's file-based fallback.
-      block.push(`export STRINGCOST_PROXY_URL="${proxyBase}"`);
+      // shellQuote: same injection hardening as the claude branch above.
+      block.push(`export STRINGCOST_PROXY_URL=${shellQuote(proxyBase)}`);
     }
   }
 
@@ -699,7 +716,12 @@ function buildLaunchBlock(profile, proxyBase, apiKey = null) {
       // exec the TUI directly instead of re-running setup.sh. This mirrors
       // setup.sh's own final exec:
       //   - ~/.openeral/env.sh carries ANTHROPIC_BASE_URL when StringCost is
-      //     active (written by setup.sh for reconnect sessions);
+      //     active (written by setup.sh for reconnect sessions). It also
+      //     contains `unset ANTHROPIC_API_KEY` — meant for Claude Code,
+      //     which auths via the proxy URL token. OpenClaw needs the literal
+      //     key (setup.sh: OpenShell placeholders are unusable by openclaw's
+      //     Node gateway) and setup.sh's own final exec keeps it in the env,
+      //     so save the key loaded above and re-export it after sourcing;
       //   - -u OPENCLAW_PLUGIN_STAGE_DIR: must NOT reach the TUI process —
       //     forwarding it causes openclaw to run its own concurrent staging
       //     loop that saturates the event loop and freezes the terminal;
@@ -708,7 +730,9 @@ function buildLaunchBlock(profile, proxyBase, apiKey = null) {
       //   - SHELL=/usr/local/bin/openeral-bash: agent tool shell invocations
       //     go through openeral's PostgreSQL-backed workspace layer.
       "  if curl -fsS http://127.0.0.1:18789/readyz >/dev/null 2>&1; then",
+      '    _saved_key="${ANTHROPIC_API_KEY:-}"',
       "    [ -f /home/agent/.openeral/env.sh ] && . /home/agent/.openeral/env.sh",
+      '    [ -n "$_saved_key" ] && export ANTHROPIC_API_KEY="$_saved_key"',
       "    exec env -u STRINGCOST_API_KEY -u OPENCLAW_PLUGIN_STAGE_DIR -u ANTHROPIC_AUTH_TOKEN \\",
       "      HOME=/home/agent \\",
       "      SHELL=/usr/local/bin/openeral-bash \\",
@@ -775,7 +799,9 @@ async function configureAgentLaunch({ name, profile, proxyBase, env, onProgress,
   if (isClaude && proxyBase) {
     lines.push(
       "mkdir -p /sandbox/.claude",
-      `node -e 'const fs=require("fs");const f="/sandbox/.claude/settings.json";let s={};try{s=JSON.parse(fs.readFileSync(f,"utf8")||"{}")}catch(e){}s.env=Object.assign({},s.env,{ANTHROPIC_BASE_URL:"${proxyBase}",ANTHROPIC_AUTH_TOKEN:"openwork-stringcost"});fs.writeFileSync(f,JSON.stringify(s,null,2))' 2>/dev/null || true`,
+      // proxyBase / token are passed as argv — never interpolated into the
+      // bash line or the inline JS source (shell-injection hardening).
+      `node -e 'const fs=require("fs");const f="/sandbox/.claude/settings.json";let s={};try{s=JSON.parse(fs.readFileSync(f,"utf8")||"{}")}catch(e){}s.env=Object.assign({},s.env,{ANTHROPIC_BASE_URL:process.argv[1],ANTHROPIC_AUTH_TOKEN:process.argv[2]});fs.writeFileSync(f,JSON.stringify(s,null,2))' ${shellQuote(proxyBase)} ${shellQuote(STRINGCOST_PLACEHOLDER_AUTH_TOKEN)} 2>/dev/null || true`,
     );
   }
 

@@ -481,6 +481,11 @@ test("buildLaunchBlock (claude + proxy): exports proxy vars and unsets the real 
     "https://proxy.stringcost.com/stringcost-proxy/t/TOK",
   );
   assert.match(block, /ANTHROPIC_BASE_URL=.*TOK/, "must export proxy base URL");
+  assert.match(
+    block,
+    /^export ANTHROPIC_AUTH_TOKEN=/m,
+    "claude must export a placeholder auth token for the proxy",
+  );
   assert.match(block, /unset ANTHROPIC_API_KEY/, "claude must unset real key when proxy active");
   assert.doesNotMatch(block, /openclaw gateway/, "claude must not start openclaw gateway");
   assert.match(block, /exec claude/, "claude must exec claude");
@@ -512,8 +517,8 @@ test("buildLaunchBlock (openclaw + proxy): delegates to setup.sh with StringCost
   );
   assert.doesNotMatch(
     block,
-    /ANTHROPIC_AUTH_TOKEN="openwork-stringcost"/,
-    "openclaw must not export the claude-only dummy auth token",
+    /^export ANTHROPIC_AUTH_TOKEN=/m,
+    "openclaw must not export the claude-only placeholder auth token",
   );
   // Must load the key from the file deposited by finalizeSandboxLaunch.
   assert.match(
@@ -628,6 +633,43 @@ test("buildLaunchBlock (openclaw): fast path precedes the setup.sh handoff", () 
   // Both the env prep and the launch must stay inside the managed markers.
   assert.match(block, /^# >>> openwork launch >>>/m);
   assert.match(block, /^# <<< openwork launch <<<$/m);
+});
+
+test("buildLaunchBlock: proxyBase is shell-quoted (no command substitution)", () => {
+  // proxyBase is sandbox-controlled (parsed from an uploaded presign.json)
+  // or an HTTP response body. Inside double quotes bash still expands
+  // $(...), so the exports must single-quote the value.
+  const evil = "https://x.example/stringcost-proxy/t/$(touch /tmp/pwned)";
+  const claude = openeral.__testing.buildLaunchBlock("openeral-claude", evil);
+  assert.ok(
+    claude.includes(`export ANTHROPIC_BASE_URL='${evil}'`),
+    "claude proxy export must be single-quoted",
+  );
+  const claw = openeral.__testing.buildLaunchBlock("openeral-openclaw", evil);
+  assert.ok(
+    claw.includes(`export STRINGCOST_PROXY_URL='${evil}'`),
+    "openclaw proxy export must be single-quoted",
+  );
+});
+
+test("buildLaunchBlock (openclaw): fast path preserves ANTHROPIC_API_KEY across env.sh", () => {
+  // env.sh (written by setup.sh) contains `unset ANTHROPIC_API_KEY` for
+  // Claude Code's benefit. The fast path must save the key it just loaded
+  // and re-export it after sourcing, or the TUI is exec'd without the
+  // literal key that setup.sh documents OpenClaw requires.
+  const block = openeral.__testing.buildLaunchBlock("openeral-openclaw", null);
+  const saveIdx = block.indexOf('_saved_key="${ANTHROPIC_API_KEY:-}"');
+  const sourceIdx = block.indexOf(". /home/agent/.openeral/env.sh");
+  const restoreIdx = block.indexOf(
+    '[ -n "$_saved_key" ] && export ANTHROPIC_API_KEY="$_saved_key"',
+  );
+  assert.ok(saveIdx > -1, "must capture the key before sourcing env.sh");
+  assert.ok(sourceIdx > -1, "must still source env.sh for ANTHROPIC_BASE_URL");
+  assert.ok(restoreIdx > -1, "must re-export the key after sourcing env.sh");
+  assert.ok(
+    saveIdx < sourceIdx && sourceIdx < restoreIdx,
+    `order must be save (${saveIdx}) -> source (${sourceIdx}) -> restore (${restoreIdx})`,
+  );
 });
 
 test("buildLaunchBlock (openclaw + apiKey): embeds key directly in block", () => {
