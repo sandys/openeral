@@ -65,12 +65,14 @@ const STRINGCOST_PRESIGN_TIMEOUT_MS = 30_000;
 // and ignores the inbound Authorization header, but Claude Code refuses to
 // talk to ANTHROPIC_BASE_URL without *some* token in its env. Any non-empty
 // value works and nothing validates it — it is a placeholder, not a secret.
-// Compliance: token-shaped values must be sourced from the environment at
-// runtime rather than hardcoded, so the value is overridable via
-// OPENWORK_STRINGCOST_AUTH_TOKEN (e.g. for self-hosted proxies that do
-// validate the inbound header).
+// Compliance: no token-like value may be hardcoded in source. The value is
+// sourced from the environment at runtime (OPENWORK_STRINGCOST_AUTH_TOKEN —
+// e.g. for self-hosted proxies that do validate the inbound header); when
+// unset, a random per-process value is generated instead of a literal, so
+// nothing in the codebase looks like — or could ever collide with — a real
+// credential.
 const STRINGCOST_PLACEHOLDER_AUTH_TOKEN =
-  process.env.OPENWORK_STRINGCOST_AUTH_TOKEN || "openwork-stringcost";
+  process.env.OPENWORK_STRINGCOST_AUTH_TOKEN || `openwork-${randomUUID()}`;
 
 // Docker pulls happen under user `banker` inside the distro. If Docker
 // Desktop's WSL integration ever ran for this distro (or runs again on

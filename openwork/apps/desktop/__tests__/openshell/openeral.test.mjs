@@ -486,6 +486,20 @@ test("buildLaunchBlock (claude + proxy): exports proxy vars and unsets the real 
     /^export ANTHROPIC_AUTH_TOKEN=/m,
     "claude must export a placeholder auth token for the proxy",
   );
+  // Compliance: the placeholder must never be a hardcoded token literal —
+  // it is env-sourced (OPENWORK_STRINGCOST_AUTH_TOKEN) or random per process.
+  assert.doesNotMatch(
+    block,
+    /openwork-stringcost/,
+    "placeholder token must not be the old hardcoded literal",
+  );
+  const tokenLine = block.match(/^export ANTHROPIC_AUTH_TOKEN='([^']+)'$/m);
+  assert.ok(tokenLine, "token export must be single-quoted and non-empty");
+  assert.ok(
+    process.env.OPENWORK_STRINGCOST_AUTH_TOKEN ||
+      /^openwork-[0-9a-f-]{36}$/.test(tokenLine[1]),
+    "unset env must yield a random per-process placeholder (openwork-<uuid>)",
+  );
   assert.match(block, /unset ANTHROPIC_API_KEY/, "claude must unset real key when proxy active");
   assert.doesNotMatch(block, /openclaw gateway/, "claude must not start openclaw gateway");
   assert.match(block, /exec claude/, "claude must exec claude");
