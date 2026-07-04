@@ -20,6 +20,14 @@ contextBridge.exposeInMainWorld("__OPENWORK_ELECTRON__", {
       return ipcRenderer.invoke("openwork:shell:relaunch");
     },
   },
+  /** Subscribe to native application-menu actions (File > New Session, etc.). */
+  onMenuAction(callback) {
+    const handler = (_event, payload) => callback(payload);
+    ipcRenderer.on("openwork:menu", handler);
+    return () => {
+      ipcRenderer.removeListener("openwork:menu", handler);
+    };
+  },
   migration: {
     readSnapshot() {
       return ipcRenderer.invoke("openwork:migration:read");
@@ -49,7 +57,10 @@ contextBridge.exposeInMainWorld("__OPENWORK_ELECTRON__", {
       const handler = (_event, data) => callback(data);
       ipcRenderer.on("openwork:updater:download-progress", handler);
       return () => {
-        ipcRenderer.removeListener("openwork:updater:download-progress", handler);
+        ipcRenderer.removeListener(
+          "openwork:updater:download-progress",
+          handler,
+        );
       };
     },
   },
@@ -100,5 +111,7 @@ contextBridge.exposeInMainWorld("__OPENWORK_ELECTRON__", {
 
 ipcRenderer.on(NATIVE_DEEP_LINK_EVENT, (_event, urls) => {
   if (typeof window === "undefined") return;
-  window.dispatchEvent(new CustomEvent(NATIVE_DEEP_LINK_EVENT, { detail: urls }));
+  window.dispatchEvent(
+    new CustomEvent(NATIVE_DEEP_LINK_EVENT, { detail: urls }),
+  );
 });

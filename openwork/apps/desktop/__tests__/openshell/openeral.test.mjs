@@ -30,7 +30,10 @@ test.beforeEach(() => {
   process.env.OPENWORK_WSL_EXE = MOCK_WSL;
   process.env.MOCK_WSL_LOG = logPath;
   process.env.OPENWORK_TEST_CREDENTIALS_DIR = credsDir;
-  process.env.OPENWORK_CREDENTIALS_FILE = join(workDir, "creds-prod-fallback.json");
+  process.env.OPENWORK_CREDENTIALS_FILE = join(
+    workDir,
+    "creds-prod-fallback.json",
+  );
   for (const key of [
     "MOCK_WSL_STDOUT",
     "MOCK_WSL_STDOUT_FILE",
@@ -38,6 +41,8 @@ test.beforeEach(() => {
     "MOCK_WSL_EXIT",
     "MOCK_WSL_DELAY_MS",
     "MOCK_WSL_DELAY_BEFORE_MS",
+    "OPENWORK_SANDBOX_IMAGE",
+    "OPENWORK_SANDBOX_SKIP_PULL",
   ]) {
     delete process.env[key];
   }
@@ -62,7 +67,8 @@ function readArgsLog() {
 }
 
 const openeral = await import("../../electron/openshell/openeral.mjs");
-const credentials = await import("../../electron/openshell/openeral-credentials.mjs");
+const credentials =
+  await import("../../electron/openshell/openeral-credentials.mjs");
 
 // ── Pure helpers ───────────────────────────────────────────────────────
 
@@ -81,8 +87,27 @@ test("imageForProfile: maps openclaw profile to sandys image (same as claude)", 
   );
 });
 
+test("imageForProfile: OPENWORK_SANDBOX_IMAGE overrides both profiles", () => {
+  process.env.OPENWORK_SANDBOX_IMAGE = "openeral-local/sandbox:openclaw-test";
+  try {
+    assert.equal(
+      openeral.imageForProfile("openeral-claude"),
+      "openeral-local/sandbox:openclaw-test",
+    );
+    assert.equal(
+      openeral.imageForProfile("openeral-openclaw"),
+      "openeral-local/sandbox:openclaw-test",
+    );
+  } finally {
+    delete process.env.OPENWORK_SANDBOX_IMAGE;
+  }
+});
+
 test("imageForProfile: throws on unknown profile", () => {
-  assert.throws(() => openeral.imageForProfile("openeral-unknown"), /Unknown OpenEral profile/);
+  assert.throws(
+    () => openeral.imageForProfile("openeral-unknown"),
+    /Unknown OpenEral profile/,
+  );
 });
 
 // ── buildWslEnvForwarding ──────────────────────────────────────────────
@@ -105,7 +130,10 @@ test("buildWslEnvForwarding: preserves existing WSLENV entries", () => {
   try {
     const env = openeral.__testing.buildWslEnvForwarding({ FOO: "bar" });
     const names = env.WSLENV.split(":").filter(Boolean);
-    assert.ok(names.includes("EXISTING_VAR"), `expected EXISTING_VAR in ${env.WSLENV}`);
+    assert.ok(
+      names.includes("EXISTING_VAR"),
+      `expected EXISTING_VAR in ${env.WSLENV}`,
+    );
     assert.ok(names.includes("FOO"), `expected FOO in ${env.WSLENV}`);
   } finally {
     if (prev === undefined) delete process.env.WSLENV;
@@ -124,7 +152,9 @@ test("createStringcostPresign: posts the canonical body and returns the url", as
       ok: true,
       status: 200,
       async json() {
-        return { url: "https://proxy.stringcost.com/stringcost-proxy/t/abc123/v1/messages" };
+        return {
+          url: "https://proxy.stringcost.com/stringcost-proxy/t/abc123/v1/messages",
+        };
       },
       async text() {
         return "";
@@ -137,11 +167,17 @@ test("createStringcostPresign: posts the canonical body and returns the url", as
       stringcostApiKey: "test-stringcost-api-key",
       agentLabel: "claude-code",
     });
-    assert.equal(url, "https://proxy.stringcost.com/stringcost-proxy/t/abc123/v1/messages");
+    assert.equal(
+      url,
+      "https://proxy.stringcost.com/stringcost-proxy/t/abc123/v1/messages",
+    );
     assert.equal(calls.length, 1);
     assert.match(calls[0].url, /\/v1\/presign$/);
     assert.equal(calls[0].init.method, "POST");
-    assert.equal(calls[0].init.headers.Authorization, "Bearer test-stringcost-api-key");
+    assert.equal(
+      calls[0].init.headers.Authorization,
+      "Bearer test-stringcost-api-key",
+    );
     const body = JSON.parse(calls[0].init.body);
     assert.equal(body.provider, "anthropic");
     assert.equal(body.client_api_key, "test-anthropic-api-key");
@@ -159,7 +195,16 @@ test("createStringcostPresign: labels openclaw spend distinctly", async () => {
   let captured;
   globalThis.fetch = async (_url, init) => {
     captured = JSON.parse(init.body);
-    return { ok: true, status: 200, async json() { return { url: "https://x/stringcost-proxy/t/z" }; }, async text() { return ""; } };
+    return {
+      ok: true,
+      status: 200,
+      async json() {
+        return { url: "https://x/stringcost-proxy/t/z" };
+      },
+      async text() {
+        return "";
+      },
+    };
   };
   try {
     await openeral.__testing.createStringcostPresign({
@@ -282,7 +327,9 @@ test("stringcostBaseUrlForAgent: accepts a self-hosted host:port shape", () => {
 
 test("stringcostBaseUrlForAgent: returns null for non-StringCost / empty input", () => {
   assert.equal(
-    openeral.__testing.stringcostBaseUrlForAgent("https://api.anthropic.com/v1/messages"),
+    openeral.__testing.stringcostBaseUrlForAgent(
+      "https://api.anthropic.com/v1/messages",
+    ),
     null,
   );
   assert.equal(openeral.__testing.stringcostBaseUrlForAgent(""), null);
@@ -292,7 +339,7 @@ test("stringcostBaseUrlForAgent: returns null for non-StringCost / empty input",
 // ── sandboxRunScriptCmd ────────────────────────────────────────────────
 
 test("sandboxRunScriptCmd: base64-encodes the script so it round-trips in the sandbox", () => {
-  const script = "echo hi\nexport FOO=\"a b\"\nunset BAR";
+  const script = 'echo hi\nexport FOO="a b"\nunset BAR';
   const cmd = openeral.__testing.sandboxRunScriptCmd("openeral-ws1", script);
   // Targets the named sandbox via exec.
   assert.match(cmd, /openshell sandbox exec --name 'openeral-ws1' --/);
@@ -413,7 +460,9 @@ test("createOpenEralSandbox: claude profile builds canonical openeral argv", asy
     "expected chmod 600 on the staging file",
   );
   assert.ok(
-    lines.some((l) => /trap 'rm -f \/tmp\/openeral-db-url-[\w-]+' EXIT/.test(l)),
+    lines.some((l) =>
+      /trap 'rm -f \/tmp\/openeral-db-url-[\w-]+' EXIT/.test(l),
+    ),
     "expected EXIT trap to clean up staging file",
   );
   // Should not regress to the mktemp+command-substitution shape.
@@ -431,12 +480,22 @@ test("createOpenEralSandbox: claude profile builds canonical openeral argv", asy
   // running `-- openeral` would deadlock on the agent's interactive prompt).
   assert.match(createLine, /sandbox create --no-tty/);
   assert.match(createLine, /--name 'openeral-new'/);
-  assert.match(createLine, /--from 'ghcr\.io\/sandys\/openeral\/sandbox:just-bash'/);
-  assert.match(createLine, /--upload \/tmp\/openeral-db-url-[\w-]+:\/sandbox\/db-url/);
+  assert.match(
+    createLine,
+    /--from 'ghcr\.io\/sandys\/openeral\/sandbox:just-bash'/,
+  );
+  assert.match(
+    createLine,
+    /--upload \/tmp\/openeral-db-url-[\w-]+:\/sandbox\/db-url/,
+  );
   assert.match(createLine, /--provider claude --auto-providers/);
   assert.match(createLine, /-- \/bin\/true$/);
   // Things that should NOT be there.
-  assert.doesNotMatch(createLine, /--gateway/, "no --gateway flag in canonical flow");
+  assert.doesNotMatch(
+    createLine,
+    /--gateway/,
+    "no --gateway flag in canonical flow",
+  );
   assert.doesNotMatch(createLine, /--provider db/, "no explicit db provider");
 });
 
@@ -500,8 +559,16 @@ test("buildLaunchBlock (claude + proxy): exports proxy vars and unsets the real 
       /^openwork-[0-9a-f-]{36}$/.test(tokenLine[1]),
     "unset env must yield a random per-process placeholder (openwork-<uuid>)",
   );
-  assert.match(block, /unset ANTHROPIC_API_KEY/, "claude must unset real key when proxy active");
-  assert.doesNotMatch(block, /openclaw gateway/, "claude must not start openclaw gateway");
+  assert.match(
+    block,
+    /unset ANTHROPIC_API_KEY/,
+    "claude must unset real key when proxy active",
+  );
+  assert.doesNotMatch(
+    block,
+    /openclaw gateway/,
+    "claude must not start openclaw gateway",
+  );
   assert.match(block, /exec claude/, "claude must exec claude");
 });
 
@@ -701,7 +768,11 @@ test("buildLaunchBlock (openclaw + apiKey): embeds key directly in block", () =>
     "must embed the API key directly in the block",
   );
   // The file-read override must also still be present for key rotation.
-  assert.match(block, /anthropic-api-key/, "file-read fallback must also be present");
+  assert.match(
+    block,
+    /anthropic-api-key/,
+    "file-read fallback must also be present",
+  );
 });
 
 test("buildLaunchBlock (openclaw + no proxy): no StringCost env, still delegates to setup.sh", () => {
@@ -770,7 +841,10 @@ test("deleteOpenEralSandbox: passes --force and name through", async () => {
 });
 
 test("deleteOpenEralSandbox: rejects empty name", async () => {
-  await assert.rejects(() => openeral.deleteOpenEralSandbox(""), /name is required/);
+  await assert.rejects(
+    () => openeral.deleteOpenEralSandbox(""),
+    /name is required/,
+  );
 });
 
 // ── probeDatabaseUrl ───────────────────────────────────────────────────
@@ -787,7 +861,10 @@ test("probeDatabaseUrl: runs psql in postgres:16-alpine and returns reachable", 
   assert.equal(r.reachable, true);
   const lines = readArgsLog();
   assert.equal(lines.length, 1);
-  assert.match(lines[0], /docker run --rm -i -e PGCONNECT_TIMEOUT=10 postgres:16-alpine psql/);
+  assert.match(
+    lines[0],
+    /docker run --rm -i -e PGCONNECT_TIMEOUT=10 postgres:16-alpine psql/,
+  );
   assert.match(lines[0], /postgresql:\/\/test\/db/);
   assert.match(lines[0], /-tAc select 1/);
 });

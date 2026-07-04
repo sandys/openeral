@@ -666,6 +666,24 @@ if [ "$OPENERAL_AGENT" = "openclaw" ]; then
     cp -rn /opt/openclaw-compile-cache/. /tmp/openclaw-compile-cache/ 2>/dev/null || true
   fi
 
+  # Seed the plugin stage dir (OPENCLAW_PLUGIN_STAGE_DIR) from the image-baked
+  # copy. This is REQUIRED, not just an optimization: both `openclaw onboard`
+  # and `openclaw gateway` stage OpenClaw's ~35 bundled runtime deps into this
+  # dir on startup ("[plugins] staging bundled runtime deps before gateway
+  # startup (35 specs): ..."). That staging is an npm install that reaches
+  # non-allowlisted hosts, so inside the network-restricted sandbox it blocks
+  # at ~0% CPU indefinitely: onboard then times out (exit 124) and falls back
+  # to an invalid auth profile, and the gateway never reaches /readyz. The
+  # Dockerfile stages these deps into /opt/openclaw-plugin-cache at build time
+  # (network available) as openclaw-<version>-<hash>/; seeding the stage dir
+  # from it makes both onboard and the gateway find the deps already present
+  # and skip the doomed cold-start install. Without this the whole OpenClaw
+  # launch hangs. cp -rn: never clobber anything already staged this session.
+  if [ -d /opt/openclaw-plugin-cache ] && [ -n "$(ls -A /opt/openclaw-plugin-cache 2>/dev/null)" ]; then
+    echo "setup.sh: seeding OpenClaw plugin runtime deps from image..."
+    cp -rn /opt/openclaw-plugin-cache/. "$OPENCLAW_PLUGIN_STAGE_DIR"/ 2>/dev/null || true
+  fi
+
   # Install a diagnose script the user can run if openclaw misbehaves. Dumps
   # everything relevant: config, auth profile, gateway log tail, onboard log
   # tail, /readyz status, env vars. Lives in /home/agent so reconnect sessions
@@ -740,6 +758,15 @@ DIAG_EOF
     # output stops at "running openclaw onboard..." and the sandbox session
     # exits). Wrap the call in `set +e` / `set -e` so a non-zero onboard is
     # surfaced as a warning instead of a fatal error.
+    # --skip-health: onboard runs BEFORE we start the gateway, so its final
+    # "is the gateway reachable at ws://127.0.0.1:18789" probe always fails
+    # (ECONNREFUSED) and onboard exits 1 even though it successfully wrote the
+    # config + auth profile ("Updated openclaw.json / Workspace OK / Sessions
+    # OK"). That spurious non-zero exit leaves onboarding marked incomplete, so
+    # the TUI drops into the "crestodian" ring-zero setup/repair helper instead
+    # of the normal agent. Skipping the health check (openclaw's own suggested
+    # fix) lets onboard finish cleanly (exit 0) so the TUI launches the main
+    # agent. We start and health-check the gateway ourselves right after.
     set +e
     HOME=/home/agent timeout 600 openclaw onboard --non-interactive \
       --mode local \
@@ -750,6 +777,7 @@ DIAG_EOF
       --gateway-bind loopback \
       --skip-bootstrap \
       --skip-skills \
+      --skip-health \
       --accept-risk \
       </dev/null >/tmp/openclaw-onboard.log 2>&1
     _onboard_rc=$?
@@ -822,6 +850,15 @@ if (!config.gateway) config.gateway = {};
 if (!config.gateway.mode) config.gateway.mode = 'local';
 // 30 s handshake timeout — containers can be slow on cold cache; default is 3 s
 if (!config.gateway.handshakeTimeoutMs) config.gateway.handshakeTimeoutMs = 30000;
+// The broken amazon-bedrock-mantle plugin is removed from the image at build
+// time (see the Dockerfile). Drop any leftover config entry for it -- a
+// workspace restored from the DB may carry one from an older session, and
+// openclaw then warns on every command: plugin not found (stale config entry
+// ignored). NOTE: keep this comment free of double quotes and backticks --
+// this whole block is a bash double-quoted node -e string.
+if (config.plugins && config.plugins.entries) {
+  delete config.plugins.entries['amazon-bedrock-mantle'];
+}
 if (!config.agents) config.agents = {};
 if (!config.agents.defaults) config.agents.defaults = {};
 if (!config.agents.defaults.model) config.agents.defaults.model = {};
@@ -1006,6 +1043,12 @@ for (let attempt = 0; attempt < 5; attempt++) {
   }
 }
 if (!config.env) config.env = {};
+// Drop any stale amazon-bedrock-mantle entry the gateway's config rewrite may
+// have preserved (the plugin is removed from the image at build time; a
+// leftover entry makes openclaw print a config warning on every command).
+if (config.plugins && config.plugins.entries) {
+  delete config.plugins.entries['amazon-bedrock-mantle'];
+}
 const rawKey = process.env.ANTHROPIC_API_KEY || '';
 const realKey = rawKey.startsWith('openshell:resolve:env:') ? '' : rawKey;
 if (realKey) {
@@ -1102,12 +1145,20 @@ console.log('setup.sh: openclaw auth config applied');
   # freeze the terminal). Seed from an image-baked cache first (Dockerfile Fix
   # 3), then run a deep status probe so any remaining plugins finish staging
   # while we have a tty-free shell to absorb the wait.
-  if [ -d /opt/openclaw-plugin-cache ] && [ -n "$(ls -A /opt/openclaw-plugin-cache 2>/dev/null)" ]; then
-    echo "setup.sh: seeding TUI plugin cache from image..."
-    mkdir -p /home/agent/.openclaw/plugin-runtime-deps
-    # cp -rn: don't clobber files the workspace restore may have already placed.
-    cp -rn /opt/openclaw-plugin-cache/. /home/agent/.openclaw/plugin-runtime-deps/ 2>/dev/null || true
+  # The TUI's plugin-runtime-deps dir is a SYMLINK into /tmp, shared with the
+  # gateway's stage dir (seeded from the image cache above). Two reasons:
+  #   1. /home/agent is synced to workspace_files in the DB — a real copy here
+  #      is ~2.5 GB / ~96k files of npm cache that would be pushed to and
+  #      restored from PostgreSQL on every session.
+  #   2. One shared copy also avoids a second multi-GB cp on every launch.
+  # A real directory may exist if an older session's workspace was restored
+  # from the DB — replace it with the symlink (it is a cache we created; the
+  # /tmp copy seeded from the image supersedes it).
+  if [ -d /home/agent/.openclaw/plugin-runtime-deps ] && [ ! -L /home/agent/.openclaw/plugin-runtime-deps ]; then
+    rm -rf /home/agent/.openclaw/plugin-runtime-deps
   fi
+  mkdir -p /home/agent/.openclaw
+  ln -sfn "$OPENCLAW_PLUGIN_STAGE_DIR" /home/agent/.openclaw/plugin-runtime-deps
 
   echo "setup.sh: pre-staging TUI plugin deps (this can take a few minutes on first run)..."
   # Same env (GIT_SSL_NO_VERIFY, npm_config_strict_ssl, OPENCLAW_NO_RESPAWN,
@@ -1128,9 +1179,31 @@ console.log('setup.sh: openclaw auth config applied');
     && echo "setup.sh: plugin registry consolidated" \
     || echo "setup.sh: note: doctor --fix exited non-zero — continuing" >&2
 
+  # NOTE: the broken amazon-bedrock-mantle plugin is removed from the image at
+  # build time (see sandboxes/openeral/Dockerfile). Neither a config-only
+  # disable (plugins.entries.<name>.enabled=false) nor `openclaw plugins disable`
+  # stops it from being loaded here — the TUI client re-loads all discovered
+  # extensions on every reconnect and throws a fatal PluginLoadFailureError on
+  # its broken bundled @anthropic-ai/sdk (missing ./internal/utils/uuid.js),
+  # which pins the TUI at "connecting | idle". Deleting the extension dir is the
+  # only reliable fix, so there is deliberately no runtime disable step here.
+
   echo "setup.sh: launching OpenClaw..."
   echo "setup.sh: if the TUI shows 'run aborted', exit and run:"
   echo "setup.sh:   bash /home/agent/.openeral/diagnose-openclaw.sh"
+  # Launch the GATEWAY-CONNECTED terminal UI via `openclaw tui`.
+  #   - NOT bare `openclaw`: as of openclaw 2026.4.x that opens the "crestodian"
+  #     ring-zero setup/repair concierge ("Hi, I'm Crestodian... Use `talk to
+  #     agent` when you want the normal agent"), not the coding agent.
+  #   - NOT `openclaw chat` (alias for `tui --local`): --local runs the agent
+  #     runtime IN-PROCESS with the TUI, which saturates the Node event loop on
+  #     startup and leaves the terminal unresponsive to keyboard input (the
+  #     exact failure the OPENCLAW_PLUGIN_STAGE_DIR note below also guards
+  #     against). `openclaw tui` connects to the already-running gateway (pid
+  #     started/stabilized above) as a thin client, so the heavy agent work
+  #     stays in the gateway process and the TUI keeps accepting input. It uses
+  #     the configured default agent (main) and reads the local gateway
+  #     url + gateway.auth.token from openclaw.json automatically.
   # Auth credentials are now in ~/.openclaw/openclaw.json.
   # OPENCLAW_PLUGIN_STAGE_DIR is intentionally NOT forwarded: it is for the
   # gateway process only. Passing it to the TUI/client process causes openclaw
@@ -1151,7 +1224,7 @@ console.log('setup.sh: openclaw auth config applied');
       GIT_SSL_NO_VERIFY=true \
       npm_config_strict_ssl=false \
       ANTHROPIC_BASE_URL="$STRINGCOST_PROXY_URL" \
-      openclaw "$@"
+      openclaw tui "$@"
   else
     exec env -u STRINGCOST_API_KEY -u OPENCLAW_PLUGIN_STAGE_DIR \
       HOME=/home/agent \
@@ -1161,7 +1234,7 @@ console.log('setup.sh: openclaw auth config applied');
       NODE_COMPILE_CACHE=/tmp/openclaw-compile-cache \
       GIT_SSL_NO_VERIFY=true \
       npm_config_strict_ssl=false \
-      openclaw "$@"
+      openclaw tui "$@"
   fi
 fi
 

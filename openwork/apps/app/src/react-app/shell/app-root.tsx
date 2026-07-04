@@ -1,7 +1,13 @@
 /** @jsxImportSource react */
 
 import { useEffect, useState, type ReactNode } from "react";
-import { Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
+import {
+  Navigate,
+  Route,
+  Routes,
+  useLocation,
+  useNavigate,
+} from "react-router-dom";
 
 import { readDenBootstrapConfig } from "../../app/lib/den";
 import { denSettingsChangedEvent } from "../../app/lib/den-session-events";
@@ -87,8 +93,42 @@ function DenSigninGate({ children }: DenSigninGateProps) {
   return <>{children}</>;
 }
 
+// Maps native application-menu actions (emitted by the Electron main process
+// on the "openwork:menu" channel) to in-app navigation. No-op on web / Tauri,
+// where window.__OPENWORK_ELECTRON__ is absent.
+function useNativeMenuActions() {
+  const navigate = useNavigate();
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const onMenuAction = window.__OPENWORK_ELECTRON__?.onMenuAction;
+    if (!onMenuAction) return;
+    return onMenuAction(({ action }) => {
+      switch (action) {
+        case "new-session":
+          navigate("/session");
+          break;
+        case "new-workspace":
+          navigate("/settings/general");
+          break;
+        case "open-settings":
+          navigate("/settings");
+          break;
+        case "open-sandboxes":
+          navigate("/sandboxes");
+          break;
+        case "about":
+          navigate("/settings/updates");
+          break;
+        default:
+          break;
+      }
+    });
+  }, [navigate]);
+}
+
 export function AppRoot() {
   useDesktopFontZoomBehavior();
+  useNativeMenuActions();
 
   return (
     <>

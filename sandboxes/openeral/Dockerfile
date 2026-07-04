@@ -20,7 +20,33 @@ RUN apt-get update \
 #
 # Pinned to 2026.4.29 — earlier 2026.4.24–2026.4.26 releases had a Docker regression
 # where the embedded gateway never became healthy.
+#
+# Remove the amazon-bedrock-mantle extension: its bundled @anthropic-ai/sdk is
+# internally broken in this openclaw release (client.js requires
+# ./internal/utils/uuid.js, which the shipped package omits). Every plugin-load
+# pass — including the TUI client's reconnect loop — throws a fatal
+# PluginLoadFailureError, which pins the TUI at "connecting | idle" and spams the
+# gateway log every ~8s. Config-level disables (plugins.entries.enabled=false and
+# `openclaw plugins disable`) do NOT stop this load path; only removing the
+# extension dir does, because openclaw discovers built-in plugins by scanning
+# dist/extensions for openclaw.plugin.json (no central manifest references it).
+# OpenEral only ever uses the Anthropic/StringCost provider, never AWS Bedrock,
+# so dropping this plugin is a safe no-op.
 RUN SHARP_IGNORE_GLOBAL_LIBVIPS=1 npm install -g --loglevel=error openclaw@2026.4.29 \
+    && rm -rf /usr/lib/node_modules/openclaw/dist/extensions/amazon-bedrock-mantle \
+    # Normalize every mtime in the openclaw tree to a WHOLE second. openclaw
+    # names its compile-cache subdir after the package mtime in milliseconds
+    # (e.g. openclaw/2026.4.29/<mtimeMs>-<n>/). Docker layer export truncates
+    # mtimes to 1-second precision, so a cache baked during the build (mtime
+    # .731) is keyed differently than what openclaw computes at runtime
+    # (mtime .000) — the entire baked V8 bytecode cache is silently ignored
+    # and every fresh sandbox recompiles ~43 MB of bytecode. Inside the
+    # OpenShell sandbox that recompile ran for ~5 minutes at 100% CPU on the
+    # first TUI launch, blocking the TUI event loop long enough that its
+    # gateway websocket handshake timed out and the TUI stranded itself in a
+    # "disconnected" state. Fixing the key mismatch makes the runtime reuse
+    # the baked cache; the first TUI launch then compiles only a ~2 MB delta.
+    && find /usr/lib/node_modules/openclaw -exec touch -h -d "@1735689600" {} + \
     && chmod -R a+rX /usr/lib/node_modules/openclaw
 
 # Pre-stage OpenClaw's TUI plugin-runtime-deps AND pre-warm the V8 bytecode
@@ -104,6 +130,39 @@ RUN set -e \
       </dev/null >>/tmp/openclaw-bootstrap.log 2>&1 || true \
  && timeout 120 openclaw agent --local --agent main --message "warm" --timeout 60 \
       </dev/null >>/tmp/openclaw-bootstrap.log 2>&1 || true \
+ # 3b. Start the gateway once, with network available. Only the gateway/TUI
+ #     code path runs the SECOND staging pass, which unions in the
+ #     extension-specific model-provider deps for the onboarded config
+ #     (@anthropic-ai/vertex-sdk, @aws-sdk/client-bedrock*, @google/genai, … —
+ #     see resolveBundledRuntimeDepsConfiguredModelOwnerPluginIds in openclaw's
+ #     bundled-runtime-deps chunk). `status --deep` / `agent --local` above do
+ #     NOT trigger it. If these deps are missing from the baked cache, the
+ #     first TUI launch inside the network-restricted sandbox rewrites the
+ #     staged package.json with the bigger union and spawns a live
+ #     `npm install` that crawls through the egress proxy with ECONNRESET
+ #     retries for 15+ minutes — during which the TUI is completely frozen
+ #     ("connecting | idle", no keyboard input). With the union baked, the
+ #     runtime staging pass finds every spec satisfied and skips npm entirely
+ #     (a millisecond no-op). doctor --fix first: the second pass only runs
+ #     once the plugin registry is consolidated (mirrors setup.sh order).
+ && timeout 120 openclaw doctor --fix </dev/null >>/tmp/openclaw-bootstrap.log 2>&1 || true \
+ && (openclaw gateway --port 18799 --allow-unconfigured </dev/null >>/tmp/openclaw-bootstrap.log 2>&1 &) \
+ && _d=0 \
+ && while [ $_d -lt 480 ]; do \
+        if ls -d /tmp/openclaw-bootstrap/.openclaw/plugin-runtime-deps/*/node_modules/@anthropic-ai/vertex-sdk >/dev/null 2>&1 \
+           && ls -d /tmp/openclaw-bootstrap/.openclaw/plugin-runtime-deps/*/node_modules/@aws-sdk/client-bedrock >/dev/null 2>&1 \
+           && ! ps -e -o comm= | grep -q "^npm" 2>/dev/null; then break; fi; \
+        sleep 5; _d=$((_d+5)); \
+    done \
+ && echo "--- second-pass staging wait: ${_d}s ---" >>/tmp/openclaw-bootstrap.log \
+ # NOTE: a build-time `openclaw tui` prewarm was tried here and does NOT work:
+ # openclaw manages its own compile-cache layout (openclaw/<version>/<epoch>-<pid>/)
+ # and bytecode written by a timeout-killed TUI does not persist into the baked
+ # cache. The TUI's first in-sandbox launch therefore still compiles ~41 MB of
+ # bytecode once per sandbox (tens of seconds); subsequent launches are warm
+ # via /tmp/openclaw-compile-cache.
+ && pkill -f "openclaw gateway" 2>/dev/null || true \
+ && sleep 2 \
  # 4. Copy plugin-runtime-deps to the runtime cache (existing behavior).
  && mkdir -p /opt/openclaw-plugin-cache \
  && if [ -d /tmp/openclaw-bootstrap/.openclaw/plugin-runtime-deps ]; then \
@@ -114,6 +173,17 @@ RUN set -e \
  && if [ -z "$(ls -A /opt/openclaw-plugin-cache 2>/dev/null)" ]; then \
         echo "ERROR: /opt/openclaw-plugin-cache is empty — OpenClaw plugin pre-stage failed." >&2; \
         echo "An image without staged plugins makes the sandbox gateway hang at startup." >&2; \
+        echo "--- tail of /tmp/openclaw-bootstrap.log ---" >&2; \
+        tail -100 /tmp/openclaw-bootstrap.log >&2 || true; \
+        exit 1; \
+    fi \
+ # 5b. Hard gate: the second-pass union deps must be baked too (see 3b). If
+ #     they are missing, the first TUI launch in the sandbox freezes on a live
+ #     npm install through the restricted proxy.
+ && if ! ls -d /opt/openclaw-plugin-cache/*/node_modules/@anthropic-ai/vertex-sdk >/dev/null 2>&1 \
+      || ! ls -d /opt/openclaw-plugin-cache/*/node_modules/@aws-sdk/client-bedrock >/dev/null 2>&1; then \
+        echo "ERROR: second-pass plugin deps (vertex-sdk / client-bedrock) missing from /opt/openclaw-plugin-cache." >&2; \
+        echo "The gateway pre-warm (step 3b) did not finish staging the model-provider union." >&2; \
         echo "--- tail of /tmp/openclaw-bootstrap.log ---" >&2; \
         tail -100 /tmp/openclaw-bootstrap.log >&2 || true; \
         exit 1; \
