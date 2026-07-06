@@ -32,8 +32,22 @@ RUN apt-get update \
 # dist/extensions for openclaw.plugin.json (no central manifest references it).
 # OpenEral only ever uses the Anthropic/StringCost provider, never AWS Bedrock,
 # so dropping this plugin is a safe no-op.
+# Also remove the amazon-bedrock, anthropic-vertex, and google provider
+# extensions (OpenEral only ever uses the Anthropic direct / StringCost
+# provider). They are not broken like mantle, but keeping them makes openclaw's
+# runtime-dep resolver union their npm deps (@aws-sdk/client-bedrock*,
+# @anthropic-ai/vertex-sdk, @google/genai, …) into the staged tree, and the
+# plugin loader's wildcard-exports scan (collectRuntimePackageWildcardImport-
+# Targets) then recursively walks those huge SDK trees on every TUI startup —
+# measured as ~5 minutes at 100% CPU before the TUI could accept its gateway
+# handshake (A/B verified: full tree = unbounded scan; pruned tree = ~19 s
+# one-time startup). Removing the extensions collapses the staged union to the
+# ~42 core deps: no runtime npm install AND no giant scan.
 RUN SHARP_IGNORE_GLOBAL_LIBVIPS=1 npm install -g --loglevel=error openclaw@2026.4.29 \
     && rm -rf /usr/lib/node_modules/openclaw/dist/extensions/amazon-bedrock-mantle \
+    && rm -rf /usr/lib/node_modules/openclaw/dist/extensions/amazon-bedrock \
+    && rm -rf /usr/lib/node_modules/openclaw/dist/extensions/anthropic-vertex \
+    && rm -rf /usr/lib/node_modules/openclaw/dist/extensions/google \
     # Normalize every mtime in the openclaw tree to a WHOLE second. openclaw
     # names its compile-cache subdir after the package mtime in milliseconds
     # (e.g. openclaw/2026.4.29/<mtimeMs>-<n>/). Docker layer export truncates
@@ -96,14 +110,36 @@ RUN SHARP_IGNORE_GLOBAL_LIBVIPS=1 npm install -g --loglevel=error openclaw@2026.
 #      "crash" after a 10-minute wait.
 #   7. Make /opt/openclaw-compile-cache world-readable so the sandbox user can
 #      seed it at runtime.
+# CRITICAL: plugin runtime deps are staged at /tmp/openclaw-plugin-runtime-deps —
+# the EXACT path setup.sh uses at runtime (OPENCLAW_PLUGIN_STAGE_DIR for the
+# gateway; ~/.openclaw/plugin-runtime-deps is a symlink to it for the TUI).
+# Node's compile cache is keyed per source-file PATH, so bytecode compiled at
+# build time under a different path (the old /tmp/openclaw-bootstrap/.openclaw/
+# location) is a guaranteed runtime cache miss: the first TUI launch then
+# recompiled ~40 MB of plugin-dep bytecode at 100% CPU for ~5 minutes inside
+# the sandbox, its gateway handshake timed out meanwhile, and the TUI stranded
+# itself in a disconnected state. Staging and compiling at the runtime path
+# makes the baked bytecode valid at runtime.
+#
+# EQUALLY CRITICAL: the prewarm must run AS THE SANDBOX USER. Node namespaces
+# compile-cache directories by uid (v<ver>-<arch>-<hash>-<uid>): bytecode
+# written by root lands in …-0/ and is entirely invisible to the runtime
+# sandbox user (uid 998), which reads …-998/ — the same 5-minute recompile
+# storm through a different keyhole. Pre-create the /opt cache dirs and hand
+# them to the sandbox user before dropping privileges.
+RUN mkdir -p /opt/openclaw-compile-cache /opt/openclaw-plugin-cache \
+    && chown -R sandbox:sandbox /opt/openclaw-compile-cache /opt/openclaw-plugin-cache
+USER sandbox
 RUN set -e \
- && mkdir -p /tmp/openclaw-bootstrap /opt/openclaw-compile-cache \
+ && mkdir -p /tmp/openclaw-bootstrap/.openclaw /opt/openclaw-compile-cache /tmp/openclaw-plugin-runtime-deps \
+ && ln -s /tmp/openclaw-plugin-runtime-deps /tmp/openclaw-bootstrap/.openclaw/plugin-runtime-deps \
  && HOME=/tmp/openclaw-bootstrap git config --global --add url."https://github.com/".insteadOf "ssh://git@github.com/" \
  && HOME=/tmp/openclaw-bootstrap git config --global --add url."https://github.com/".insteadOf "git@github.com:" \
  && HOME=/tmp/openclaw-bootstrap git config --global --add url."https://github.com/".insteadOf "git+ssh://git@github.com/" \
  && HOME=/tmp/openclaw-bootstrap git config --global http.sslVerify false \
  && export HOME=/tmp/openclaw-bootstrap \
            NODE_COMPILE_CACHE=/opt/openclaw-compile-cache \
+           OPENCLAW_PLUGIN_STAGE_DIR=/tmp/openclaw-plugin-runtime-deps \
            GIT_SSL_NO_VERIFY=true \
            npm_config_strict_ssl=false \
            OPENCLAW_NO_RESPAWN=1 \
@@ -147,28 +183,40 @@ RUN set -e \
  #     once the plugin registry is consolidated (mirrors setup.sh order).
  && timeout 120 openclaw doctor --fix </dev/null >>/tmp/openclaw-bootstrap.log 2>&1 || true \
  && (openclaw gateway --port 18799 --allow-unconfigured </dev/null >>/tmp/openclaw-bootstrap.log 2>&1 &) \
+ # With the bedrock/vertex/google extensions removed above, the second-pass
+ # union collapses to the core dep set, which the gateway stages before it
+ # starts. Wait only for staging quiescence (no npm) + a core dep sentinel.
  && _d=0 \
- && while [ $_d -lt 480 ]; do \
-        if ls -d /tmp/openclaw-bootstrap/.openclaw/plugin-runtime-deps/*/node_modules/@anthropic-ai/vertex-sdk >/dev/null 2>&1 \
-           && ls -d /tmp/openclaw-bootstrap/.openclaw/plugin-runtime-deps/*/node_modules/@aws-sdk/client-bedrock >/dev/null 2>&1 \
+ && while [ $_d -lt 240 ]; do \
+        if ls -d /tmp/openclaw-plugin-runtime-deps/*/node_modules/express >/dev/null 2>&1 \
            && ! ps -e -o comm= | grep -q "^npm" 2>/dev/null; then break; fi; \
         sleep 5; _d=$((_d+5)); \
     done \
- && echo "--- second-pass staging wait: ${_d}s ---" >>/tmp/openclaw-bootstrap.log \
- # NOTE: a build-time `openclaw tui` prewarm was tried here and does NOT work:
- # openclaw manages its own compile-cache layout (openclaw/<version>/<epoch>-<pid>/)
- # and bytecode written by a timeout-killed TUI does not persist into the baked
- # cache. The TUI's first in-sandbox launch therefore still compiles ~41 MB of
- # bytecode once per sandbox (tens of seconds); subsequent launches are warm
- # via /tmp/openclaw-compile-cache.
+ && echo "--- staging wait: ${_d}s ---" >>/tmp/openclaw-bootstrap.log \
+ # 3c. Run the TUI once under a PTY while the gateway is up, mirroring the
+ #     runtime launch (no OPENCLAW_PLUGIN_STAGE_DIR in its env, HOME symlink
+ #     provides the stage dir — exactly like setup.sh's exec). This compiles
+ #     the TUI-only module set into the baked cache. TERM must be set (docker
+ #     build has none, and without it the TUI exits before loading anything).
+ #     V8 compiles this set at only ~6 MB of bytecode per minute, so the first
+ #     pass gets a long budget; the second pass resumes incrementally (already
+ #     -cached modules are skipped) and mops up whatever the first pass was
+ #     killed in the middle of. Sizes are echoed for build-log visibility.
+ && du -s /opt/openclaw-compile-cache | cut -f1 > /tmp/cc-before-tui \
+ && TERM=xterm-256color env -u OPENCLAW_PLUGIN_STAGE_DIR \
+      script -qec "timeout 480 openclaw tui" /dev/null >>/tmp/openclaw-bootstrap.log 2>&1 || true \
+ && TERM=xterm-256color env -u OPENCLAW_PLUGIN_STAGE_DIR \
+      script -qec "timeout 180 openclaw tui" /dev/null >>/tmp/openclaw-bootstrap.log 2>&1 || true \
+ && du -s /opt/openclaw-compile-cache | cut -f1 > /tmp/cc-after-tui \
+ && echo "--- compile cache KB before/after TUI prewarm: $(cat /tmp/cc-before-tui) / $(cat /tmp/cc-after-tui) ---" \
  && pkill -f "openclaw gateway" 2>/dev/null || true \
  && sleep 2 \
- # 4. Copy plugin-runtime-deps to the runtime cache (existing behavior).
+ # 4. Copy the staged plugin-runtime-deps to the baked cache. --preserve keeps
+ #    mtimes stable so nothing about the tree changes between build and the
+ #    runtime seed back to the same /tmp path.
  && mkdir -p /opt/openclaw-plugin-cache \
- && if [ -d /tmp/openclaw-bootstrap/.openclaw/plugin-runtime-deps ]; then \
-        cp -r /tmp/openclaw-bootstrap/.openclaw/plugin-runtime-deps/. \
-              /opt/openclaw-plugin-cache/ 2>/dev/null || true; \
-    fi \
+ && cp -r --preserve=timestamps /tmp/openclaw-plugin-runtime-deps/. \
+        /opt/openclaw-plugin-cache/ 2>/dev/null || true \
  # 5. Hard gate: an empty plugin cache means the pre-warm silently failed.
  && if [ -z "$(ls -A /opt/openclaw-plugin-cache 2>/dev/null)" ]; then \
         echo "ERROR: /opt/openclaw-plugin-cache is empty — OpenClaw plugin pre-stage failed." >&2; \
@@ -177,15 +225,37 @@ RUN set -e \
         tail -100 /tmp/openclaw-bootstrap.log >&2 || true; \
         exit 1; \
     fi \
- # 5b. Hard gate: the second-pass union deps must be baked too (see 3b). If
- #     they are missing, the first TUI launch in the sandbox freezes on a live
- #     npm install through the restricted proxy.
- && if ! ls -d /opt/openclaw-plugin-cache/*/node_modules/@anthropic-ai/vertex-sdk >/dev/null 2>&1 \
-      || ! ls -d /opt/openclaw-plugin-cache/*/node_modules/@aws-sdk/client-bedrock >/dev/null 2>&1; then \
-        echo "ERROR: second-pass plugin deps (vertex-sdk / client-bedrock) missing from /opt/openclaw-plugin-cache." >&2; \
-        echo "The gateway pre-warm (step 3b) did not finish staging the model-provider union." >&2; \
+ # 5b. Hard gate: the staged install MANIFEST must be the CORE set only.
+ #     openclaw's plugin loader walks the wildcard-exports tree of every
+ #     DIRECT manifest dep on TUI startup; if the manifest unions in the
+ #     AWS/Vertex/Google SDK specs again (extension removal regressed), that
+ #     walk takes minutes at 100% CPU. Transitive @aws-sdk/@google trees
+ #     pulled in by core deps (e.g. @mariozechner/pi-ai) are fine — the
+ #     loader does not walk transitive deps — so only the manifest is checked.
+ && if grep -lE "@aws-sdk/|@anthropic-ai/vertex-sdk|@google/genai" /opt/openclaw-plugin-cache/*/package.json >/dev/null 2>&1; then \
+        echo "ERROR: AWS/Vertex/Google SDK specs present in the staged manifest — extension removal regressed." >&2; \
+        grep -hE "@aws-sdk/|vertex-sdk|@google/genai" /opt/openclaw-plugin-cache/*/package.json >&2 || true; \
+        exit 1; \
+    fi \
+ && if ! ls -d /opt/openclaw-plugin-cache/*/node_modules/express >/dev/null 2>&1; then \
+        echo "ERROR: core dep sentinel (express) missing from /opt/openclaw-plugin-cache." >&2; \
         echo "--- tail of /tmp/openclaw-bootstrap.log ---" >&2; \
         tail -100 /tmp/openclaw-bootstrap.log >&2 || true; \
+        exit 1; \
+    fi \
+ # 5c. Hard gate: the TUI prewarm must have ADDED bytecode to the cache
+ #     (~19 MB observed for openclaw 2026.4.29; the prewarmed cache converges
+ #     at ~46 MB total — a second longer TUI pass adds nothing further). A
+ #     near-zero delta means the prewarm silently did nothing (this happened
+ #     twice: once for a missing TERM, once for a compile-cache key mismatch)
+ #     and the first in-sandbox TUI launch would freeze for minutes
+ #     recompiling the TUI module set.
+ && _ccb=$(cat /tmp/cc-before-tui) && _cca=$(cat /tmp/cc-after-tui) \
+ && if [ $((_cca - _ccb)) -lt 10000 ]; then \
+        echo "ERROR: TUI prewarm grew the compile cache by only $((_cca - _ccb)) KB (${_ccb} -> ${_cca})." >&2; \
+        echo "Expected >= 10 MB of TUI bytecode — the prewarm silently did nothing." >&2; \
+        echo "--- tail of /tmp/openclaw-bootstrap.log ---" >&2; \
+        tail -60 /tmp/openclaw-bootstrap.log >&2 || true; \
         exit 1; \
     fi \
  # 6. Lock down perms and log cache size for visibility during build.
@@ -199,7 +269,8 @@ RUN set -e \
  # leftover MB in /tmp is harmless if the rm partially fails.
  && pkill -9 -f openclaw 2>/dev/null || true \
  && sleep 2 \
- && rm -rf /tmp/openclaw-bootstrap /tmp/openclaw-bootstrap.log 2>/dev/null || true
+ && rm -rf /tmp/openclaw-bootstrap /tmp/openclaw-bootstrap.log /tmp/openclaw-plugin-runtime-deps 2>/dev/null || true
+USER root
 
 # Install openeral-js: install all deps (including devDeps for tsc), build, then prune
 COPY openeral-js/ /opt/openeral/

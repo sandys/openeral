@@ -848,8 +848,15 @@ try { config = JSON.parse(fs.readFileSync(file, 'utf8')); } catch(e) {}
 if (!config.env) config.env = {};
 if (!config.gateway) config.gateway = {};
 if (!config.gateway.mode) config.gateway.mode = 'local';
-// 30 s handshake timeout — containers can be slow on cold cache; default is 3 s
-if (!config.gateway.handshakeTimeoutMs) config.gateway.handshakeTimeoutMs = 30000;
+// 120 s handshake timeout (default 3 s, previously 30 s). During plugin
+// loading the TUI runs long synchronous jiti-alias filesystem walks that
+// block its own event loop; if the websocket handshake times out mid-load,
+// openclaw aborts the connect, retries, and RELOADS ALL PLUGINS -- a
+// self-sustaining retry loop that pins the TUI at 100 percent CPU for
+// minutes (observed live: 300+ s CPU, socket stuck in CLOSE-WAIT). A
+// generous timeout lets the first connect survive one full plugin pass,
+// which breaks the loop entirely.
+config.gateway.handshakeTimeoutMs = 120000;
 // The broken amazon-bedrock-mantle plugin is removed from the image at build
 // time (see the Dockerfile). Drop any leftover config entry for it -- a
 // workspace restored from the DB may carry one from an older session, and
@@ -859,6 +866,15 @@ if (!config.gateway.handshakeTimeoutMs) config.gateway.handshakeTimeoutMs = 3000
 if (config.plugins && config.plugins.entries) {
   delete config.plugins.entries['amazon-bedrock-mantle'];
 }
+// Restrict plugin loading to the set the embedded gateway actually serves
+// (plus the anthropic provider). OpenClaw ships 48 stock plugins and the
+// TUI/CLI loads every enabled one on startup; each load pass re-walks the
+// wildcard-exports of all staged runtime deps (74 ms per walk x plugins x
+// retries adds up to the multi-minute startup storms we profiled). OpenEral
+// only uses the Anthropic direct / StringCost provider, so everything else
+// is dead weight. plugins.allow skips non-listed plugins entirely.
+if (!config.plugins) config.plugins = {};
+config.plugins.allow = ['anthropic', 'acpx', 'bonjour', 'browser', 'device-pair', 'file-transfer', 'memory-core', 'phone-control', 'talk-voice'];
 if (!config.agents) config.agents = {};
 if (!config.agents.defaults) config.agents.defaults = {};
 if (!config.agents.defaults.model) config.agents.defaults.model = {};
@@ -967,9 +983,12 @@ console.log('setup.sh: openclaw config written to ' + file);
   # OPENCLAW_SKIP_ONBOARDING=1 — skip the interactive first-run onboarding wizard
   #   (config is already written by setup.sh above; without this the doctor check
   #   blocks even with </dev/null because it inspects TTY state during startup).
-  # OPENCLAW_HANDSHAKE_TIMEOUT_MS=30000 — lengthen the WebSocket pre-auth handshake
-  #   timeout from the default 3 s to 30 s; containers with cold image caches can
-  #   take several seconds between the TCP port opening and WebSocket RPC being live.
+  # OPENCLAW_HANDSHAKE_TIMEOUT_MS=120000 — lengthen the GATEWAY-side WebSocket
+  #   pre-auth handshake timeout (default 3 s). The TUI blocks its own event loop
+  #   for tens of seconds during plugin loading; if the gateway kills the pending
+  #   connection mid-load ([ws] handshake timeout), the TUI aborts, retries, and
+  #   reloads all plugins — a self-sustaining 100%-CPU loop. Must match the
+  #   client-side gateway.handshakeTimeoutMs written to openclaw.json.
   #
   # OPENCLAW_PLUGIN_STAGE_DIR, NODE_COMPILE_CACHE, GIT_SSL_NO_VERIFY,
   # npm_config_strict_ssl, OPENCLAW_NO_RESPAWN are all exported earlier in this
@@ -981,7 +1000,7 @@ console.log('setup.sh: openclaw config written to ' + file);
   # Without this, exiting the openclaw TUI (Ctrl+C) sends SIGHUP to the entire
   # session including the background gateway, killing it. With setsid the gateway
   # survives TUI exit, so `openshell sandbox connect` finds it still running.
-  setsid env OPENCLAW_SKIP_ONBOARDING=1 OPENCLAW_HANDSHAKE_TIMEOUT_MS=30000 \
+  setsid env OPENCLAW_SKIP_ONBOARDING=1 OPENCLAW_HANDSHAKE_TIMEOUT_MS=120000 \
     OPENCLAW_NO_RESPAWN=1 \
     NODE_COMPILE_CACHE=/tmp/openclaw-compile-cache \
     GIT_SSL_NO_VERIFY=true npm_config_strict_ssl=false \
@@ -1049,6 +1068,13 @@ if (!config.env) config.env = {};
 if (config.plugins && config.plugins.entries) {
   delete config.plugins.entries['amazon-bedrock-mantle'];
 }
+// Re-apply the plugin allowlist and the long handshake timeout after the
+// gateway's own config rewrite (see the initial config write above for why:
+// they prevent the TUI's plugin-load / handshake-timeout retry loop).
+if (!config.plugins) config.plugins = {};
+config.plugins.allow = ['anthropic', 'acpx', 'bonjour', 'browser', 'device-pair', 'file-transfer', 'memory-core', 'phone-control', 'talk-voice'];
+if (!config.gateway) config.gateway = {};
+config.gateway.handshakeTimeoutMs = 120000;
 const rawKey = process.env.ANTHROPIC_API_KEY || '';
 const realKey = rawKey.startsWith('openshell:resolve:env:') ? '' : rawKey;
 if (realKey) {
@@ -1220,6 +1246,7 @@ console.log('setup.sh: openclaw auth config applied');
       SHELL=/usr/local/bin/openeral-bash \
       PATH="$PATH" \
       OPENCLAW_NO_RESPAWN=1 \
+      OPENCLAW_HANDSHAKE_TIMEOUT_MS=120000 \
       NODE_COMPILE_CACHE=/tmp/openclaw-compile-cache \
       GIT_SSL_NO_VERIFY=true \
       npm_config_strict_ssl=false \
@@ -1231,6 +1258,7 @@ console.log('setup.sh: openclaw auth config applied');
       SHELL=/usr/local/bin/openeral-bash \
       PATH="$PATH" \
       OPENCLAW_NO_RESPAWN=1 \
+      OPENCLAW_HANDSHAKE_TIMEOUT_MS=120000 \
       NODE_COMPILE_CACHE=/tmp/openclaw-compile-cache \
       GIT_SSL_NO_VERIFY=true \
       npm_config_strict_ssl=false \
