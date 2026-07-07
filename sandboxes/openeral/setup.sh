@@ -548,18 +548,21 @@ fi
 # not /home/agent. Always patch that shell's .bashrc so reconnect sessions use
 # the correct HOME — without this openclaw cannot find its config or gateway
 # auth token regardless of whether StringCost is active.
-if [ "$SANDBOX_USER_HOME" != "/home/agent" ] && [ -n "$SANDBOX_USER_HOME" ]; then
+# Best-effort only (|| true): if HOME points somewhere unwritable (e.g. /root
+# when invoked via a bare `docker exec` without the app's env), a failed
+# .bashrc append must not abort the whole setup under `set -e`.
+if [ "$SANDBOX_USER_HOME" != "/home/agent" ] && [ -n "$SANDBOX_USER_HOME" ] && [ -w "$SANDBOX_USER_HOME" ]; then
   CONNECT_BASHRC="$SANDBOX_USER_HOME/.bashrc"
   if ! grep -q 'openeral-connect' "$CONNECT_BASHRC" 2>/dev/null; then
     printf '\n# openeral-connect: set agent HOME for sandbox connect sessions\nexport HOME=/home/agent\n[ -f /home/agent/.openeral/env.sh ] && . /home/agent/.openeral/env.sh\n' \
-      >> "$CONNECT_BASHRC"
+      >> "$CONNECT_BASHRC" || true
   fi
   # Apply the same openclaw runtime env to reconnect sessions so manual
   # `openclaw` invocations don't re-pay startup overhead or hit TLS-verify
   # failures during plugin staging.
   if ! grep -q 'openeral-openclaw-env' "$CONNECT_BASHRC" 2>/dev/null; then
     printf '\n# openeral-openclaw-env: runtime env for manual openclaw invocations\nexport OPENCLAW_NO_RESPAWN=1\nexport NODE_COMPILE_CACHE=/tmp/openclaw-compile-cache\nexport GIT_SSL_NO_VERIFY=true\nexport npm_config_strict_ssl=false\n' \
-      >> "$CONNECT_BASHRC"
+      >> "$CONNECT_BASHRC" || true
   fi
 fi
 
@@ -848,15 +851,15 @@ try { config = JSON.parse(fs.readFileSync(file, 'utf8')); } catch(e) {}
 if (!config.env) config.env = {};
 if (!config.gateway) config.gateway = {};
 if (!config.gateway.mode) config.gateway.mode = 'local';
-// 120 s handshake timeout (default 3 s, previously 30 s). During plugin
-// loading the TUI runs long synchronous jiti-alias filesystem walks that
-// block its own event loop; if the websocket handshake times out mid-load,
-// openclaw aborts the connect, retries, and RELOADS ALL PLUGINS -- a
-// self-sustaining retry loop that pins the TUI at 100 percent CPU for
-// minutes (observed live: 300+ s CPU, socket stuck in CLOSE-WAIT). A
-// generous timeout lets the first connect survive one full plugin pass,
-// which breaks the loop entirely.
-config.gateway.handshakeTimeoutMs = 120000;
+// 600 s handshake timeout (default 3 s). During plugin loading the TUI runs
+// long synchronous jiti-alias filesystem walks that block its own event
+// loop; if the websocket handshake times out mid-load, openclaw aborts the
+// connect, retries, and RELOADS ALL PLUGINS -- a self-sustaining retry loop
+// that pins the TUI at 100 percent CPU and then strands it in a permanent
+// disconnected state (observed live: 300+ s CPU, socket CLOSE-WAIT). One
+// pass can exceed 2 minutes inside the sandbox, so the timeout must outlast
+// the WORST pass: the first connect then succeeds and the loop never starts.
+config.gateway.handshakeTimeoutMs = 600000;
 // The broken amazon-bedrock-mantle plugin is removed from the image at build
 // time (see the Dockerfile). Drop any leftover config entry for it -- a
 // workspace restored from the DB may carry one from an older session, and
@@ -867,14 +870,37 @@ if (config.plugins && config.plugins.entries) {
   delete config.plugins.entries['amazon-bedrock-mantle'];
 }
 // Restrict plugin loading to the set the embedded gateway actually serves
-// (plus the anthropic provider). OpenClaw ships 48 stock plugins and the
+// (plus the anthropic provider). OpenClaw ships ~48 stock plugins and the
 // TUI/CLI loads every enabled one on startup; each load pass re-walks the
 // wildcard-exports of all staged runtime deps (74 ms per walk x plugins x
 // retries adds up to the multi-minute startup storms we profiled). OpenEral
 // only uses the Anthropic direct / StringCost provider, so everything else
-// is dead weight. plugins.allow skips non-listed plugins entirely.
+// is dead weight.
+// BOTH lists are needed: plugins.allow alone is NOT enough -- openclaw's
+// loader passes allowRestrictiveAllowlistBypass=true for bundled plugins,
+// so allow-listing does not stop stock plugins from loading. plugins.deny
+// is checked first with no bypass, so every stock extension not in the
+// allow set is enumerated from the image and denied explicitly.
 if (!config.plugins) config.plugins = {};
-config.plugins.allow = ['anthropic', 'acpx', 'bonjour', 'browser', 'device-pair', 'file-transfer', 'memory-core', 'phone-control', 'talk-voice'];
+const allowedPlugins = ['anthropic', 'acpx', 'bonjour', 'browser', 'device-pair', 'file-transfer', 'memory-core', 'phone-control', 'talk-voice'];
+config.plugins.allow = allowedPlugins;
+// Deny by plugin ID from each manifest, NOT by directory name: a few dirs
+// have no openclaw.plugin.json (shared libs like image-generation-core) and
+// some ids differ from their dir (kimi-coding). Unknown names in
+// plugins.deny make openclaw reject the ENTIRE config as invalid, which
+// kills the gateway at startup.
+try {
+  const extDir = '/usr/lib/node_modules/openclaw/dist/extensions';
+  const denyIds = [];
+  for (const d of fs.readdirSync(extDir)) {
+    try {
+      const manifest = JSON.parse(fs.readFileSync(extDir + '/' + d + '/openclaw.plugin.json', 'utf8'));
+      const id = typeof manifest.id === 'string' && manifest.id ? manifest.id : d;
+      if (allowedPlugins.indexOf(id) === -1) denyIds.push(id);
+    } catch(e) {}
+  }
+  config.plugins.deny = denyIds.sort();
+} catch(e) {}
 if (!config.agents) config.agents = {};
 if (!config.agents.defaults) config.agents.defaults = {};
 if (!config.agents.defaults.model) config.agents.defaults.model = {};
@@ -983,7 +1009,7 @@ console.log('setup.sh: openclaw config written to ' + file);
   # OPENCLAW_SKIP_ONBOARDING=1 — skip the interactive first-run onboarding wizard
   #   (config is already written by setup.sh above; without this the doctor check
   #   blocks even with </dev/null because it inspects TTY state during startup).
-  # OPENCLAW_HANDSHAKE_TIMEOUT_MS=120000 — lengthen the GATEWAY-side WebSocket
+  # OPENCLAW_HANDSHAKE_TIMEOUT_MS=600000 — lengthen the GATEWAY-side WebSocket
   #   pre-auth handshake timeout (default 3 s). The TUI blocks its own event loop
   #   for tens of seconds during plugin loading; if the gateway kills the pending
   #   connection mid-load ([ws] handshake timeout), the TUI aborts, retries, and
@@ -1000,7 +1026,7 @@ console.log('setup.sh: openclaw config written to ' + file);
   # Without this, exiting the openclaw TUI (Ctrl+C) sends SIGHUP to the entire
   # session including the background gateway, killing it. With setsid the gateway
   # survives TUI exit, so `openshell sandbox connect` finds it still running.
-  setsid env OPENCLAW_SKIP_ONBOARDING=1 OPENCLAW_HANDSHAKE_TIMEOUT_MS=120000 \
+  setsid env OPENCLAW_SKIP_ONBOARDING=1 OPENCLAW_HANDSHAKE_TIMEOUT_MS=600000 \
     OPENCLAW_NO_RESPAWN=1 \
     NODE_COMPILE_CACHE=/tmp/openclaw-compile-cache \
     GIT_SSL_NO_VERIFY=true npm_config_strict_ssl=false \
@@ -1016,6 +1042,14 @@ console.log('setup.sh: openclaw config written to ' + file);
   _gd=0
   while [ $_gd -lt 600 ]; do
     curl -fsS http://127.0.0.1:18789/readyz >/dev/null 2>&1 && break
+    # Fail fast when the gateway PROCESS is gone: a startup crash (e.g. an
+    # invalid config) would otherwise burn the full 600 s wait for a /readyz
+    # that can never come, and the crash text would stay buried in the log.
+    if ! kill -0 "$_gw_pid" 2>/dev/null; then
+      echo "setup.sh: ERROR: openclaw gateway exited during startup — /tmp/openclaw-gateway.log:" >&2
+      tail -40 /tmp/openclaw-gateway.log >&2 || true
+      break
+    fi
     [ $_gd -eq 10 ] && echo "setup.sh: waiting for openclaw gateway readiness (/readyz) — this can take a few minutes on first run..." >&2
     [ $_gd -eq 60 ] && echo "setup.sh: still waiting for gateway (staging bundled deps)..." >&2
     [ $_gd -eq 120 ] && echo "setup.sh: still waiting for gateway (2 min)..." >&2
@@ -1068,13 +1102,29 @@ if (!config.env) config.env = {};
 if (config.plugins && config.plugins.entries) {
   delete config.plugins.entries['amazon-bedrock-mantle'];
 }
-// Re-apply the plugin allowlist and the long handshake timeout after the
-// gateway's own config rewrite (see the initial config write above for why:
-// they prevent the TUI's plugin-load / handshake-timeout retry loop).
+// Re-apply the plugin allow+deny lists and the long handshake timeout after
+// the gateway's own config rewrite (see the initial config write above for
+// why: they prevent the TUI's plugin-load / handshake-timeout retry loop;
+// deny is required because the loader bypasses the allowlist for bundled
+// plugins).
 if (!config.plugins) config.plugins = {};
-config.plugins.allow = ['anthropic', 'acpx', 'bonjour', 'browser', 'device-pair', 'file-transfer', 'memory-core', 'phone-control', 'talk-voice'];
+const allowedPlugins = ['anthropic', 'acpx', 'bonjour', 'browser', 'device-pair', 'file-transfer', 'memory-core', 'phone-control', 'talk-voice'];
+config.plugins.allow = allowedPlugins;
+// Deny by manifest plugin ID, not dir name (see the first config block).
+try {
+  const extDir = '/usr/lib/node_modules/openclaw/dist/extensions';
+  const denyIds = [];
+  for (const d of fs.readdirSync(extDir)) {
+    try {
+      const manifest = JSON.parse(fs.readFileSync(extDir + '/' + d + '/openclaw.plugin.json', 'utf8'));
+      const id = typeof manifest.id === 'string' && manifest.id ? manifest.id : d;
+      if (allowedPlugins.indexOf(id) === -1) denyIds.push(id);
+    } catch(e) {}
+  }
+  config.plugins.deny = denyIds.sort();
+} catch(e) {}
 if (!config.gateway) config.gateway = {};
-config.gateway.handshakeTimeoutMs = 120000;
+config.gateway.handshakeTimeoutMs = 600000;
 const rawKey = process.env.ANTHROPIC_API_KEY || '';
 const realKey = rawKey.startsWith('openshell:resolve:env:') ? '' : rawKey;
 if (realKey) {
@@ -1200,6 +1250,14 @@ console.log('setup.sh: openclaw auth config applied');
   # "Persisted plugin registry is missing or stale" — `openclaw doctor --fix`
   # rebuilds ~/.openclaw/plugins/installs.json from what is actually present.
   # Without this, every TUI launch re-runs plugin discovery and partial install.
+  #
+  # Drop the DB-restored registry first: workspace restore can carry an
+  # installs.json from an older session (observed: 52 entries including
+  # extensions since removed from the image), and doctor --fix merges rather
+  # than rebuilding from scratch. The loader iterates the registry with the
+  # allowlist bypassed for bundled plugins, so a bloated registry re-creates
+  # the multi-minute TUI plugin-load storm regardless of plugins.allow/deny.
+  rm -f /home/agent/.openclaw/plugins/installs.json
   HOME=/home/agent timeout 60 openclaw doctor --fix </dev/null \
     >>/tmp/openclaw-bootstrap.log 2>&1 \
     && echo "setup.sh: plugin registry consolidated" \
@@ -1213,6 +1271,17 @@ console.log('setup.sh: openclaw auth config applied');
   # its broken bundled @anthropic-ai/sdk (missing ./internal/utils/uuid.js),
   # which pins the TUI at "connecting | idle". Deleting the extension dir is the
   # only reliable fix, so there is deliberately no runtime disable step here.
+
+  # Setup-only mode: the OpenWork desktop app runs this script headlessly
+  # during its sandbox-creation loading screen (OPENERAL_SETUP_ONLY=1) so the
+  # user's terminal never shows setup output. Everything is up at this point
+  # (DB, workspace, openeral-bash daemon, auth, gateway, caches); the app's
+  # terminal then connects and its .bashrc fast path execs the TUI against
+  # the already-running gateway.
+  if [ -n "${OPENERAL_SETUP_ONLY:-}" ]; then
+    echo "setup.sh: setup-only mode — OpenClaw runtime ready, skipping TUI launch"
+    exit 0
+  fi
 
   echo "setup.sh: launching OpenClaw..."
   echo "setup.sh: if the TUI shows 'run aborted', exit and run:"
@@ -1246,7 +1315,7 @@ console.log('setup.sh: openclaw auth config applied');
       SHELL=/usr/local/bin/openeral-bash \
       PATH="$PATH" \
       OPENCLAW_NO_RESPAWN=1 \
-      OPENCLAW_HANDSHAKE_TIMEOUT_MS=120000 \
+      OPENCLAW_HANDSHAKE_TIMEOUT_MS=600000 \
       NODE_COMPILE_CACHE=/tmp/openclaw-compile-cache \
       GIT_SSL_NO_VERIFY=true \
       npm_config_strict_ssl=false \
@@ -1258,7 +1327,7 @@ console.log('setup.sh: openclaw auth config applied');
       SHELL=/usr/local/bin/openeral-bash \
       PATH="$PATH" \
       OPENCLAW_NO_RESPAWN=1 \
-      OPENCLAW_HANDSHAKE_TIMEOUT_MS=120000 \
+      OPENCLAW_HANDSHAKE_TIMEOUT_MS=600000 \
       NODE_COMPILE_CACHE=/tmp/openclaw-compile-cache \
       GIT_SSL_NO_VERIFY=true \
       npm_config_strict_ssl=false \
@@ -1282,6 +1351,12 @@ fi
 # auth-mode selection. Export the proxy here so it's picked up before
 # settings.json is consulted. STRINGCOST_API_KEY is only needed for presign
 # creation — remove it before handing control to Claude Code.
+# Setup-only mode (see the OpenClaw branch above for rationale).
+if [ -n "${OPENERAL_SETUP_ONLY:-}" ]; then
+  echo "setup.sh: setup-only mode — Claude runtime ready, skipping launch"
+  exit 0
+fi
+
 echo "setup.sh: launching Claude Code..."
 if [ -n "${STRINGCOST_PROXY_URL:-}" ]; then
   exec env -u STRINGCOST_API_KEY -u ANTHROPIC_AUTH_TOKEN \

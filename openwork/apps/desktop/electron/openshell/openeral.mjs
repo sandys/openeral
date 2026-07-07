@@ -38,7 +38,7 @@ import { randomUUID } from "node:crypto";
 
 import { getCliInfo } from "./cli.mjs";
 import { getCredential } from "./openeral-credentials.mjs";
-import { DISTRO_NAME, wslRun, wslSpawn } from "./wsl.mjs";
+import { DISTRO_NAME, ensureWslKeepalive, wslRun, wslSpawn } from "./wsl.mjs";
 
 const SANDBOX_IMAGE = "ghcr.io/sandys/openeral/sandbox:just-bash";
 const IMAGE_BY_PROFILE = {
@@ -801,6 +801,16 @@ function buildLaunchBlock(profile, proxyBase, apiKey = null) {
       //     Code's benefit; the canonical openclaw env never has it;
       //   - SHELL=/usr/local/bin/openeral-bash: agent tool shell invocations
       //     go through openeral's PostgreSQL-backed workspace layer.
+      // `openclaw tui`, NOT bare `openclaw`: as of 2026.4.x the bare command
+      // opens the "crestodian" setup concierge instead of the coding agent
+      // (setup.sh's final exec uses `openclaw tui` for the same reason).
+      // 600 s handshake timeout matches setup.sh — the TUI blocks its own
+      // event loop during plugin loading (a single pass can exceed 2 min in
+      // the sandbox), and a shorter timeout aborts the connect and re-runs
+      // the whole plugin pass in a 100%-CPU retry loop that ends with the
+      // TUI stranded in a permanent "disconnected" state.
+      // NODE_NO_WARNINGS: hide the UNDICI-EHPA experimental warnings that
+      // otherwise print above the TUI banner in the user's terminal.
       "  if curl -fsS http://127.0.0.1:18789/readyz >/dev/null 2>&1; then",
       '    _saved_key="${ANTHROPIC_API_KEY:-}"',
       "    [ -f /home/agent/.openeral/env.sh ] && . /home/agent/.openeral/env.sh",
@@ -811,8 +821,9 @@ function buildLaunchBlock(profile, proxyBase, apiKey = null) {
       "      OPENCLAW_NO_RESPAWN=1 \\",
       "      NODE_COMPILE_CACHE=/tmp/openclaw-compile-cache \\",
       "      GIT_SSL_NO_VERIFY=true npm_config_strict_ssl=false \\",
-      "      OPENCLAW_HANDSHAKE_TIMEOUT_MS=30000 \\",
-      "      openclaw",
+      "      OPENCLAW_HANDSHAKE_TIMEOUT_MS=600000 \\",
+      "      NODE_NO_WARNINGS=1 \\",
+      "      openclaw tui",
       "  fi",
       // Cold start (or crashed gateway): clear any zombie process that may
       // still hold port 18789 — setup.sh starts its gateway without a pkill,
@@ -908,6 +919,71 @@ async function configureAgentLaunch({
       // Non-fatal — sandbox still works; user can launch the agent manually.
       console.warn(
         "[createOpenEralSandbox] agent launch configuration failed (non-fatal):",
+        e.message,
+      );
+    });
+}
+
+/**
+ * Run the OpenClaw runtime setup headlessly while the app is still showing
+ * the sandbox-creation loading screen, so the user's terminal never streams
+ * setup.sh output. setup.sh in OPENERAL_SETUP_ONLY mode brings up everything
+ * (DB migrations, workspace seed, openeral-bash daemon, openclaw onboard,
+ * gateway + readiness, plugin/compile caches) and exits without launching the
+ * TUI; the terminal's .bashrc fast path then sees a healthy gateway and execs
+ * the TUI directly, painting only the agent UI.
+ *
+ * Idempotent + best-effort: skips instantly when the gateway is already
+ * healthy (workspace reopen), and on failure the .bashrc block still falls
+ * back to running `openeral` interactively — the previous behavior — so the
+ * worst case is setup output in the terminal, never a broken session.
+ *
+ * @param {{ name: string, profile: string, env: NodeJS.ProcessEnv,
+ *           onProgress?: Function }} args
+ */
+async function prewarmAgentRuntime({ name, profile, env, onProgress }) {
+  if (profile !== "openeral-openclaw") return;
+  onProgress?.({
+    phase: "prewarm",
+    message: "Preparing OpenClaw runtime (first run can take a few minutes)…",
+  });
+  const script = [
+    // Already warm (reopen / repeated finalize): nothing to do.
+    "if curl -fsS http://127.0.0.1:18789/readyz >/dev/null 2>&1; then",
+    "  echo prewarm: gateway already healthy",
+    "  exit 0",
+    "fi",
+    // A dead gateway process may still hold the port after a container
+    // restart — clear it so setup.sh's own gateway start binds cleanly.
+    "pkill -f 'openclaw gateway' 2>/dev/null || true",
+    // setup.sh self-configures from the uploaded /sandbox files (db-url,
+    // anthropic-api-key, openeral-input/presign.json) — written by create
+    // and configureAgentLaunch before this runs.
+    "export OPENERAL_AGENT=openclaw OPENERAL_SETUP_ONLY=1 HOME=/sandbox",
+    "openeral > /tmp/openeral-setup.log 2>&1",
+    "rc=$?",
+    "tail -5 /tmp/openeral-setup.log",
+    'exit "$rc"',
+  ].join("\n");
+  await wslRun(
+    ["-d", DISTRO_NAME, "--", "bash", "-c", sandboxRunScriptCmd(name, script)],
+    { timeout: 600_000, env },
+  )
+    .then((r) => {
+      if (r.exitCode === 0) {
+        onProgress?.({ phase: "prewarm", message: "OpenClaw runtime ready." });
+      } else {
+        // Non-fatal: .bashrc falls back to interactive setup in the terminal.
+        console.warn(
+          "[prewarmAgentRuntime] setup-only run exited non-zero (non-fatal):",
+          r.stdout?.slice(-500),
+          r.stderr?.slice(-500),
+        );
+      }
+    })
+    .catch((e) => {
+      console.warn(
+        "[prewarmAgentRuntime] prewarm failed (non-fatal):",
         e.message,
       );
     });
@@ -1123,6 +1199,12 @@ export async function createOpenEralSandbox(opts) {
 
   const imageRef = imageForProfile(profile);
 
+  // Pin the WSL distro for the app's lifetime BEFORE any sandbox work: without
+  // a persistent wsl.exe client, WSL starts tearing the distro down between
+  // our short-lived commands, killing the OpenShell gateway mid-create and
+  // leaving sandboxes flapping (see ensureWslKeepalive in wsl.mjs).
+  ensureWslKeepalive();
+
   // openshell shells out to scp/ssh for create --upload AND for exec/connect.
   // Make sure they exist before any sandbox op so we never dead-end at the
   // opaque "No such file or directory (os error 2)" — this also covers the
@@ -1183,6 +1265,12 @@ export async function createOpenEralSandbox(opts) {
       // until after credential validation below, so use process.env here — the
       // exec just writes files with values baked into the script (no WSLENV).
       await finalizeSandboxLaunch({
+        name,
+        profile,
+        env: process.env,
+        onProgress,
+      });
+      await prewarmAgentRuntime({
         name,
         profile,
         env: process.env,
@@ -1344,6 +1432,7 @@ export async function createOpenEralSandbox(opts) {
               onProgress?.({ phase: evt.phase, message: evt.message }),
           });
           await finalizeSandboxLaunch({ name, profile, env, onProgress });
+          await prewarmAgentRuntime({ name, profile, env, onProgress });
           return { name, profile, imageRef, existed: false };
         } catch (waitErr) {
           const waitMsg = waitErr?.message ?? "";
@@ -1420,6 +1509,7 @@ export async function createOpenEralSandbox(opts) {
   // essential — `openshell sandbox exec` refuses while the sandbox is still
   // Provisioning, which silently skipped these steps when they ran pre-Ready.
   await finalizeSandboxLaunch({ name, profile, env, onProgress });
+  await prewarmAgentRuntime({ name, profile, env, onProgress });
   onProgress?.({ phase: "ready", message: `Sandbox ${name} ready.` });
   return { name, profile, imageRef, existed: false };
 }
@@ -1513,4 +1603,5 @@ export const __testing = {
   sandboxRunScriptCmd,
   buildLaunchBlock,
   configureAgentLaunch,
+  prewarmAgentRuntime,
 };

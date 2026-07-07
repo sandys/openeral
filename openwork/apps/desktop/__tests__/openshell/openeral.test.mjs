@@ -666,10 +666,13 @@ test("buildLaunchBlock (openclaw + proxy): delegates to setup.sh with StringCost
     "fast-path exec must scrub setup-only env (mirrors setup.sh's exec)",
   );
   assert.match(block, /HOME=\/home\/agent/, "exec must set HOME=/home/agent");
+  // `openclaw tui`, not bare `openclaw` — the bare command opens the
+  // crestodian setup concierge instead of the coding agent (mirrors
+  // setup.sh's final exec).
   assert.match(
     block,
-    /^\s+openclaw\s*$/m,
-    "exec must end with openclaw on its own line",
+    /^\s+openclaw tui\s*$/m,
+    "exec must end with `openclaw tui` on its own line",
   );
   // SHELL must be set so openclaw agent tool invocations use openeral's workspace
   // filesystem layer (PostgreSQL-backed) rather than raw /bin/bash.
@@ -678,12 +681,21 @@ test("buildLaunchBlock (openclaw + proxy): delegates to setup.sh with StringCost
     /SHELL=\/usr\/local\/bin\/openeral-bash/,
     "exec must set SHELL to openeral-bash",
   );
-  // OPENCLAW_HANDSHAKE_TIMEOUT_MS must be set for the TUI exec so the client
-  // doesn't time out connecting to the gateway on a cold container.
+  // OPENCLAW_HANDSHAKE_TIMEOUT_MS must be generous (600 s, matching setup.sh):
+  // the TUI blocks its own event loop during plugin loading (a single pass
+  // can exceed 2 min in the sandbox), and a shorter timeout aborts the
+  // connect and re-runs the plugin pass in a retry loop that strands the TUI
+  // in a permanent disconnected state.
   assert.match(
     block,
-    /OPENCLAW_HANDSHAKE_TIMEOUT_MS=30000/,
-    "exec must set OPENCLAW_HANDSHAKE_TIMEOUT_MS for TUI client",
+    /OPENCLAW_HANDSHAKE_TIMEOUT_MS=600000/,
+    "exec must set a 600s OPENCLAW_HANDSHAKE_TIMEOUT_MS for the TUI client",
+  );
+  // The UNDICI-EHPA experimental warnings must not print above the TUI banner.
+  assert.match(
+    block,
+    /NODE_NO_WARNINGS=1/,
+    "exec must suppress node warnings in the user-facing terminal",
   );
 });
 
@@ -714,6 +726,70 @@ test("buildLaunchBlock (openclaw): fast path precedes the setup.sh handoff", () 
   // Both the env prep and the launch must stay inside the managed markers.
   assert.match(block, /^# >>> openwork launch >>>/m);
   assert.match(block, /^# <<< openwork launch <<<$/m);
+});
+
+// ── prewarmAgentRuntime ──────────────────────────────────────────────
+
+test("prewarmAgentRuntime: no-op for the claude profile", async () => {
+  await openeral.__testing.prewarmAgentRuntime({
+    name: "openeral-x",
+    profile: "openeral-claude",
+    env: process.env,
+  });
+  // No wsl invocation at all — claude launches instantly, nothing to prewarm.
+  assert.equal(readArgsLog().length, 0);
+});
+
+test("prewarmAgentRuntime (openclaw): runs setup.sh headlessly in setup-only mode", async () => {
+  process.env.MOCK_WSL_STDOUT = "prewarm: ok";
+  const progress = [];
+  await openeral.__testing.prewarmAgentRuntime({
+    name: "openeral-x",
+    profile: "openeral-openclaw",
+    env: process.env,
+    onProgress: (evt) => progress.push(evt),
+  });
+  const lines = readArgsLog();
+  assert.equal(lines.length, 1, "exactly one sandbox exec");
+  assert.match(lines[0], /openshell sandbox exec --name 'openeral-x'/);
+  // The script travels base64-encoded through sandboxRunScriptCmd — decode
+  // it and assert on the real content. The blob is wrapped in (possibly
+  // nested) shell quoting, so extract just the base64 run before `base64 -d`.
+  const m = lines[0].match(/([A-Za-z0-9+/=]{40,})\S*\s*\|\s*base64 -d/);
+  assert.ok(m, "script must be base64-wrapped via sandboxRunScriptCmd");
+  const script = Buffer.from(m[1], "base64").toString("utf8");
+  assert.match(
+    script,
+    /readyz/,
+    "must short-circuit when the gateway is already healthy (reopen path)",
+  );
+  assert.match(
+    script,
+    /OPENERAL_AGENT=openclaw OPENERAL_SETUP_ONLY=1/,
+    "must run setup.sh in setup-only mode with the openclaw agent gate",
+  );
+  assert.match(
+    script,
+    /pkill -f 'openclaw gateway'/,
+    "must clear zombie gateways before setup.sh binds the port",
+  );
+  assert.match(script, /openeral > \/tmp\/openeral-setup\.log/);
+  assert.ok(
+    progress.some((p) => p.phase === "prewarm"),
+    "must surface loading-screen progress",
+  );
+});
+
+test("prewarmAgentRuntime (openclaw): failure is non-fatal", async () => {
+  process.env.MOCK_WSL_EXIT = "1";
+  process.env.MOCK_WSL_STDERR = "setup exploded";
+  // Must resolve (not reject) — the .bashrc block still falls back to
+  // running setup interactively in the terminal.
+  await openeral.__testing.prewarmAgentRuntime({
+    name: "openeral-x",
+    profile: "openeral-openclaw",
+    env: process.env,
+  });
 });
 
 test("buildLaunchBlock: proxyBase is shell-quoted (no command substitution)", () => {

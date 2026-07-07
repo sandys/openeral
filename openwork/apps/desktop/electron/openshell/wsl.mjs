@@ -166,13 +166,53 @@ export async function distroState() {
     const cols = line.split(/\s+/);
     if (cols[0] === DISTRO_NAME) {
       const state = cols[1];
-      if (state === "Running" || state === "Stopped" || state === "Installing") {
+      if (
+        state === "Running" ||
+        state === "Stopped" ||
+        state === "Installing"
+      ) {
         return state;
       }
       return "Stopped";
     }
   }
   return "NotFound";
+}
+
+// ── WSL keepalive ─────────────────────────────────────────────────────────
+// WSL2 begins tearing the distro down shortly after the last wsl.exe client
+// exits. The teardown stops multi-user.target — killing the OpenShell
+// gateway — and is often cancelled midway by our next command, leaving the
+// gateway restart-looping ("Shutdown signal received" every ~15 s in its
+// journal) while sandbox supervisors lose their control channel, flap
+// between Ready/Provisioning, and restart the user's agent processes.
+// Observed as: frozen terminals, ghost sessions, stuck creation screens.
+//
+// Holding one long-lived `wsl -d <distro> -- sleep infinity` client pins the
+// distro (and therefore the gateway and all sandboxes) for the app's
+// lifetime. unref() so the handle never blocks app exit; on app quit the
+// keepalive dies with us and WSL may idle the distro normally.
+let keepaliveChild = null;
+
+export function ensureWslKeepalive() {
+  if (keepaliveChild && keepaliveChild.exitCode === null) return;
+  try {
+    const exe = resolveWslExe();
+    keepaliveChild = spawn(
+      exe,
+      ["-d", DISTRO_NAME, "--", "sleep", "infinity"],
+      { windowsHide: true, stdio: "ignore" },
+    );
+    keepaliveChild.on("error", () => {
+      keepaliveChild = null;
+    });
+    keepaliveChild.on("exit", () => {
+      keepaliveChild = null;
+    });
+    keepaliveChild.unref();
+  } catch {
+    keepaliveChild = null;
+  }
 }
 
 export async function ensureDistroRunning() {
@@ -182,11 +222,17 @@ export async function ensureDistroRunning() {
       `WSL distro "${DISTRO_NAME}" is not registered. Run the OpenShell installer.`,
     );
   }
-  if (state === "Running") return;
+  if (state === "Running") {
+    ensureWslKeepalive();
+    return;
+  }
   await wslRun(["-d", DISTRO_NAME, "--exec", "true"], { timeout: 30_000 });
   for (let i = 0; i < 30; i++) {
     state = await distroState();
-    if (state === "Running") return;
+    if (state === "Running") {
+      ensureWslKeepalive();
+      return;
+    }
     await delay(500);
   }
   throw new Error(`WSL distro "${DISTRO_NAME}" did not reach Running state.`);
