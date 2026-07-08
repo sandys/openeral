@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { existsSync, readFileSync, statSync } from "node:fs";
+import { chmod, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
@@ -41,17 +41,30 @@ function resolveOpenShellDefaultPolicy() {
 }
 
 const DIRECT_RUNTIME = "direct";
-const ORCHESTRATOR_RUNTIME = "openwork-orchestrator";
-const OPENWORK_SERVER_PORT_RANGE_START = 48_000;
-const OPENWORK_SERVER_PORT_RANGE_END = 51_000;
 
 function truncateOutput(value, limit = 8000) {
   const text = String(value ?? "");
   return text.length <= limit ? text : text.slice(text.length - limit);
 }
 
+// Child stdout/stderr can echo credentials (tokens and the opencode password
+// are passed to children via env/flags). Scrub known secret values before
+// storing, since these buffers are returned to the renderer in snapshots.
+const SECRET_STATE_KEYS = ["opencodePassword", "clientToken", "ownerToken", "hostToken"];
+
+function redactSecrets(text, state) {
+  let out = text;
+  for (const key of SECRET_STATE_KEYS) {
+    const secret = state?.[key];
+    if (typeof secret === "string" && secret.length >= 8 && out.includes(secret)) {
+      out = out.split(secret).join(`[redacted:${key}]`);
+    }
+  }
+  return out;
+}
+
 function appendOutput(state, key, chunk) {
-  const next = `${state[key] ?? ""}${String(chunk ?? "")}`;
+  const next = redactSecrets(`${state[key] ?? ""}${String(chunk ?? "")}`, state);
   state[key] = truncateOutput(next);
 }
 
@@ -93,7 +106,9 @@ function snapshotEngineState(state) {
     hostname: state.hostname,
     port: state.port,
     opencodeUsername: state.opencodeUsername,
-    opencodePassword: state.opencodePassword,
+    // Never expose the opencode password to the renderer; nothing in apps/app
+    // reads it (verified) and internal callers read state directly.
+    opencodePassword: null,
     opencodeBinPath: state.opencodeBinPath,
     opencodeBinSource: state.opencodeBinSource,
     pid: child?.pid ?? null,
@@ -238,17 +253,6 @@ function prependedPath(sidecarDirs) {
   const filtered = sidecarDirs.filter((dir) => existsSync(dir));
   if (filtered.length === 0) return null;
   return `${filtered.join(path.delimiter)}${path.delimiter}${process.env.PATH ?? ""}`;
-}
-
-async function portAvailable(host, port) {
-  return new Promise((resolve) => {
-    const server = net.createServer();
-    server.unref();
-    server.once("error", () => resolve(false));
-    server.listen({ host, port }, () => {
-      server.close(() => resolve(true));
-    });
-  });
 }
 
 async function findFreePort(host = "127.0.0.1") {
@@ -438,7 +442,11 @@ export function createRuntimeManager({ app, desktopRoot, listLocalWorkspacePaths
   async function saveTokenStore(store) {
     const filePath = openworkServerTokenStorePath();
     await mkdir(path.dirname(filePath), { recursive: true });
-    await writeFile(filePath, `${JSON.stringify(store, null, 2)}\n`, "utf8");
+    // Tokens are cleartext; keep the store owner-only. mode applies on create,
+    // chmod covers stores created before this was added. (safeStorage encryption
+    // is a possible follow-up; it must handle existing plaintext stores.)
+    await writeFile(filePath, `${JSON.stringify(store, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+    await chmod(filePath, 0o600).catch(() => undefined);
   }
 
   async function loadPortState() {
@@ -480,15 +488,6 @@ export function createRuntimeManager({ app, desktopRoot, listLocalWorkspacePaths
     store.workspaces[normalized].ownerToken = ownerToken;
     store.workspaces[normalized].updatedAt = nowMs();
     await saveTokenStore(store);
-  }
-
-  async function readPreferredOpenworkPort(workspaceKey) {
-    const state = await loadPortState();
-    const normalized = normalizeWorkspaceKey(workspaceKey);
-    if (normalized && state.workspacePorts?.[normalized]) {
-      return state.workspacePorts[normalized];
-    }
-    return state.preferredPort ?? null;
   }
 
   async function persistPreferredOpenworkPort(workspaceKey, port) {
@@ -602,7 +601,14 @@ export function createRuntimeManager({ app, desktopRoot, listLocalWorkspacePaths
 
   function resolveOpencodeBinary(opencodeBinPath) {
     const explicitPath = typeof opencodeBinPath === "string" ? opencodeBinPath.trim() : "";
-    return explicitPath ? { path: explicitPath, source: "custom" } : resolveBinaryInfo("opencode");
+    if (!explicitPath) return resolveBinaryInfo("opencode");
+    // Renderer-supplied path: require an existing regular file before it is
+    // handed to OPENWORK_OPENCODE_BIN / --opencode-bin and executed.
+    const resolved = path.resolve(explicitPath);
+    if (!existsSync(resolved) || !statSync(resolved).isFile()) {
+      throw new Error(`Custom opencode binary is not a file: ${resolved}`);
+    }
+    return { path: resolved, source: "custom" };
   }
 
   function resolveDockerCandidates() {
@@ -718,7 +724,15 @@ export function createRuntimeManager({ app, desktopRoot, listLocalWorkspacePaths
   }
 
   function engineDoctor(options = {}) {
-    const resolved = resolveOpencodeBinary(options?.opencodeBinPath);
+    // resolveOpencodeBinary throws when a configured custom path is invalid;
+    // report that as a doctor finding instead of failing the IPC call.
+    let resolved = null;
+    let resolveError = null;
+    try {
+      resolved = resolveOpencodeBinary(options?.opencodeBinPath);
+    } catch (error) {
+      resolveError = error instanceof Error ? error.message : String(error);
+    }
     if (!resolved?.path) {
       return {
         found: false,
@@ -727,7 +741,7 @@ export function createRuntimeManager({ app, desktopRoot, listLocalWorkspacePaths
         resolvedSource: null,
         version: null,
         supportsServe: false,
-        notes: ["OpenCode binary not found in bundled sidecars or PATH."],
+        notes: [resolveError ?? "OpenCode binary not found in bundled sidecars or PATH."],
         serveHelpStatus: null,
         serveHelpStdout: null,
         serveHelpStderr: null,
@@ -1002,131 +1016,6 @@ export function createRuntimeManager({ app, desktopRoot, listLocalWorkspacePaths
     }
     await persistPreferredOpenworkPort(activeWorkspace, port);
     return snapshotOpenworkServerState(openworkServerState);
-  }
-
-  async function resolveOrchestratorBaseUrl() {
-    if (orchestratorState.baseUrl) {
-      return orchestratorState.baseUrl;
-    }
-    const stateFile = await readOrchestratorStateFile(orchestratorState.dataDir || orchestratorDataDir());
-    const baseUrl = stateFile?.daemon?.baseUrl?.trim();
-    if (!baseUrl) {
-      throw new Error("orchestrator daemon is not running");
-    }
-    return baseUrl;
-  }
-
-  async function startOrchestratorRuntime(projectDir, options = {}) {
-    const dataDir = orchestratorDataDir();
-    await mkdir(dataDir, { recursive: true });
-    const daemonPort = await findFreePort("127.0.0.1");
-    const opencodePort = await findFreePort("127.0.0.1");
-    const [username, password] = generateManagedCredentials();
-
-    const orchestratorProgram = resolveBinary("openwork-orchestrator") ?? resolveBinary("openwork");
-    if (!orchestratorProgram) {
-      throw new Error("Failed to locate openwork-orchestrator.");
-    }
-
-    const opencodeBinary = resolveOpencodeBinary(options.opencodeBinPath);
-    if (!opencodeBinary?.path) {
-      throw new Error("Failed to locate opencode.");
-    }
-
-    const env = await buildChildEnv({
-      OPENWORK_INTERNAL_ALLOW_OPENCODE_CREDENTIALS: "1",
-      OPENWORK_OPENCODE_USERNAME: username,
-      OPENWORK_OPENCODE_PASSWORD: password,
-      ...(options.opencodeEnableExa === true ? { OPENCODE_ENABLE_EXA: "1" } : {}),
-    });
-
-    const args = [
-      "daemon",
-      "run",
-      "--data-dir",
-      dataDir,
-      "--daemon-host",
-      "127.0.0.1",
-      "--daemon-port",
-      String(daemonPort),
-      "--opencode-bin",
-      opencodeBinary.path,
-      "--opencode-host",
-      "127.0.0.1",
-      "--opencode-workdir",
-      projectDir,
-      "--opencode-port",
-      String(opencodePort),
-      "--allow-external",
-      "--cors",
-      "*",
-    ];
-
-    spawnManagedChild(orchestratorState, orchestratorProgram, args, { env });
-    orchestratorState.dataDir = dataDir;
-    orchestratorState.daemonPort = daemonPort;
-    orchestratorState.baseUrl = `http://127.0.0.1:${daemonPort}`;
-
-    await writeOrchestratorAuthFile(dataDir, {
-      opencodeUsername: username,
-      opencodePassword: password,
-      projectDir,
-    });
-
-    const health = await waitForHttpOk(`${orchestratorState.baseUrl}/health`, 180_000).then((response) => response.json());
-    const opencode = health?.opencode;
-    if (!opencode?.port) {
-      throw new Error("Orchestrator did not report OpenCode status.");
-    }
-
-    engineState.runtime = ORCHESTRATOR_RUNTIME;
-    engineState.projectDir = projectDir;
-    engineState.hostname = "127.0.0.1";
-    engineState.port = opencode.port;
-    engineState.baseUrl = `http://127.0.0.1:${opencode.port}`;
-    engineState.opencodeUsername = username;
-    engineState.opencodePassword = password;
-    engineState.opencodeBinPath = opencodeBinary.path;
-    engineState.opencodeBinSource = opencodeBinary.source;
-
-    return snapshotEngineState(engineState);
-  }
-
-  async function startDirectRuntime(projectDir, options = {}) {
-    const opencodeBinary = resolveOpencodeBinary(options.opencodeBinPath);
-    if (!opencodeBinary?.path) {
-      throw new Error("Failed to locate opencode.");
-    }
-
-    const port = await findFreePort("127.0.0.1");
-    const [username, password] = generateManagedCredentials();
-    const env = await buildChildEnv({
-      OPENCODE_SERVER_USERNAME: username,
-      OPENCODE_SERVER_PASSWORD: password,
-    });
-
-    spawnManagedChild(
-      engineState,
-      opencodeBinary.path,
-      ["serve", "--hostname", "127.0.0.1", "--port", String(port), "--cors", "*"],
-      {
-        cwd: projectDir,
-        env,
-      },
-    );
-
-    engineState.runtime = DIRECT_RUNTIME;
-    engineState.projectDir = projectDir;
-    engineState.hostname = "127.0.0.1";
-    engineState.port = port;
-    engineState.baseUrl = `http://127.0.0.1:${port}`;
-    engineState.opencodeUsername = username;
-    engineState.opencodePassword = password;
-    engineState.opencodeBinPath = opencodeBinary.path;
-    engineState.opencodeBinSource = opencodeBinary.source;
-
-    await waitForHttpOk(`${engineState.baseUrl}/health`, 10_000).catch(() => undefined);
-    return snapshotEngineState(engineState);
   }
 
   async function stopAllRuntimeChildren() {
@@ -1693,9 +1582,26 @@ export function createRuntimeManager({ app, desktopRoot, listLocalWorkspacePaths
       stdio: "ignore",
       windowsHide: true,
     });
+    // Detached children have no stdio; without a listener a spawn failure
+    // (ENOENT/EACCES) becomes an uncaught exception in the main process.
+    let spawnError = null;
+    child.on("error", (error) => {
+      spawnError = error instanceof Error ? error : new Error(String(error));
+    });
     child.unref();
 
-    await waitForHttpOk(`${openworkUrl}/health`, wantsContainerSandbox ? 90_000 : 12_000);
+    try {
+      await waitForHttpOk(`${openworkUrl}/health`, wantsContainerSandbox ? 90_000 : 12_000);
+    } catch (error) {
+      // Do not leave an orphaned detached orchestrator behind when it never
+      // became healthy.
+      try {
+        child.kill("SIGKILL");
+      } catch {
+        // ignore: child already exited
+      }
+      throw spawnError ?? error;
+    }
     const ownerToken = await issueOwnerToken(openworkUrl, hostToken).catch(() => null);
 
     const hostInfo = {
