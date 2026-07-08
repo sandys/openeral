@@ -32,8 +32,18 @@ function parseFirstFileUrl(raw: string): string | null {
 }
 
 function resolveArtifactUrl(pathOrUrl: string): string {
-  if (/^https:\/\//i.test(pathOrUrl)) return pathOrUrl;
-  return new URL(pathOrUrl, `${ELECTRON_ALPHA_RELEASE_BASE_URL}/`).toString();
+  // Pin the artifact to the trusted release origin: resolve `path`
+  // against the release base and reject anything (absolute URLs,
+  // protocol-relative or traversal tricks) that lands on a foreign
+  // origin, so a tampered manifest cannot redirect the download.
+  const base = new URL(`${ELECTRON_ALPHA_RELEASE_BASE_URL}/`);
+  const resolved = new URL(pathOrUrl, base);
+  if (resolved.origin !== base.origin) {
+    throw new Error(
+      `latest-mac.yml artifact path resolves outside the release origin: ${pathOrUrl}`,
+    );
+  }
+  return resolved.toString();
 }
 
 export function parseElectronLatestMacYml(

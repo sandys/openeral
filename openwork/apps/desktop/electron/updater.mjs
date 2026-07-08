@@ -28,9 +28,56 @@ function resolveAppVersion(app) {
   }
   return _cachedAppVersion;
 }
+// Strict semver-style comparison so an equal or older feed version (a
+// downgrade) is never reported as an available update. Build metadata
+// (+sha) is ignored; a prerelease sorts below its release; prerelease
+// identifiers compare per semver precedence so alpha builds
+// (X.Y.Z-alpha.<run>) still update to newer alphas. Missing or
+// unparseable versions compare as not-greater.
+function parseVersionParts(value) {
+  if (typeof value !== "string") return null;
+  const match = value
+    .trim()
+    .match(
+      /^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+[0-9A-Za-z.-]+)?$/,
+    );
+  if (!match) return null;
+  return {
+    core: [Number(match[1]), Number(match[2]), Number(match[3])],
+    prerelease: match[4] ? match[4].split(".") : [],
+  };
+}
+
+function isVersionGreater(a, b) {
+  const va = parseVersionParts(a);
+  const vb = parseVersionParts(b);
+  if (!va || !vb) return false;
+  for (let i = 0; i < 3; i += 1) {
+    if (va.core[i] !== vb.core[i]) return va.core[i] > vb.core[i];
+  }
+  // Equal numeric core: a release outranks any prerelease.
+  if (va.prerelease.length === 0) return vb.prerelease.length > 0;
+  if (vb.prerelease.length === 0) return false;
+  const len = Math.min(va.prerelease.length, vb.prerelease.length);
+  for (let i = 0; i < len; i += 1) {
+    const ia = va.prerelease[i];
+    const ib = vb.prerelease[i];
+    if (ia === ib) continue;
+    const na = /^\d+$/.test(ia) ? Number(ia) : null;
+    const nb = /^\d+$/.test(ib) ? Number(ib) : null;
+    if (na !== null && nb !== null) return na > nb;
+    // Numeric identifiers sort below alphanumeric ones (semver §11).
+    if (na !== null) return false;
+    if (nb !== null) return true;
+    return ia > ib;
+  }
+  return va.prerelease.length > vb.prerelease.length;
+}
+
 const ELECTRON_UPDATER_FEEDS = Object.freeze({
   stable: "https://github.com/different-ai/openwork/releases/latest/download",
-  alpha: "https://github.com/different-ai/openwork/releases/download/alpha-macos-latest",
+  alpha:
+    "https://github.com/different-ai/openwork/releases/download/alpha-macos-latest",
 });
 
 function normalizeElectronUpdaterChannel(value) {
@@ -81,6 +128,15 @@ async function applyElectronUpdaterFeed(app, updater) {
   const channel = await readElectronUpdaterChannel(app);
   const state = updaterChannelState(app, channel);
   if (updater?.setFeedURL) {
+    // SECURITY: updates ship over a "generic" provider pointed at GitHub
+    // release assets. Integrity relies on HTTPS plus electron-updater's
+    // sha512 check against latest*.yml; there is no publisher
+    // verification yet. Maintainers: Windows builds must be code-signed
+    // and `win.publisherName` set in electron-builder.yml so
+    // electron-updater verifies the installer's Authenticode signature.
+    // Switching to the `github` provider would tie updates to the repo,
+    // but would break the fixed-tag alpha feed (alpha-macos-latest), so
+    // the generic provider is intentionally kept.
     updater.setFeedURL({ provider: "generic", url: state.feedUrl });
   }
   return state;
@@ -106,15 +162,23 @@ export function registerUpdaterIpc({ app, ipcMain, getMainWindow }) {
   async function ensureAutoUpdater() {
     if (!app.isPackaged) return null;
     if (autoUpdaterLoaded) return autoUpdaterInstance;
-    autoUpdaterLoaded = true;
     try {
       const mod = await import("electron-updater");
+      // Latch only after a successful import so a transient failure
+      // doesn't permanently disable the updater for the session.
+      autoUpdaterLoaded = true;
       autoUpdaterInstance = mod.autoUpdater ?? mod.default?.autoUpdater ?? null;
       if (autoUpdaterInstance) {
         autoUpdaterInstance.autoDownload = false;
         autoUpdaterInstance.autoInstallOnAppQuit = true;
         autoUpdaterInstance.on("error", (err) => {
-          console.warn("[updater] error", err);
+          // Never swallow updater errors: signature/checksum
+          // verification failures surface here and must fail the update
+          // loudly instead of proceeding.
+          console.error("[updater] error", err);
+          sendToRenderer("openwork:updater:error", {
+            message: String(err?.message ?? err),
+          });
         });
         // Forward download progress to the renderer so the UI can show
         // incremental bytes instead of staying stuck at 0.
@@ -155,12 +219,17 @@ export function registerUpdaterIpc({ app, ipcMain, getMainWindow }) {
     const channelState = updater
       ? await applyElectronUpdaterFeed(app, updater)
       : updaterChannelState(app, await readElectronUpdaterChannel(app));
-    if (!updater) return { available: false, reason: "unavailable", ...channelState };
+    if (!updater)
+      return { available: false, reason: "unavailable", ...channelState };
     try {
       const result = await updater.checkForUpdates();
       const info = result?.updateInfo ?? null;
       return {
-        available: Boolean(info && info.version && info.version !== resolveAppVersion(app)),
+        available: Boolean(
+          info &&
+          info.version &&
+          isVersionGreater(info.version, resolveAppVersion(app)),
+        ),
         currentVersion: resolveAppVersion(app),
         latestVersion: info?.version ?? null,
         releaseDate: info?.releaseDate ?? null,
@@ -168,7 +237,11 @@ export function registerUpdaterIpc({ app, ipcMain, getMainWindow }) {
         ...channelState,
       };
     } catch (error) {
-      return { available: false, reason: String(error?.message ?? error), ...channelState };
+      return {
+        available: false,
+        reason: String(error?.message ?? error),
+        ...channelState,
+      };
     }
   });
 
