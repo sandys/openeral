@@ -1,7 +1,17 @@
 import type { WorkspaceDisplay } from "../types";
 import { parseOpenworkWorkspaceIdFromUrl } from "../lib/openwork-server";
 import type { WorkspaceInfo } from "../lib/desktop";
+import { isSafeSkillName } from "./schema";
 import type { BundleImportTarget, BundleV1 } from "./types";
+
+// Defense-in-depth: re-check names right before they enter the import
+// payload, in case a BundleV1 was constructed without parseBundlePayload.
+function requireSafeSkillName(name: string): string {
+  if (!isSafeSkillName(name)) {
+    throw new Error("Invalid skill name in bundle: names must be kebab-case.");
+  }
+  return name;
+}
 
 export function buildImportPayloadFromBundle(bundle: BundleV1): {
   payload: Record<string, unknown>;
@@ -13,7 +23,7 @@ export function buildImportPayloadFromBundle(bundle: BundleV1): {
         mode: { skills: "merge" },
         skills: [
           {
-            name: bundle.name,
+            name: requireSafeSkillName(bundle.name),
             description: bundle.description,
             trigger: bundle.trigger,
             content: bundle.content,
@@ -29,7 +39,7 @@ export function buildImportPayloadFromBundle(bundle: BundleV1): {
       payload: {
         mode: { skills: "merge" },
         skills: bundle.skills.map((skill) => ({
-          name: skill.name,
+          name: requireSafeSkillName(skill.name),
           description: skill.description,
           trigger: skill.trigger,
           content: skill.content,

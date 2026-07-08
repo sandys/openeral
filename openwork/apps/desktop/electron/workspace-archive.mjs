@@ -6,6 +6,12 @@ const ZIP_LOCAL_FILE_HEADER = 0x04034b50;
 const ZIP_CENTRAL_DIRECTORY_HEADER = 0x02014b50;
 const ZIP_END_OF_CENTRAL_DIRECTORY = 0x06054b50;
 
+// Import caps to reject decompression bombs. Workspace config archives hold
+// a handful of small text files, so these limits are already very generous.
+const ZIP_MAX_ENTRY_COUNT = 1024;
+const ZIP_MAX_ENTRY_UNCOMPRESSED_BYTES = 64 * 1024 * 1024; // 64 MiB per entry
+const ZIP_MAX_TOTAL_UNCOMPRESSED_BYTES = 256 * 1024 * 1024; // 256 MiB per archive
+
 function nowMs() {
   return Date.now();
 }
@@ -183,8 +189,12 @@ function findEndOfCentralDirectory(buffer) {
 function listZipEntries(buffer) {
   const eocd = findEndOfCentralDirectory(buffer);
   const count = buffer.readUInt16LE(eocd + 10);
+  if (count > ZIP_MAX_ENTRY_COUNT) {
+    throw new Error(`ZIP archive has too many entries (${count}).`);
+  }
   const centralOffset = buffer.readUInt32LE(eocd + 16);
   const entries = [];
+  let declaredTotal = 0;
   let cursor = centralOffset;
   for (let i = 0; i < count; i += 1) {
     if (buffer.readUInt32LE(cursor) !== ZIP_CENTRAL_DIRECTORY_HEADER) {
@@ -198,13 +208,20 @@ function listZipEntries(buffer) {
     const commentLength = buffer.readUInt16LE(cursor + 32);
     const localOffset = buffer.readUInt32LE(cursor + 42);
     const name = buffer.toString("utf8", cursor + 46, cursor + 46 + nameLength);
+    if (uncompressedSize > ZIP_MAX_ENTRY_UNCOMPRESSED_BYTES) {
+      throw new Error(`ZIP entry ${name} exceeds the maximum uncompressed size.`);
+    }
+    declaredTotal += uncompressedSize;
+    if (declaredTotal > ZIP_MAX_TOTAL_UNCOMPRESSED_BYTES) {
+      throw new Error("ZIP archive exceeds the maximum total uncompressed size.");
+    }
     entries.push({ name, method, compressedSize, uncompressedSize, localOffset });
     cursor += 46 + nameLength + extraLength + commentLength;
   }
   return entries;
 }
 
-function readZipEntryData(buffer, entry) {
+function readZipEntryData(buffer, entry, maxBytes = ZIP_MAX_ENTRY_UNCOMPRESSED_BYTES) {
   const cursor = entry.localOffset;
   if (buffer.readUInt32LE(cursor) !== ZIP_LOCAL_FILE_HEADER) {
     throw new Error(`Invalid ZIP local header for ${entry.name}.`);
@@ -213,8 +230,27 @@ function readZipEntryData(buffer, entry) {
   const extraLength = buffer.readUInt16LE(cursor + 28);
   const dataStart = cursor + 30 + nameLength + extraLength;
   const compressed = buffer.subarray(dataStart, dataStart + entry.compressedSize);
-  if (entry.method === 0) return compressed;
-  if (entry.method === 8) return zlib.inflateRawSync(compressed, { finishFlush: zlib.constants.Z_SYNC_FLUSH });
+  if (entry.method === 0) {
+    if (compressed.length > maxBytes) {
+      throw new Error(`ZIP entry ${entry.name} exceeds the maximum uncompressed size.`);
+    }
+    return compressed;
+  }
+  if (entry.method === 8) {
+    try {
+      // maxOutputLength guards against entries whose header understates the
+      // real inflated size (classic zip bomb).
+      return zlib.inflateRawSync(compressed, {
+        finishFlush: zlib.constants.Z_SYNC_FLUSH,
+        maxOutputLength: maxBytes,
+      });
+    } catch (error) {
+      if (error?.code === "ERR_BUFFER_TOO_LARGE") {
+        throw new Error(`ZIP entry ${entry.name} exceeds the maximum uncompressed size.`);
+      }
+      throw error;
+    }
+  }
   throw new Error(`Unsupported ZIP compression method ${entry.method} for ${entry.name}.`);
 }
 
@@ -276,14 +312,18 @@ export async function importWorkspaceConfig({ archivePath, targetDir, name }) {
   await mkdir(targetDir, { recursive: true });
 
   const buffer = await readFile(archivePath);
+  let remainingBytes = ZIP_MAX_TOTAL_UNCOMPRESSED_BYTES;
   for (const entry of listZipEntries(buffer)) {
     if (entry.name === "manifest.json" || entry.name.endsWith("/")) continue;
     if (!isSafeArchivePath(entry.name)) throw new Error("Archive contains an unsafe path");
     if (!(entry.name === "opencode.json" || entry.name.startsWith(".opencode/"))) continue;
     if (isSecretName(path.basename(entry.name))) continue;
+    if (remainingBytes <= 0) throw new Error("ZIP archive exceeds the maximum total uncompressed size.");
+    const data = readZipEntryData(buffer, entry, Math.min(ZIP_MAX_ENTRY_UNCOMPRESSED_BYTES, remainingBytes));
+    remainingBytes -= data.length;
     const outPath = path.join(targetDir, ...entry.name.split("/"));
     await mkdir(path.dirname(outPath), { recursive: true });
-    await writeFile(outPath, readZipEntryData(buffer, entry));
+    await writeFile(outPath, data);
   }
 
   const opencodeDir = path.join(targetDir, ".opencode");

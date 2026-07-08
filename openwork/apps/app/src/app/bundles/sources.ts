@@ -7,12 +7,23 @@ import { extractBundleId, isConfiguredBundlePublisherUrl } from "./url-policy";
 
 function isSupportedDeepLinkProtocol(protocol: string): boolean {
   const normalized = protocol.toLowerCase();
-  return normalized === "openwork:" || normalized === "openwork-dev:" || normalized === "https:" || normalized === "http:";
+  return (
+    normalized === "openwork:" ||
+    normalized === "openwork-dev:" ||
+    normalized === "https:" ||
+    normalized === "http:"
+  );
 }
 
-export function normalizeBundleImportIntent(value: string | null | undefined): BundleImportIntent {
+export function normalizeBundleImportIntent(
+  value: string | null | undefined,
+): BundleImportIntent {
   const normalized = (value ?? "").trim().toLowerCase();
-  if (normalized === "new_worker" || normalized === "new-worker" || normalized === "newworker") {
+  if (
+    normalized === "new_worker" ||
+    normalized === "new-worker" ||
+    normalized === "newworker"
+  ) {
     return "new_worker";
   }
   return "import_current";
@@ -35,34 +46,70 @@ export function parseBundleDeepLink(rawUrl: string): BundleRequest | null {
   const routePath = url.pathname.replace(/^\/+/, "").toLowerCase();
   const routeSegments = routePath.split("/").filter(Boolean);
   const routeTail = routeSegments[routeSegments.length - 1] ?? "";
-  const looksLikeImportRoute = routeHost === "import-bundle" || routePath === "import-bundle" || routeTail === "import-bundle";
+  const looksLikeImportRoute =
+    routeHost === "import-bundle" ||
+    routePath === "import-bundle" ||
+    routeTail === "import-bundle";
 
-  const rawBundleUrl = url.searchParams.get("ow_bundle") ?? url.searchParams.get("bundleUrl") ?? "";
+  const rawBundleUrl =
+    url.searchParams.get("ow_bundle") ??
+    url.searchParams.get("bundleUrl") ??
+    "";
   if (!looksLikeImportRoute && !rawBundleUrl.trim()) {
     return null;
   }
 
   try {
-    if ((protocol === "https:" || protocol === "http:") && !rawBundleUrl.trim()) {
+    if (
+      (protocol === "https:" || protocol === "http:") &&
+      !rawBundleUrl.trim()
+    ) {
       if (isConfiguredBundlePublisherUrl(url.toString())) {
         return {
           bundleUrl: url.toString(),
-          intent: normalizeBundleImportIntent(url.searchParams.get("ow_intent") ?? url.searchParams.get("intent")),
-          source: url.searchParams.get("ow_source")?.trim() ?? url.searchParams.get("source")?.trim() ?? undefined,
-          label: url.searchParams.get("ow_label")?.trim() ?? url.searchParams.get("label")?.trim() ?? undefined,
+          intent: normalizeBundleImportIntent(
+            url.searchParams.get("ow_intent") ?? url.searchParams.get("intent"),
+          ),
+          source:
+            url.searchParams.get("ow_source")?.trim() ??
+            url.searchParams.get("source")?.trim() ??
+            undefined,
+          label:
+            url.searchParams.get("ow_label")?.trim() ??
+            url.searchParams.get("label")?.trim() ??
+            undefined,
         };
       }
     }
 
     const parsedBundleUrl = new URL(rawBundleUrl.trim());
-    if (parsedBundleUrl.protocol !== "https:" && parsedBundleUrl.protocol !== "http:") {
+    if (
+      parsedBundleUrl.protocol !== "https:" &&
+      parsedBundleUrl.protocol !== "http:"
+    ) {
+      return null;
+    }
+    // The ow_bundle=<url> branch must ALSO enforce the publisher allowlist
+    // (previously only the bare-URL branch did). Without this, a link like
+    // openwork://import-bundle?ow_bundle=http://169.254.169.254/... would be
+    // accepted and later fetched through the desktop __fetch proxy (SSRF), and
+    // an attacker origin could deliver attacker-authored skills/commands.
+    if (!isConfiguredBundlePublisherUrl(parsedBundleUrl.toString())) {
       return null;
     }
     return {
       bundleUrl: parsedBundleUrl.toString(),
-      intent: normalizeBundleImportIntent(url.searchParams.get("ow_intent") ?? url.searchParams.get("intent")),
-      source: url.searchParams.get("ow_source")?.trim() ?? url.searchParams.get("source")?.trim() ?? undefined,
-      label: url.searchParams.get("ow_label")?.trim() ?? url.searchParams.get("label")?.trim() ?? undefined,
+      intent: normalizeBundleImportIntent(
+        url.searchParams.get("ow_intent") ?? url.searchParams.get("intent"),
+      ),
+      source:
+        url.searchParams.get("ow_source")?.trim() ??
+        url.searchParams.get("source")?.trim() ??
+        undefined,
+      label:
+        url.searchParams.get("ow_label")?.trim() ??
+        url.searchParams.get("label")?.trim() ??
+        undefined,
     };
   } catch {
     return null;
@@ -78,7 +125,16 @@ export function stripBundleQuery(rawUrl: string): string | null {
   }
 
   let changed = false;
-  for (const key of ["ow_bundle", "bundleUrl", "ow_intent", "intent", "ow_source", "source", "ow_org", "ow_label"]) {
+  for (const key of [
+    "ow_bundle",
+    "bundleUrl",
+    "ow_intent",
+    "intent",
+    "ow_source",
+    "source",
+    "ow_org",
+    "ow_label",
+  ]) {
     if (url.searchParams.has(key)) {
       url.searchParams.delete(key);
       changed = true;
@@ -109,6 +165,17 @@ export async function fetchBundle(
     throw new Error("Bundle URL must use http(s).");
   }
 
+  // Enforce the configured-publisher allowlist for EVERY fetch path (both the
+  // server-proxied and the direct client/desktop branches below). This is the
+  // primary control preventing bundle fetch from being an arbitrary-origin
+  // request: it blocks SSRF (e.g. cloud-metadata / LAN URLs) through the
+  // desktop __fetch proxy and supply-chain imports from an attacker origin.
+  if (!isConfiguredBundlePublisherUrl(targetUrl.toString())) {
+    throw new Error(
+      "Bundle URL is not from the configured OpenWork publisher.",
+    );
+  }
+
   const bundleId = extractBundleId(targetUrl);
   if (bundleId) {
     targetUrl.pathname = `/b/${bundleId}/data`;
@@ -120,7 +187,9 @@ export async function fetchBundle(
   }
 
   if (serverClient && !options?.forceClientFetch) {
-    return parseBundlePayload(await serverClient.fetchBundle(targetUrl.toString()));
+    return parseBundlePayload(
+      await serverClient.fetchBundle(targetUrl.toString()),
+    );
   }
 
   const controller = new AbortController();
@@ -129,8 +198,8 @@ export async function fetchBundle(
   try {
     let response: Response;
     try {
-        response = isDesktopRuntime()
-          ? await desktopFetch(targetUrl.toString(), {
+      response = isDesktopRuntime()
+        ? await desktopFetch(targetUrl.toString(), {
             method: "GET",
             headers: { Accept: "application/json" },
             signal: controller.signal,
@@ -141,13 +210,18 @@ export async function fetchBundle(
             signal: controller.signal,
           });
     } catch (error) {
-      const message = error instanceof Error ? error.message : safeStringify(error);
-      throw new Error(`Failed to load bundle from ${targetUrl.toString()}: ${message}`);
+      const message =
+        error instanceof Error ? error.message : safeStringify(error);
+      throw new Error(
+        `Failed to load bundle from ${targetUrl.toString()}: ${message}`,
+      );
     }
     if (!response.ok) {
       const details = (await response.text()).trim();
       const suffix = details ? `: ${details}` : "";
-      throw new Error(`Failed to fetch bundle from ${targetUrl.toString()} (${response.status})${suffix}`);
+      throw new Error(
+        `Failed to fetch bundle from ${targetUrl.toString()} (${response.status})${suffix}`,
+      );
     }
     return parseBundlePayload(await response.json());
   } finally {

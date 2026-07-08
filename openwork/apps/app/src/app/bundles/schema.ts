@@ -9,12 +9,22 @@ function readRecord(value: unknown): Record<string, unknown> | null {
   return value as Record<string, unknown>;
 }
 
+// Mirrors validateSkillName in the Electron main process and the server
+// validators: kebab-case slug, 1-64 chars. Defense-in-depth so names with
+// path separators, "..", or a leading "-" never leave the bundle layer.
+const SKILL_NAME_REGEX = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+
+export function isSafeSkillName(name: string): boolean {
+  return name.length >= 1 && name.length <= 64 && SKILL_NAME_REGEX.test(name);
+}
+
 function readSkillItem(value: unknown): SkillBundleItem | null {
   const record = readRecord(value);
   if (!record) return null;
   const name = typeof record.name === "string" ? record.name.trim() : "";
   const content = typeof record.content === "string" ? record.content : "";
   if (!name || !content) return null;
+  if (!isSafeSkillName(name)) return null;
   return {
     name,
     description: typeof record.description === "string" ? record.description : undefined,
@@ -64,6 +74,9 @@ export function parseBundlePayload(value: unknown): BundleV1 {
     const content = typeof record.content === "string" ? record.content : "";
     if (!name || !content) {
       throw new Error("Invalid skill bundle payload.");
+    }
+    if (!isSafeSkillName(name)) {
+      throw new Error("Invalid skill name in bundle: names must be kebab-case.");
     }
     return {
       schemaVersion: 1,

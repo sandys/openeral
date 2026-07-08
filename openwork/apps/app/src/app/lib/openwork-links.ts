@@ -1,6 +1,9 @@
 import { DEFAULT_DEN_BASE_URL, normalizeDenBaseUrl } from "./den";
 import { normalizeOpenworkServerUrl } from "./openwork-server";
-import { normalizeBundleImportIntent, parseBundleDeepLink } from "../bundles/sources";
+import {
+  normalizeBundleImportIntent,
+  parseBundleDeepLink,
+} from "../bundles/sources";
 import type { BundleRequest } from "../bundles/types";
 
 export type RemoteWorkspaceDefaults = {
@@ -18,10 +21,17 @@ export type DenAuthDeepLink = {
 
 function isSupportedDeepLinkProtocol(protocol: string): boolean {
   const normalized = protocol.toLowerCase();
-  return normalized === "openwork:" || normalized === "openwork-dev:" || normalized === "https:" || normalized === "http:";
+  return (
+    normalized === "openwork:" ||
+    normalized === "openwork-dev:" ||
+    normalized === "https:" ||
+    normalized === "http:"
+  );
 }
 
-export function parseRemoteConnectDeepLink(rawUrl: string): RemoteWorkspaceDefaults | null {
+export function parseRemoteConnectDeepLink(
+  rawUrl: string,
+): RemoteWorkspaceDefaults | null {
   let url: URL;
   try {
     url = new URL(rawUrl);
@@ -38,12 +48,22 @@ export function parseRemoteConnectDeepLink(rawUrl: string): RemoteWorkspaceDefau
   const routePath = url.pathname.replace(/^\/+/, "").toLowerCase();
   const routeSegments = routePath.split("/").filter(Boolean);
   const routeTail = routeSegments[routeSegments.length - 1] ?? "";
-  if (routeHost !== "connect-remote" && routePath !== "connect-remote" && routeTail !== "connect-remote") {
+  if (
+    routeHost !== "connect-remote" &&
+    routePath !== "connect-remote" &&
+    routeTail !== "connect-remote"
+  ) {
     return null;
   }
 
-  const hostUrlRaw = url.searchParams.get("openworkHostUrl") ?? url.searchParams.get("openworkUrl") ?? "";
-  const tokenRaw = url.searchParams.get("openworkToken") ?? url.searchParams.get("accessToken") ?? "";
+  const hostUrlRaw =
+    url.searchParams.get("openworkHostUrl") ??
+    url.searchParams.get("openworkUrl") ??
+    "";
+  const tokenRaw =
+    url.searchParams.get("openworkToken") ??
+    url.searchParams.get("accessToken") ??
+    "";
   const normalizedHostUrl = normalizeOpenworkServerUrl(hostUrlRaw);
   const token = tokenRaw.trim();
   if (!normalizedHostUrl || !token) {
@@ -52,20 +72,22 @@ export function parseRemoteConnectDeepLink(rawUrl: string): RemoteWorkspaceDefau
 
   const workerName = url.searchParams.get("workerName")?.trim() ?? "";
   const workerId = url.searchParams.get("workerId")?.trim() ?? "";
-  const displayName = workerName || (workerId ? `Worker ${workerId.slice(0, 8)}` : "");
-  const autoConnectRaw =
-    url.searchParams.get("autoConnect") ??
-    url.searchParams.get("bypassModal") ??
-    url.searchParams.get("bypassAddWorkerModal") ??
-    "";
-  const autoConnect = ["1", "true", "yes", "on"].includes(autoConnectRaw.trim().toLowerCase());
+  const displayName =
+    workerName || (workerId ? `Worker ${workerId.slice(0, 8)}` : "");
 
+  // SECURITY: never honor autoConnect / bypassModal / bypassAddWorkerModal from
+  // an untrusted deep link. A single crafted link (deliverable even as an
+  // ordinary web URL that opens the app, or via a malicious page setting the
+  // location on web) would otherwise silently point the user's worker at an
+  // attacker-operated host with an attacker-chosen token, skipping the connect
+  // confirmation. The parsed values only PREFILL the connect modal; the user
+  // must always explicitly confirm.
   return {
     openworkHostUrl: normalizedHostUrl,
     openworkToken: token,
     directory: null,
     displayName: displayName || null,
-    autoConnect,
+    autoConnect: false,
   };
 }
 
@@ -121,12 +143,18 @@ export function parseDenAuthDeepLink(rawUrl: string): DenAuthDeepLink | null {
   const routePath = url.pathname.replace(/^\/+/, "").toLowerCase();
   const routeSegments = routePath.split("/").filter(Boolean);
   const routeTail = routeSegments[routeSegments.length - 1] ?? "";
-  if (routeHost !== "den-auth" && routePath !== "den-auth" && routeTail !== "den-auth") {
+  if (
+    routeHost !== "den-auth" &&
+    routePath !== "den-auth" &&
+    routeTail !== "den-auth"
+  ) {
     return null;
   }
 
   const grant = url.searchParams.get("grant")?.trim() ?? "";
-  const denBaseUrl = normalizeDenBaseUrl(url.searchParams.get("denBaseUrl")?.trim() ?? "") ?? DEFAULT_DEN_BASE_URL;
+  const denBaseUrl =
+    normalizeDenBaseUrl(url.searchParams.get("denBaseUrl")?.trim() ?? "") ??
+    DEFAULT_DEN_BASE_URL;
   if (!grant) {
     return null;
   }
@@ -138,16 +166,22 @@ function normalizeDebugDeepLinkInput(rawValue: string): string {
   const trimmed = rawValue.trim();
   if (!trimmed) return "";
 
-  const directMatch = trimmed.match(/(?:openwork-dev|openwork|https?):\/\/[^\s"'<>]+/i);
+  const directMatch = trimmed.match(
+    /(?:openwork-dev|openwork|https?):\/\/[^\s"'<>]+/i,
+  );
   if (directMatch) return directMatch[0];
 
-  const bareShareMatch = trimmed.match(/share\.openwork(?:labs\.com|\.software)\/b\/[^\s"'<>]+/i);
+  const bareShareMatch = trimmed.match(
+    /share\.openwork(?:labs\.com|\.software)\/b\/[^\s"'<>]+/i,
+  );
   if (bareShareMatch) return `https://${bareShareMatch[0]}`;
 
   return trimmed;
 }
 
-export function parseDebugDeepLinkInput(rawValue: string):
+export function parseDebugDeepLinkInput(
+  rawValue: string,
+):
   | { kind: "bundle"; link: BundleRequest }
   | { kind: "remote"; link: RemoteWorkspaceDefaults }
   | { kind: "auth"; link: DenAuthDeepLink }
@@ -181,9 +215,15 @@ export function parseDebugDeepLinkInput(rawValue: string):
         kind: "bundle",
         link: {
           bundleUrl,
-          intent: normalizeBundleImportIntent(intentMatch?.[1] ? decodeURIComponent(intentMatch[1]) : undefined),
-          label: labelMatch?.[1] ? decodeURIComponent(labelMatch[1]) : undefined,
-          source: sourceMatch?.[1] ? decodeURIComponent(sourceMatch[1]) : undefined,
+          intent: normalizeBundleImportIntent(
+            intentMatch?.[1] ? decodeURIComponent(intentMatch[1]) : undefined,
+          ),
+          label: labelMatch?.[1]
+            ? decodeURIComponent(labelMatch[1])
+            : undefined,
+          source: sourceMatch?.[1]
+            ? decodeURIComponent(sourceMatch[1])
+            : undefined,
         },
       };
     } catch {
@@ -191,7 +231,9 @@ export function parseDebugDeepLinkInput(rawValue: string):
     }
   }
 
-  const shareIdMatch = normalized.match(/share\.openwork(?:labs\.com|\.software)\/b\/([^\s/?#"'<>]+)/i);
+  const shareIdMatch = normalized.match(
+    /share\.openwork(?:labs\.com|\.software)\/b\/([^\s/?#"'<>]+)/i,
+  );
   if (shareIdMatch?.[1]) {
     return {
       kind: "bundle",
