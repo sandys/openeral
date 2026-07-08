@@ -32,24 +32,9 @@ const LINUX_TERMINAL_CANDIDATES = [
 ];
 
 function detectLinuxTerminal() {
-  for (const candidate of LINUX_TERMINAL_CANDIDATES) {
-    try {
-      // Cheap probe: spawn `which`. Cross-distro available.
-      const probe = spawn("which", [candidate.exe], {
-        stdio: ["ignore", "ignore", "ignore"],
-      });
-      // Synchronous wait via a small busy promise wouldn't fit here.
-      // Instead, return the first candidate that doesn't error
-      // immediately — `which` returning non-zero is handled at launch
-      // time by the actual spawn() failing. This is good enough for the
-      // Linux dev path; bankers run Windows.
-      probe.unref();
-    } catch {
-      // ignore
-    }
-  }
-  // Without a synchronous which-check, return them all and let the
-  // caller try in order. Cleaner: the actual launcher tries each.
+  // No pre-probe: launchLinuxTerminal tries each candidate in order and a
+  // missing binary surfaces as a spawn error there, so probing with `which`
+  // here only leaked short-lived processes.
   return LINUX_TERMINAL_CANDIDATES;
 }
 
@@ -65,7 +50,22 @@ function detectLinuxTerminal() {
  */
 export async function launchExternalTerminalToSandbox(sandboxName, options = {}) {
   if (!sandboxName) throw new Error("launchExternalTerminalToSandbox: sandboxName is required");
+  // Self-defending validation: the name is interpolated into a `bash -c`
+  // command line and (via the default window title) into a cmd.exe `start`
+  // argv below. deriveOpenEralSandboxName only ever emits this alphabet.
+  if (!/^[a-z0-9_.-]+$/.test(sandboxName)) {
+    throw new Error(
+      `launchExternalTerminalToSandbox: invalid sandbox name ${JSON.stringify(sandboxName)} (expected only [a-z0-9_.-])`,
+    );
+  }
   const windowTitle = options.windowTitle ?? `OpenWork — ${sandboxName}`;
+  // `"` would break argv quoting and `%`/control chars are expanded or
+  // mangled by cmd.exe even inside quotes — reject rather than repair.
+  if (/["%\u0000-\u001f]/.test(windowTitle)) {
+    throw new Error(
+      `launchExternalTerminalToSandbox: invalid window title ${JSON.stringify(windowTitle)}`,
+    );
+  }
 
   if (process.platform === "win32") {
     return launchWindowsTerminal(sandboxName, windowTitle);
@@ -128,19 +128,30 @@ function launchWindowsTerminal(sandboxName, windowTitle) {
   );
   return new Promise((resolve, reject) => {
     wtChild.once("error", () => {
-      // wt.exe missing — fall back to cmd.exe.
+      // wt.exe missing — fall back to cmd.exe. No shell:true: cmd would
+      // re-interpret the bash payload's `&&`/`|`/`>` operators (and the
+      // title) before wsl.exe ever saw them, so hand cmd.exe a plain argv.
+      // `start` treats its first *quoted* argument as the window title and
+      // node only quotes argv entries that contain spaces, so pad a
+      // space-less title to guarantee it can't be taken as the command.
+      const startTitle = windowTitle.includes(" ") ? windowTitle : `${windowTitle} `;
       const cmdChild = spawn(
         "cmd.exe",
-        ["/C", "start", `"${windowTitle}"`, "wsl.exe", ...wslArgs],
-        { detached: true, stdio: "ignore", windowsHide: false, shell: true },
+        ["/C", "start", startTitle, "wsl.exe", ...wslArgs],
+        { detached: true, stdio: "ignore", windowsHide: false },
       );
       cmdChild.once("error", reject);
-      cmdChild.unref();
-      resolve({ launched: "cmd.exe" });
+      cmdChild.once("spawn", () => {
+        cmdChild.unref();
+        resolve({ launched: "cmd.exe" });
+      });
     });
-    wtChild.unref();
-    // Resolve a tick after dispatch — wt.exe's "error" fires sync if missing.
-    setTimeout(() => resolve({ launched: "wt.exe" }), 50);
+    // Resolve on the real spawn signal — a fixed timer would race the
+    // error → cmd.exe fallback path.
+    wtChild.once("spawn", () => {
+      wtChild.unref();
+      resolve({ launched: "wt.exe" });
+    });
   });
 }
 

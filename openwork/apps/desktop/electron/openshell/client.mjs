@@ -18,6 +18,17 @@ function parseJsonOrThrow(text, what) {
   }
 }
 
+// deleteSandbox/getSandboxStatus place the sandbox name as a positional
+// argv entry before flags, so a name starting with "-" could be parsed as
+// an option by the openshell CLI (argument injection). All real names are
+// openwork-/openeral-prefixed; reject anything that doesn't start with an
+// alphanumeric or strays outside the CLI's [a-z0-9_.-] name alphabet.
+function assertSafeSandboxName(name, what) {
+  if (!/^[a-z0-9][a-z0-9_.-]*$/i.test(name)) {
+    throw new Error(`${what}: invalid sandbox name ${JSON.stringify(name)}`);
+  }
+}
+
 function makeLineSplitter(handler) {
   let buf = "";
   return (chunk) => {
@@ -150,6 +161,7 @@ export async function createSandbox(opts) {
 
 export async function deleteSandbox(name) {
   if (!name) throw new Error("deleteSandbox: name is required");
+  assertSafeSandboxName(name, "deleteSandbox");
   return wslRun(
     ["-d", DISTRO_NAME, "--", "openshell", "sandbox", "delete", name, "--force"],
     { timeout: DEFAULT_CLI_TIMEOUT_MS },
@@ -158,6 +170,7 @@ export async function deleteSandbox(name) {
 
 export async function getSandboxStatus(name) {
   if (!name) throw new Error("getSandboxStatus: name is required");
+  assertSafeSandboxName(name, "getSandboxStatus");
   const r = await wslRun(
     ["-d", DISTRO_NAME, "--", "openshell", "sandbox", "status", name, "--json"],
     { timeout: 10_000 },

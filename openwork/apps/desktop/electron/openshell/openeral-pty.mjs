@@ -170,6 +170,13 @@ let spawnImpl = async ({ sandboxName, cols, rows, extraEnv }) => {
 const DEFAULT_COLS = 120;
 const DEFAULT_ROWS = 32;
 
+// Terminal dimensions end up interpolated into an `stty cols X rows Y`
+// command line, so clamp to a positive integer (or the fallback) in every
+// path that accepts renderer-supplied sizes.
+function clampDimension(value, fallback) {
+  return Number.isFinite(value) && value > 0 ? Math.floor(value) : fallback;
+}
+
 /**
  * Open a new PTY session against an existing OpenEral sandbox.
  *
@@ -189,8 +196,8 @@ export async function openSession(opts) {
   if (!opts?.sandboxName) {
     throw new Error("openSession: sandboxName is required");
   }
-  const cols = Number.isFinite(opts.cols) ? opts.cols : DEFAULT_COLS;
-  const rows = Number.isFinite(opts.rows) ? opts.rows : DEFAULT_ROWS;
+  const cols = clampDimension(opts.cols, DEFAULT_COLS);
+  const rows = clampDimension(opts.rows, DEFAULT_ROWS);
   const extraEnv = opts.extraEnv ?? null;
 
   // Adoption / idempotency: if a still-live session already owns this
@@ -283,8 +290,8 @@ export function resizeSession(id, cols, rows) {
   const session = sessions.get(id);
   if (!session) return false;
   if (session.exitInfo) return false;
-  const safeCols = Number.isFinite(cols) && cols > 0 ? Math.floor(cols) : session.size.cols;
-  const safeRows = Number.isFinite(rows) && rows > 0 ? Math.floor(rows) : session.size.rows;
+  const safeCols = clampDimension(cols, session.size.cols);
+  const safeRows = clampDimension(rows, session.size.rows);
   if (safeCols === session.size.cols && safeRows === session.size.rows) {
     return true;
   }

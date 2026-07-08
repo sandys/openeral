@@ -15,14 +15,22 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
-import { getCliInfo, hasSubcommand, resetCache as resetCliCache } from "./cli.mjs";
+import {
+  getCliInfo,
+  hasSubcommand,
+  resetCache as resetCliCache,
+} from "./cli.mjs";
 import { openshellDoctor } from "./doctor.mjs";
 import { DISTRO_NAME, wslRun } from "./wsl.mjs";
 
-const DEFAULT_STATE_FILE = path.join(os.homedir(), ".openwork", "openshell-install.json");
+const DEFAULT_STATE_FILE = path.join(
+  os.homedir(),
+  ".openwork",
+  "openshell-install.json",
+);
 const MIN_WIN11_BUILD = 22_000;
 const MIN_RAM_GB = 14; // 16 GB nominal with system reserve slack
-const MIN_FREE_DISK_GB = 30;
+const WSL_INSTALL_TIMEOUT_MS = 15 * 60_000;
 const DOCKER_INSTALL_TIMEOUT_MS = 10 * 60_000;
 const OPENSHELL_INSTALL_TIMEOUT_MS = 10 * 60_000;
 const DISTRO_IMPORT_TIMEOUT_MS = 5 * 60_000;
@@ -98,7 +106,10 @@ class RebootRequiredError extends Error {
 
 /** @param {PhaseContext} ctx */
 async function phasePreflight({ onProgress }) {
-  onProgress?.({ phase: "preflight", message: "Checking system requirements..." });
+  onProgress?.({
+    phase: "preflight",
+    message: "Checking system requirements...",
+  });
   if (process.platform !== "win32") {
     throw new Error(
       `OpenShell requires Windows 11; detected ${process.platform}.`,
@@ -118,25 +129,45 @@ async function phasePreflight({ onProgress }) {
       `Only ${memGB.toFixed(1)} GB RAM detected; OpenShell needs ≥ 16 GB.`,
     );
   }
-  onProgress?.({ phase: "preflight", message: "System requirements met.", percent: 100 });
+  onProgress?.({
+    phase: "preflight",
+    message: "System requirements met.",
+    percent: 100,
+  });
 }
 
 /** @param {PhaseContext} ctx */
 async function phaseWsl({ onProgress, signal, powershellExe }) {
   onProgress?.({ phase: "wsl", message: "Installing WSL2...", percent: 0 });
-  const probe = await wslRun(["--status"], { timeout: 10_000, signal }).catch(() => null);
+  const probe = await wslRun(["--status"], { timeout: 10_000, signal }).catch(
+    () => null,
+  );
   if (probe?.exitCode === 0) {
     // Already installed; force version 2 default.
-    const set = await wslRun(["--set-default-version", "2"], { timeout: 10_000, signal });
+    const set = await wslRun(["--set-default-version", "2"], {
+      timeout: 10_000,
+      signal,
+    });
     if (set.exitCode !== 0 && set.exitCode !== null) {
       throw new Error(`wsl --set-default-version 2 failed: ${set.stderr}`);
     }
-    onProgress?.({ phase: "wsl", message: "WSL2 already installed.", percent: 100 });
+    onProgress?.({
+      phase: "wsl",
+      message: "WSL2 already installed.",
+      percent: 100,
+    });
     return;
   }
   // First install. wsl --install needs admin; we spawn an elevated child
   // via PowerShell's Start-Process -Verb RunAs so the user sees one UAC
   // prompt instead of the installer crashing on permission errors.
+  // spawnSync blocks this thread, so it cannot honor the phase AbortSignal
+  // mid-flight — check it up front and bound the wait with a hard timeout
+  // instead. (Follow-up: switch to async spawn to honor `signal` during the
+  // elevated install itself.)
+  if (signal?.aborted) {
+    throw new Error("Setup was cancelled before WSL2 install started.");
+  }
   const exe = powershellExe || "powershell.exe";
   const result = spawnSync(
     exe,
@@ -146,8 +177,17 @@ async function phaseWsl({ onProgress, signal, powershellExe }) {
       "-Command",
       "Start-Process wsl.exe -Verb RunAs -Wait -ArgumentList '--install --no-distribution'",
     ],
-    { windowsHide: true, encoding: "utf8" },
+    { windowsHide: true, encoding: "utf8", timeout: WSL_INSTALL_TIMEOUT_MS },
   );
+  const spawnErrorCode = /** @type {NodeJS.ErrnoException | undefined} */ (
+    result.error
+  )?.code;
+  if (spawnErrorCode === "ETIMEDOUT" || result.signal === "SIGTERM") {
+    throw new Error(
+      `wsl --install did not finish within ${WSL_INSTALL_TIMEOUT_MS / 60_000} minutes — ` +
+        "the elevated installer appears stalled. Close any pending UAC prompt and retry.",
+    );
+  }
   if (result.status !== 0) {
     throw new Error(
       `wsl --install failed (elevation declined?): ${result.stderr || result.stdout || "unknown"}`,
@@ -160,7 +200,11 @@ async function phaseWsl({ onProgress, signal, powershellExe }) {
 
 /** @param {PhaseContext} ctx */
 async function phaseDistro({ onProgress, signal, rootfsPath }) {
-  onProgress?.({ phase: "distro", message: `Importing ${DISTRO_NAME}...`, percent: 0 });
+  onProgress?.({
+    phase: "distro",
+    message: `Importing ${DISTRO_NAME}...`,
+    percent: 0,
+  });
   if (!rootfsPath) {
     throw new Error(
       "Rootfs path was not provided. The MSI should ship a bundled tarball at " +
@@ -178,7 +222,11 @@ async function phaseDistro({ onProgress, signal, rootfsPath }) {
       .map((l) => l.trim())
       .includes(DISTRO_NAME);
     if (present) {
-      onProgress?.({ phase: "distro", message: "Distro already registered.", percent: 100 });
+      onProgress?.({
+        phase: "distro",
+        message: "Distro already registered.",
+        percent: 100,
+      });
       return;
     }
   }
@@ -191,14 +239,20 @@ async function phaseDistro({ onProgress, signal, rootfsPath }) {
     { timeout: DISTRO_IMPORT_TIMEOUT_MS, signal },
   );
   if (importResult.exitCode !== 0) {
-    throw new Error(`wsl --import failed: ${importResult.stderr || importResult.stdout}`);
+    throw new Error(
+      `wsl --import failed: ${importResult.stderr || importResult.stdout}`,
+    );
   }
   onProgress?.({ phase: "distro", message: "Distro imported.", percent: 100 });
 }
 
 /** @param {PhaseContext} ctx */
 async function phaseDocker({ onProgress, signal }) {
-  onProgress?.({ phase: "docker", message: "Installing Docker Engine inside the distro...", percent: 0 });
+  onProgress?.({
+    phase: "docker",
+    message: "Installing Docker Engine inside the distro...",
+    percent: 0,
+  });
   // One bash -c script keeps us to a single wsl.exe round-trip and avoids
   // partial-state failures between apt commands.
   const script = [
@@ -225,7 +279,11 @@ async function phaseDocker({ onProgress, signal }) {
   if (r.exitCode !== 0) {
     throw new Error(`Docker install failed: ${r.stderr || r.stdout}`);
   }
-  onProgress?.({ phase: "docker", message: "Docker Engine running inside distro.", percent: 100 });
+  onProgress?.({
+    phase: "docker",
+    message: "Docker Engine running inside distro.",
+    percent: 100,
+  });
 }
 
 /**
@@ -246,7 +304,11 @@ async function phaseDocker({ onProgress, signal }) {
  * @param {PhaseContext} ctx
  */
 async function phaseOpenshell({ onProgress, signal }) {
-  onProgress?.({ phase: "openshell", message: "Verifying OpenShell CLI...", percent: 0 });
+  onProgress?.({
+    phase: "openshell",
+    message: "Verifying OpenShell CLI...",
+    percent: 0,
+  });
 
   // The cached probe must reflect the post-import binary state, not
   // anything we observed on a prior install attempt with a stale distro.
@@ -273,12 +335,28 @@ async function phaseOpenshell({ onProgress, signal }) {
   // first, fall back to bare `init`, and only fail if both `init` exists
   // and exits non-zero.
   if (await hasSubcommand(null, "init")) {
-    onProgress?.({ phase: "openshell", message: "Running `openshell init`...", percent: 50 });
+    onProgress?.({
+      phase: "openshell",
+      message: "Running `openshell init`...",
+      percent: 50,
+    });
     let initResult = await wslRun(
-      ["-d", DISTRO_NAME, "--user", "root", "--", "openshell", "init", "--bootstrap-policies"],
+      [
+        "-d",
+        DISTRO_NAME,
+        "--user",
+        "root",
+        "--",
+        "openshell",
+        "init",
+        "--bootstrap-policies",
+      ],
       { timeout: OPENSHELL_INSTALL_TIMEOUT_MS, signal },
     );
-    if (initResult.exitCode !== 0 && /unknown|unrecognized/i.test(initResult.stderr || "")) {
+    if (
+      initResult.exitCode !== 0 &&
+      /unknown|unrecognized/i.test(initResult.stderr || "")
+    ) {
       // Flag dropped — try the bare verb.
       initResult = await wslRun(
         ["-d", DISTRO_NAME, "--user", "root", "--", "openshell", "init"],
@@ -336,7 +414,11 @@ const LOCAL_GATEWAY_URL = "https://127.0.0.1:17670";
 const LOCAL_GATEWAY_NAME = "openshell";
 
 async function bringUpGateway({ onProgress, signal }) {
-  onProgress?.({ phase: "openshell", message: "Starting OpenShell gateway...", percent: 70 });
+  onProgress?.({
+    phase: "openshell",
+    message: "Starting OpenShell gateway...",
+    percent: 70,
+  });
   const info = await getCliInfo();
 
   // Path 1 — legacy `gateway start`. We probe before calling so we
@@ -400,7 +482,11 @@ async function bringUpGateway({ onProgress, signal }) {
  * configured at package-install time.
  */
 async function startSystemdGateway({ signal, onProgress }) {
-  onProgress?.({ phase: "openshell", message: "Enabling openshell-gateway service...", percent: 75 });
+  onProgress?.({
+    phase: "openshell",
+    message: "Enabling openshell-gateway service...",
+    percent: 75,
+  });
   // `systemctl --user` needs a user systemd manager. On a fresh distro
   // we may need to nudge it; `loginctl enable-linger banker` keeps the
   // user manager alive without a live session. Capture the result so we
@@ -408,9 +494,22 @@ async function startSystemdGateway({ signal, onProgress }) {
   // here used to hide rootfs bugs (missing systemd-sysv/dbus) behind an
   // opaque "Connection refused" downstream.
   const linger = await wslRun(
-    ["-d", DISTRO_NAME, "--user", "root", "--", "loginctl", "enable-linger", "banker"],
+    [
+      "-d",
+      DISTRO_NAME,
+      "--user",
+      "root",
+      "--",
+      "loginctl",
+      "enable-linger",
+      "banker",
+    ],
     { timeout: 15_000, signal },
-  ).catch((err) => ({ exitCode: -1, stdout: "", stderr: err?.message ?? String(err) }));
+  ).catch((err) => ({
+    exitCode: -1,
+    stdout: "",
+    stderr: err?.message ?? String(err),
+  }));
 
   const enable = await wslRun(
     [
@@ -436,8 +535,12 @@ async function startSystemdGateway({ signal, onProgress }) {
     // amount of retrying systemctl recovers from this — give the user
     // an action that actually fixes it.
     const systemdMissing =
-      /Failed to connect to bus|System has not been booted with systemd as init system|No medium found/i.test(out) ||
-      /Failed to connect to bus|System has not been booted with systemd as init system/i.test(lingerOut);
+      /Failed to connect to bus|System has not been booted with systemd as init system|No medium found/i.test(
+        out,
+      ) ||
+      /Failed to connect to bus|System has not been booted with systemd as init system/i.test(
+        lingerOut,
+      );
     if (systemdMissing) {
       return {
         ok: false,
@@ -452,7 +555,8 @@ async function startSystemdGateway({ signal, onProgress }) {
     }
     return {
       ok: false,
-      error: `systemctl --user enable --now openshell-gateway failed (exit ${enable.exitCode}): ` +
+      error:
+        `systemctl --user enable --now openshell-gateway failed (exit ${enable.exitCode}): ` +
         `${(enable.stderr || enable.stdout || "no output").trim()}` +
         (linger.exitCode !== 0
           ? ` (preceded by loginctl enable-linger banker exit ${linger.exitCode}: ${(linger.stderr || linger.stdout || "no output").trim().slice(0, 200)})`
@@ -469,7 +573,11 @@ async function startSystemdGateway({ signal, onProgress }) {
  * is a no-op when the named gateway is already the active one.
  */
 async function registerLocalGateway({ signal, onProgress }) {
-  onProgress?.({ phase: "openshell", message: "Registering local gateway...", percent: 85 });
+  onProgress?.({
+    phase: "openshell",
+    message: "Registering local gateway...",
+    percent: 85,
+  });
   const add = await wslRun(
     [
       "-d",
@@ -542,10 +650,17 @@ async function tryDockerGatewayFallback({ signal, onProgress }) {
       "docker ps -a --filter 'name=openshell' --format '{{.Names}}\\t{{.State}}'",
     ],
     { timeout: 15_000, signal },
-  ).catch((err) => ({ exitCode: -1, stdout: "", stderr: err?.message ?? String(err) }));
+  ).catch((err) => ({
+    exitCode: -1,
+    stdout: "",
+    stderr: err?.message ?? String(err),
+  }));
 
   if (list.exitCode !== 0) {
-    return { ok: false, error: `docker ps failed: ${(list.stderr || "").trim()}` };
+    return {
+      ok: false,
+      error: `docker ps failed: ${(list.stderr || "").trim()}`,
+    };
   }
   const candidates = list.stdout
     .split(/\r?\n/)
@@ -600,13 +715,22 @@ async function tryDockerGatewayFallback({ signal, onProgress }) {
 
 /** @param {PhaseContext} ctx */
 async function phaseVerify({ onProgress }) {
-  onProgress?.({ phase: "verify", message: "Verifying installation...", percent: 0 });
+  onProgress?.({
+    phase: "verify",
+    message: "Verifying installation...",
+    percent: 0,
+  });
   const result = await openshellDoctor();
   if (result.status !== "ready") {
-    const reason = result.fatal[0] ?? result.actionable[0] ?? `status: ${result.status}`;
+    const reason =
+      result.fatal[0] ?? result.actionable[0] ?? `status: ${result.status}`;
     throw new Error(`Verify failed: ${reason}`);
   }
-  onProgress?.({ phase: "verify", message: "All components healthy.", percent: 100 });
+  onProgress?.({
+    phase: "verify",
+    message: "All components healthy.",
+    percent: 100,
+  });
 }
 
 const DEFAULT_PHASES = [

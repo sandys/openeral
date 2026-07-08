@@ -52,9 +52,13 @@ async function runPowerShell(command, { timeout = POWERSHELL_TIMEOUT_MS } = {}) 
     const stderr = [];
     child.stdout.on("data", (c) => stdout.push(c));
     child.stderr.on("data", (c) => stderr.push(c));
+    let timedOut = false;
     const timer =
       timeout > 0
-        ? setTimeout(() => child.kill("SIGKILL"), timeout)
+        ? setTimeout(() => {
+            timedOut = true;
+            child.kill("SIGKILL");
+          }, timeout)
         : null;
     child.on("error", (err) => {
       if (timer) clearTimeout(timer);
@@ -62,6 +66,12 @@ async function runPowerShell(command, { timeout = POWERSHELL_TIMEOUT_MS } = {}) 
     });
     child.on("close", (code) => {
       if (timer) clearTimeout(timer);
+      if (timedOut) {
+        // Mirror wslRun: a hung query must reject, not masquerade as a
+        // clean "missing"/"unknown" result with empty output.
+        reject(new Error(`${exe} timed out after ${timeout}ms running: ${command}`));
+        return;
+      }
       resolve({
         exitCode: code,
         stdout: Buffer.concat(stdout).toString("utf8").trim(),

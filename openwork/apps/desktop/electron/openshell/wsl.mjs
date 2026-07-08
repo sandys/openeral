@@ -11,6 +11,8 @@ import { setTimeout as delay } from "node:timers/promises";
 export const DISTRO_NAME = "openwork-openshell";
 
 const DEFAULT_TIMEOUT_MS = 30_000;
+// Upper bound on buffered stdout+stderr for a single wslRun call (16 MiB).
+const MAX_WSLRUN_OUTPUT_BYTES = 16 * 1024 * 1024;
 
 function resolveWslExe() {
   return process.env.OPENWORK_WSL_EXE || "wsl.exe";
@@ -71,8 +73,23 @@ export async function wslRun(args, options = {}) {
 
     const stdoutChunks = [];
     const stderrChunks = [];
-    child.stdout.on("data", (c) => stdoutChunks.push(c));
-    child.stderr.on("data", (c) => stderrChunks.push(c));
+    // Cap buffered output so a runaway command (or hostile payload echoing
+    // unbounded data) can't exhaust main-process memory. wslRun is only used
+    // for short control commands; streaming/progress consumers use wslSpawn.
+    let bufferedBytes = 0;
+    let overflowed = false;
+    const collect = (chunks, chunk) => {
+      if (overflowed) return;
+      bufferedBytes += chunk.length;
+      if (bufferedBytes > MAX_WSLRUN_OUTPUT_BYTES) {
+        overflowed = true;
+        child.kill("SIGKILL");
+        return;
+      }
+      chunks.push(chunk);
+    };
+    child.stdout.on("data", (c) => collect(stdoutChunks, c));
+    child.stderr.on("data", (c) => collect(stderrChunks, c));
 
     let timedOut = false;
     const timer =
@@ -89,6 +106,14 @@ export async function wslRun(args, options = {}) {
     });
     child.on("close", (code) => {
       if (timer) clearTimeout(timer);
+      if (overflowed) {
+        reject(
+          new Error(
+            `wsl.exe output exceeded ${MAX_WSLRUN_OUTPUT_BYTES} bytes running: ${finalArgs.join(" ")}`,
+          ),
+        );
+        return;
+      }
       if (timedOut) {
         reject(
           new Error(
@@ -124,19 +149,28 @@ export function wslSpawn(args, options = {}) {
     stdio: ["pipe", "pipe", "pipe"],
   });
 
-  // wsl.exe processes can outlive the spawning Node child because the
-  // Linux-side process keeps the WSL utility VM alive. Killing the
-  // Node-side child does not propagate (microsoft/WSL#12159). On kill,
-  // also terminate the distro session so orphans don't accumulate over
-  // a long banker session.
+  // Terminate ONLY this wsl.exe invocation (and its Windows-side child tree),
+  // never the whole distro.
+  //
+  // The previous implementation ran `wsl.exe -t <DISTRO_NAME>` here, which
+  // terminates the entire WSL utility VM. Killing one spawned command (e.g. a
+  // create-sandbox timeout or a docker-pull abort) therefore tore down EVERY
+  // other running sandbox, all live `sandbox connect` PTYs, AND the OpenShell
+  // gateway — a cross-session denial of service (audit #4). wsl.exe processes
+  // can leave a short-lived Linux-side orphan (microsoft/WSL#12159), but that
+  // is far less harmful than nuking the VM; taskkill /T reaps the Windows
+  // process subtree, and the Linux process exits on stdio EOF.
   const baseKill = child.kill.bind(child);
   child.kill = (signal) => {
     try {
-      const reaper = spawn(exe, ["-t", DISTRO_NAME], {
-        windowsHide: true,
-        stdio: "ignore",
-      });
-      reaper.on("error", () => {});
+      if (process.platform === "win32" && typeof child.pid === "number") {
+        const killer = spawn(
+          "taskkill",
+          ["/pid", String(child.pid), "/T", "/F"],
+          { windowsHide: true, stdio: "ignore" },
+        );
+        killer.on("error", () => {});
+      }
     } catch {
       // Best-effort. Caller's signal below is the real exit path.
     }
