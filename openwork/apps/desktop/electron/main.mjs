@@ -1,5 +1,7 @@
 import { createHash } from "node:crypto";
+import { lookup as dnsLookup } from "node:dns/promises";
 import { existsSync } from "node:fs";
+import net from "node:net";
 import {
   cp,
   mkdir,
@@ -164,6 +166,99 @@ const DEFAULT_LOCAL_BASE_URL = "http://127.0.0.1:4096";
 function envFlagDisabled(name) {
   const value = process.env[name]?.trim().toLowerCase();
   return value === "0" || value === "false" || value === "off";
+}
+
+// SSRF guard for the renderer-facing __fetch proxy. The renderer can ask the
+// main process to fetch arbitrary URLs (bundle/publisher/cloud flows). Without
+// restrictions this is a server-side request-forgery hole: injected renderer
+// content could read cloud metadata (169.254.169.254), loopback admin
+// services, or LAN hosts with the main process's network privileges, bypassing
+// CORS. We require https and reject any host that resolves to a private,
+// loopback, link-local, or otherwise reserved address (checked post-DNS so
+// rebinding to an internal IP is also blocked).
+function isReservedIp(ip) {
+  const kind = net.isIP(ip);
+  if (kind === 4) {
+    const parts = ip.split(".").map((n) => Number.parseInt(n, 10));
+    if (parts.length !== 4 || parts.some((n) => Number.isNaN(n))) return true;
+    const [a, b] = parts;
+    if (a === 10) return true; // 10.0.0.0/8
+    if (a === 127) return true; // 127.0.0.0/8 loopback
+    if (a === 0) return true; // 0.0.0.0/8
+    if (a === 169 && b === 254) return true; // 169.254.0.0/16 link-local
+    if (a === 172 && b >= 16 && b <= 31) return true; // 172.16.0.0/12
+    if (a === 192 && b === 168) return true; // 192.168.0.0/16
+    if (a === 100 && b >= 64 && b <= 127) return true; // 100.64.0.0/10 CGNAT
+    if (a >= 224) return true; // multicast + reserved
+    return false;
+  }
+  if (kind === 6) {
+    const v = ip.toLowerCase();
+    if (v === "::1" || v === "::") return true; // loopback / unspecified
+    if (v.startsWith("fe80")) return true; // link-local
+    if (v.startsWith("fc") || v.startsWith("fd")) return true; // unique-local fc00::/7
+    if (v.startsWith("ff")) return true; // multicast
+    // IPv4-mapped (::ffff:a.b.c.d) — extract and re-check as v4.
+    const mapped = v.match(/::ffff:(\d+\.\d+\.\d+\.\d+)$/);
+    if (mapped) return isReservedIp(mapped[1]);
+    return false;
+  }
+  return true; // not a valid IP literal — reject
+}
+
+async function assertPublicHttpsUrl(rawUrl) {
+  let parsed;
+  try {
+    parsed = new URL(rawUrl);
+  } catch {
+    throw new Error("Invalid URL.");
+  }
+  if (parsed.protocol !== "https:") {
+    throw new Error("Only https URLs are allowed.");
+  }
+  const host = parsed.hostname.replace(/^\[|\]$/g, "");
+  if (/^(localhost|.*\.localhost)$/i.test(host)) {
+    throw new Error("Blocked request to a loopback host.");
+  }
+  // Resolve and reject any address in a reserved range (blocks DNS rebinding).
+  let addresses;
+  if (net.isIP(host)) {
+    addresses = [{ address: host }];
+  } else {
+    try {
+      addresses = await dnsLookup(host, { all: true });
+    } catch {
+      throw new Error(`Could not resolve host: ${host}`);
+    }
+  }
+  if (
+    addresses.length === 0 ||
+    addresses.some((a) => isReservedIp(a.address))
+  ) {
+    throw new Error(`Blocked request to a non-public host: ${host}`);
+  }
+  return parsed;
+}
+
+// Only hand these schemes to the OS handler. Blocks file:/smb:/custom protocol
+// URIs that a malicious deep link or bundle value could otherwise use to
+// disclose local files or launch arbitrary registered handlers.
+const OPEN_EXTERNAL_ALLOWED_SCHEMES = new Set(["https:", "http:", "mailto:"]);
+
+async function openExternalSafe(url) {
+  if (typeof url !== "string" || url.trim().length === 0) return;
+  let target;
+  try {
+    target = new URL(url);
+  } catch {
+    console.warn("[openExternal] blocked malformed URL");
+    return;
+  }
+  if (!OPEN_EXTERNAL_ALLOWED_SCHEMES.has(target.protocol)) {
+    console.warn(`[openExternal] blocked URL scheme: ${target.protocol}`);
+    return;
+  }
+  await shell.openExternal(target.toString());
 }
 
 async function installReactDevToolsForDev() {
@@ -361,15 +456,19 @@ function normalizePlatform(value) {
 }
 
 function forwardedDeepLinks(argv) {
+  // Only accept the app's own custom schemes from OS-forwarded argv. The app is
+  // registered only for openwork:// (see setAsDefaultProtocolClient), so a
+  // forwarded http(s) argument is never a genuine OS deep link — accepting it
+  // would let a crafted launch argument inject an arbitrary web URL into the
+  // renderer's deep-link parsers (connect-remote / den-auth / bundle). Web
+  // deep-linking is unaffected: the web build drives links from window.location
+  // via startDeepLinkBridge, not through this desktop argv path.
   return argv
     .slice(1)
     .map((entry) => entry.trim())
     .filter(
       (entry) =>
-        entry.startsWith("openwork://") ||
-        entry.startsWith("openwork-dev://") ||
-        entry.startsWith("https://") ||
-        entry.startsWith("http://"),
+        entry.startsWith("openwork://") || entry.startsWith("openwork-dev://"),
     );
 }
 
@@ -1617,6 +1716,10 @@ async function handleDesktopInvoke(event, command, ...args) {
       const url = String(args[0] ?? "").trim();
       const init = args[1] ?? {};
       if (!url) throw new Error("URL is required.");
+      // Enforce the SSRF allowlist in the MAIN process (renderer-side checks in
+      // desktop.ts are only defense-in-depth). Loopback traffic never reaches
+      // here — desktopFetch short-circuits localhost to a direct renderer fetch.
+      await assertPublicHttpsUrl(url);
       const response = await fetch(url, {
         method: typeof init.method === "string" ? init.method : undefined,
         headers:
@@ -2361,7 +2464,7 @@ function buildApplicationMenu() {
       {
         label: "OpenWork Documentation",
         click: () => {
-          void shell.openExternal("https://github.com/different-ai/openwork");
+          void openExternalSafe("https://github.com/different-ai/openwork");
         },
       },
       ...(isMac
@@ -2485,11 +2588,25 @@ async function createMainWindow() {
       url.startsWith("http://127.0.0.1") ||
       url.startsWith("http://localhost");
     if (!local) {
-      void shell.openExternal(url);
+      void openExternalSafe(url);
       return { action: "deny" };
     }
     return { action: "allow" };
   });
+
+  // Navigation guard: setWindowOpenHandler only covers NEW windows. Without a
+  // will-navigate/will-redirect guard, a renderer (or injected content / link /
+  // HTTP redirect) could navigate the MAIN frame to a remote origin while
+  // keeping the preload contextBridge + all IPC channels exposed — a full IPC
+  // takeover. Only allow the app's own origins (file://, loopback dev server,
+  // configured start origin); anything else is cancelled and opened externally.
+  const blockOffAppNavigation = (event, url) => {
+    if (isTrustedVoiceOrigin(url)) return; // reuses the trusted-app-origin test
+    event.preventDefault();
+    void openExternalSafe(url);
+  };
+  mainWindow.webContents.on("will-navigate", blockOffAppNavigation);
+  mainWindow.webContents.on("will-redirect", blockOffAppNavigation);
 
   const startUrl =
     process.env.OPENWORK_ELECTRON_START_URL?.trim() ||
@@ -2513,9 +2630,7 @@ async function createMainWindow() {
 
 ipcMain.handle("openwork:desktop", handleDesktopInvoke);
 ipcMain.handle("openwork:shell:openExternal", async (_event, url) => {
-  if (typeof url === "string" && url.trim().length > 0) {
-    await shell.openExternal(url);
-  }
+  await openExternalSafe(url);
 });
 ipcMain.handle("openwork:shell:relaunch", async () => {
   app.relaunch();
