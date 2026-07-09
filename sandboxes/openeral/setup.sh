@@ -1227,12 +1227,11 @@ console.log('setup.sh: openclaw auth config applied');
   #      is ~2.5 GB / ~96k files of npm cache that would be pushed to and
   #      restored from PostgreSQL on every session.
   #   2. One shared copy also avoids a second multi-GB cp on every launch.
-  # A real directory may exist if an older session's workspace was restored
-  # from the DB — replace it with the symlink (it is a cache we created; the
-  # /tmp copy seeded from the image supersedes it).
-  if [ -d /home/agent/.openclaw/plugin-runtime-deps ] && [ ! -L /home/agent/.openclaw/plugin-runtime-deps ]; then
-    rm -rf /home/agent/.openclaw/plugin-runtime-deps
-  fi
+  # plugin-runtime-deps is excluded from the workspace sync (see openeral-js
+  # sync.ts HOME_SYNC_EXCLUDE_PATH_PREFIXES), so the DB never restores a real
+  # directory here and openclaw writes through the symlink into /tmp — nothing
+  # under the persisted /home/agent is ever deleted. ln -sfn safely replaces an
+  # existing symlink and creates it when absent.
   mkdir -p /home/agent/.openclaw
   ln -sfn "$OPENCLAW_PLUGIN_STAGE_DIR" /home/agent/.openclaw/plugin-runtime-deps
 
@@ -1251,13 +1250,10 @@ console.log('setup.sh: openclaw auth config applied');
   # rebuilds ~/.openclaw/plugins/installs.json from what is actually present.
   # Without this, every TUI launch re-runs plugin discovery and partial install.
   #
-  # Drop the DB-restored registry first: workspace restore can carry an
-  # installs.json from an older session (observed: 52 entries including
-  # extensions since removed from the image), and doctor --fix merges rather
-  # than rebuilding from scratch. The loader iterates the registry with the
-  # allowlist bypassed for bundled plugins, so a bloated registry re-creates
-  # the multi-minute TUI plugin-load storm regardless of plugins.allow/deny.
-  rm -f /home/agent/.openclaw/plugins/installs.json
+  # installs.json is excluded from the workspace sync (openeral-js sync.ts), so
+  # a stale registry from an older session is never restored into the home and
+  # doctor --fix always rebuilds it fresh from the on-disk extensions — no need
+  # to delete anything under the persisted /home/agent.
   HOME=/home/agent timeout 60 openclaw doctor --fix </dev/null \
     >>/tmp/openclaw-bootstrap.log 2>&1 \
     && echo "setup.sh: plugin registry consolidated" \

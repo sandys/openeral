@@ -56,6 +56,7 @@ export const HOME_SYNC_EXCLUDE_PATH_PREFIXES = [
   '/.openclaw/cache',
   '/.openclaw/plugin-runtime-deps',
   '/.openclaw/plugins-runtime',
+  '/.openclaw/plugins/installs.json', // registry rebuilt by 'openclaw doctor --fix'; excluded so a stale one never restores into the synced home
   '/.openclaw/gateway',
   '/.openclaw/runtime',
   '/.openclaw/tmp',
