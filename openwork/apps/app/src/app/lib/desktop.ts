@@ -164,10 +164,14 @@ function isLoopbackUrl(input: RequestInfo | URL): boolean {
         : input.url;
   try {
     const url = new URL(raw);
+    // URL.hostname yields "[::1]" in Node but "::1" in Chromium (this runs in
+    // the renderer), so strip any surrounding brackets and match both forms.
+    // Aligns with isLoopbackOpenworkServerUrl. Getting this wrong routes a
+    // loopback URL through the main-process __fetch proxy, which now rejects
+    // non-public hosts.
+    const hostname = url.hostname.toLowerCase().replace(/^\[|\]$/g, "");
     return (
-      url.hostname === "127.0.0.1" ||
-      url.hostname === "localhost" ||
-      url.hostname === "[::1]"
+      hostname === "127.0.0.1" || hostname === "localhost" || hostname === "::1"
     );
   } catch {
     return false;

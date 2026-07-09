@@ -1,6 +1,19 @@
 /** @jsxImportSource react */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { AlertTriangle, ExternalLink, Loader2, MessageSquare, Mic, MoreHorizontal, Pencil, Power, RotateCcw, Settings, Square, Trash2 } from "lucide-react";
+import {
+  AlertTriangle,
+  ExternalLink,
+  Loader2,
+  MessageSquare,
+  Mic,
+  MoreHorizontal,
+  Pencil,
+  Power,
+  RotateCcw,
+  Settings,
+  Square,
+  Trash2,
+} from "lucide-react";
 
 import type { SandboxProfile } from "../../../../app/lib/desktop";
 import { Button } from "../../../design-system/button";
@@ -218,7 +231,8 @@ export function OpenEralTerminal(props: OpenEralTerminalProps) {
   // so the broken sandbox is removed even if the user skips the error card.
   const errorNeedsDelete = Boolean(
     errorMessage &&
-    (/STUCK_PROVISIONING:/i.test(errorMessage) || /is in error state/i.test(errorMessage))
+    (/STUCK_PROVISIONING:/i.test(errorMessage) ||
+      /is in error state/i.test(errorMessage)),
   );
 
   // Load/persist the user-facing display name from localStorage.
@@ -236,7 +250,8 @@ export function OpenEralTerminal(props: OpenEralTerminalProps) {
     if (!effectiveName) return;
     const trimmed = renameValue.trim();
     const next = trimmed || effectiveName;
-    if (trimmed) localStorage.setItem(`openeral-display:${effectiveName}`, trimmed);
+    if (trimmed)
+      localStorage.setItem(`openeral-display:${effectiveName}`, trimmed);
     else localStorage.removeItem(`openeral-display:${effectiveName}`);
     setDisplayName(next);
     setIsRenaming(false);
@@ -298,7 +313,10 @@ export function OpenEralTerminal(props: OpenEralTerminalProps) {
           // DETACH: keep the wsl child + output buffer alive in main so the
           // next mount replays the scrollback instantly. Only an explicit
           // end/delete CLOSES (kills) the PTY.
-          await invoke(explicitEndRef.current ? "openeralPtyClose" : "openeralPtyDetach", id);
+          await invoke(
+            explicitEndRef.current ? "openeralPtyClose" : "openeralPtyDetach",
+            id,
+          );
         } catch {
           // Best-effort.
         }
@@ -315,7 +333,10 @@ export function OpenEralTerminal(props: OpenEralTerminalProps) {
         // for this same workspace, stay in "exited" state and do nothing — the
         // handleLaunch callback will reset userAborted + increment reconnectKey
         // to start a fresh run when the user explicitly clicks "Launch session".
-        if (userAborted && lastAbortedWorkspaceRef.current === props.workspaceId) {
+        if (
+          userAborted &&
+          lastAbortedWorkspaceRef.current === props.workspaceId
+        ) {
           setPhase("exited");
           return;
         }
@@ -326,7 +347,9 @@ export function OpenEralTerminal(props: OpenEralTerminalProps) {
         // state, stuck-provisioning, etc.) — i.e. before setSandboxName
         // is ever called. Only set if not already known from a prior run.
         if (!lastKnownSandboxNameRef.current) {
-          lastKnownSandboxNameRef.current = deriveExpectedSandboxName(props.workspaceId);
+          lastKnownSandboxNameRef.current = deriveExpectedSandboxName(
+            props.workspaceId,
+          );
         }
 
         // 0. Subscribe to bootstrap progress events BEFORE calling
@@ -378,6 +401,7 @@ export function OpenEralTerminal(props: OpenEralTerminalProps) {
         // positioning, so mounting underneath first is invisible.
         const { Terminal } = await import("@xterm/xterm");
         const { FitAddon } = await import("@xterm/addon-fit");
+        const { Unicode11Addon } = await import("@xterm/addon-unicode11");
         if (cancelled || !containerRef.current) return;
 
         // Wait for the browser to complete layout so fit() can measure
@@ -387,7 +411,9 @@ export function OpenEralTerminal(props: OpenEralTerminalProps) {
         const waitFrames = (n: number) =>
           new Promise<void>((resolve) => {
             const step = (remaining: number) =>
-              remaining <= 0 ? resolve() : requestAnimationFrame(() => step(remaining - 1));
+              remaining <= 0
+                ? resolve()
+                : requestAnimationFrame(() => step(remaining - 1));
             step(n);
           });
         await waitFrames(2);
@@ -415,7 +441,9 @@ export function OpenEralTerminal(props: OpenEralTerminalProps) {
         // full-width lines — which showed up as a gibberish first line (Claude
         // Code's welcome-box border). buildNumber comes from the host; 0 on
         // non-Windows so we omit the option there.
-        const hostBuild = await invoke<number>("openeralHostBuild").catch(() => 0);
+        const hostBuild = await invoke<number>("openeralHostBuild").catch(
+          () => 0,
+        );
         if (cancelled || !containerRef.current) return;
 
         const term = new Terminal({
@@ -426,7 +454,12 @@ export function OpenEralTerminal(props: OpenEralTerminalProps) {
           scrollback: 5_000,
           allowProposedApi: true,
           ...(hostBuild > 0
-            ? { windowsPty: { backend: "conpty" as const, buildNumber: hostBuild } }
+            ? {
+                windowsPty: {
+                  backend: "conpty" as const,
+                  buildNumber: hostBuild,
+                },
+              }
             : {}),
           theme: {
             background: "#0a0a0a",
@@ -436,6 +469,14 @@ export function OpenEralTerminal(props: OpenEralTerminalProps) {
           },
         });
         const fit = new FitAddon();
+        // Load Unicode 11 width tables BEFORE any content is written so emoji /
+        // CJK cell widths match what Claude Code's Ink renderer assumes
+        // (string-width / wcwidth v11). xterm defaults to Unicode 6, where most
+        // modern emoji measure as width 1; that mismatch desyncs the cursor and
+        // leaves stray emoji/number glyphs and a garbled banner line at the top.
+        const unicode11 = new Unicode11Addon();
+        term.loadAddon(unicode11);
+        term.unicode.activeVersion = "11";
         term.loadAddon(fit);
         term.open(containerRef.current);
         // Initial fit — may give cols=1 if the browser hasn't committed
@@ -524,8 +565,11 @@ export function OpenEralTerminal(props: OpenEralTerminalProps) {
         // re-bootstrap, no Claude Code relaunch.
         let liveSandbox = false;
         try {
-          const sessionsList = await invoke<Array<{ sandboxName: string }>>("openeralPtyList");
-          liveSandbox = sessionsList.some((s) => s.sandboxName === expectedSandboxName);
+          const sessionsList =
+            await invoke<Array<{ sandboxName: string }>>("openeralPtyList");
+          liveSandbox = sessionsList.some(
+            (s) => s.sandboxName === expectedSandboxName,
+          );
         } catch {
           liveSandbox = false;
         }
@@ -535,10 +579,15 @@ export function OpenEralTerminal(props: OpenEralTerminalProps) {
           // ── Lossless re-attach (two-phase) ───────────────────────────
           // Phase 1: get session id + buffered scrollback. The main process
           // does NOT call attachHandlers here, so no pty-data events fly yet.
-          const attached = await invoke<{ id: string; buffered: string; exited: boolean }>(
-            "openeralPtyAttachOrOpen",
-            { sandboxName: expectedSandboxName, cols: term.cols, rows: term.rows },
-          );
+          const attached = await invoke<{
+            id: string;
+            buffered: string;
+            exited: boolean;
+          }>("openeralPtyAttachOrOpen", {
+            sandboxName: expectedSandboxName,
+            cols: term.cols,
+            rows: term.rows,
+          });
           if (cancelled) return;
           setSandboxName(expectedSandboxName);
           lastKnownSandboxNameRef.current = expectedSandboxName;
@@ -709,7 +758,10 @@ export function OpenEralTerminal(props: OpenEralTerminalProps) {
               <span className="truncate font-mono text-[13px] font-medium text-dls-text">
                 {displayName || sandboxName || expectedSandboxName}
               </span>
-              <Pencil size={11} className="shrink-0 text-dls-secondary opacity-0 transition-opacity group-hover:opacity-100" />
+              <Pencil
+                size={11}
+                className="shrink-0 text-dls-secondary opacity-0 transition-opacity group-hover:opacity-100"
+              />
             </button>
           )}
           <span className="hidden shrink-0 text-[12px] text-dls-secondary sm:inline">
@@ -738,7 +790,9 @@ export function OpenEralTerminal(props: OpenEralTerminalProps) {
                 // Surface failures directly in the terminal so they're not
                 // lost behind a tooltip.
                 try {
-                  termRef.current?.write(`\r\n\x1b[31m[voice] ${message}\x1b[0m\r\n`);
+                  termRef.current?.write(
+                    `\r\n\x1b[31m[voice] ${message}\x1b[0m\r\n`,
+                  );
                 } catch {
                   /* ignore */
                 }
@@ -750,7 +804,11 @@ export function OpenEralTerminal(props: OpenEralTerminalProps) {
             <button
               type="button"
               className={TOOLBAR_BTN}
-              onClick={errorNeedsDelete ? () => void deleteAndReconnect() : handleLaunch}
+              onClick={
+                errorNeedsDelete
+                  ? () => void deleteAndReconnect()
+                  : handleLaunch
+              }
               onMouseDown={(e) => e.preventDefault()}
               title={
                 errorNeedsDelete
@@ -762,7 +820,11 @@ export function OpenEralTerminal(props: OpenEralTerminalProps) {
             >
               <RotateCcw size={16} />
               <span>
-                {errorNeedsDelete ? "Delete & relaunch" : hasEverConnected ? "Reconnect" : "Launch session"}
+                {errorNeedsDelete
+                  ? "Delete & relaunch"
+                  : hasEverConnected
+                    ? "Reconnect"
+                    : "Launch session"}
               </span>
             </button>
           ) : phase !== "connected" ? (
@@ -824,13 +886,20 @@ export function OpenEralTerminal(props: OpenEralTerminalProps) {
                 <button
                   type="button"
                   className="flex w-full items-center gap-2.5 rounded-xl px-3 py-2 text-left text-sm text-gray-11 transition-colors hover:bg-gray-2 disabled:cursor-not-allowed disabled:opacity-50"
-                  disabled={(!sandboxName && !lastKnownSandboxNameRef.current) || popoutBusy}
+                  disabled={
+                    (!sandboxName && !lastKnownSandboxNameRef.current) ||
+                    popoutBusy
+                  }
                   onClick={() => {
                     setMenuOpen(false);
                     void popOut();
                   }}
                 >
-                  {popoutBusy ? <Loader2 size={15} className="animate-spin" /> : <ExternalLink size={15} />}
+                  {popoutBusy ? (
+                    <Loader2 size={15} className="animate-spin" />
+                  ) : (
+                    <ExternalLink size={15} />
+                  )}
                   Open in OS terminal
                 </button>
                 {props.onOpenSettings ? (
@@ -884,10 +953,18 @@ export function OpenEralTerminal(props: OpenEralTerminalProps) {
           ref={containerRef}
           className="absolute inset-0 bg-black"
           onMouseEnter={() => {
-            try { termRef.current?.focus(); } catch { /* ignore */ }
+            try {
+              termRef.current?.focus();
+            } catch {
+              /* ignore */
+            }
           }}
           onClick={() => {
-            try { termRef.current?.focus(); } catch { /* ignore */ }
+            try {
+              termRef.current?.focus();
+            } catch {
+              /* ignore */
+            }
           }}
         />
         {errorMessage && phase === "error" ? (
@@ -900,7 +977,10 @@ export function OpenEralTerminal(props: OpenEralTerminalProps) {
               onOpenSettings={props.onOpenSettings}
             />
           </div>
-        ) : isFreshBootstrap && phase !== "connected" && phase !== "exited" && phase !== "error" ? (
+        ) : isFreshBootstrap &&
+          phase !== "connected" &&
+          phase !== "exited" &&
+          phase !== "error" ? (
           // Only show the 3-step bootstrap overlay during a FIRST-TIME launch.
           // A lossless re-attach (isFreshBootstrap === false) skips it so
           // returning to a workspace is instant with no spinner flash.
@@ -931,10 +1011,8 @@ function TerminalMicButton(props: {
   onError?: (message: string) => void;
   disabled?: boolean;
 }) {
-  const { status, error, modelProgress, modelReady, start, stop } = useVoiceInput(
-    props.onText,
-    props.onError,
-  );
+  const { status, error, modelProgress, modelReady, start, stop } =
+    useVoiceInput(props.onText, props.onError);
   if (status === "unsupported") return null;
 
   const recording = status === "recording";
@@ -947,7 +1025,10 @@ function TerminalMicButton(props: {
   let title = "Dictate into the terminal (on-device voice)";
   if (recording) title = "Stop recording";
   else if (loadingModel)
-    title = pct != null ? `Downloading speech model… ${pct}%` : "Loading speech model…";
+    title =
+      pct != null
+        ? `Downloading speech model… ${pct}%`
+        : "Loading speech model…";
   else if (transcribing) title = "Transcribing…";
   else if (status === "error" && error) title = `${error} — click to try again`;
 
@@ -955,7 +1036,9 @@ function TerminalMicButton(props: {
     <div className="flex items-center gap-1.5">
       {loadingModel ? (
         <span className="whitespace-nowrap text-[11px] tabular-nums text-amber-11">
-          {pct != null ? `Downloading speech model… ${pct}%` : "Loading speech model…"}
+          {pct != null
+            ? `Downloading speech model… ${pct}%`
+            : "Loading speech model…"}
         </span>
       ) : null}
       <button
@@ -1005,19 +1088,31 @@ function BootstrapProgress(props: BootstrapProgressProps) {
     { id: "mounting-terminal", label: "Mounting terminal" },
     { id: "connecting-pty", label: "Opening PTY" },
   ];
-  const phaseOrder: Phase[] = ["starting", "ensuring-sandbox", "mounting-terminal", "connecting-pty", "connected"];
+  const phaseOrder: Phase[] = [
+    "starting",
+    "ensuring-sandbox",
+    "mounting-terminal",
+    "connecting-pty",
+    "connected",
+  ];
   const currentIdx = phaseOrder.indexOf(props.phase);
   return (
     <div className="w-full max-w-lg space-y-4 rounded-2xl border border-dls-border bg-dls-surface p-6">
       <div className="flex items-center gap-3">
         <Loader2 size={18} className="animate-spin text-gray-10" />
-        <div className="text-sm font-medium text-gray-12">Starting OpenEral session</div>
+        <div className="text-sm font-medium text-gray-12">
+          Starting OpenEral session
+        </div>
       </div>
       <div className="space-y-2">
         {steps.map((step) => {
           const stepIdx = phaseOrder.indexOf(step.id);
           const state =
-            stepIdx < currentIdx ? "done" : stepIdx === currentIdx ? "active" : "pending";
+            stepIdx < currentIdx
+              ? "done"
+              : stepIdx === currentIdx
+                ? "active"
+                : "pending";
           return (
             <div key={step.id} className="flex items-center gap-3 text-xs">
               <div
@@ -1029,7 +1124,9 @@ function BootstrapProgress(props: BootstrapProgressProps) {
                       : "bg-gray-6"
                 }`}
               />
-              <span className={state === "pending" ? "text-gray-8" : "text-gray-11"}>
+              <span
+                className={state === "pending" ? "text-gray-8" : "text-gray-11"}
+              >
                 {step.label}
               </span>
             </div>
@@ -1079,9 +1176,12 @@ function BootstrapErrorCard(props: BootstrapErrorCardProps) {
   const sandboxErrorState = /is in error state/i.test(props.message);
   const missingDatabase = /DATABASE_URL is not configured/i.test(props.message);
   // Backend throws "ANTHROPIC_API_KEY is not configured" (not "is required")
-  const missingApiKey = /ANTHROPIC_API_KEY is not configured/i.test(props.message);
+  const missingApiKey = /ANTHROPIC_API_KEY is not configured/i.test(
+    props.message,
+  );
   const openshellUnready = /OpenShell is not ready/i.test(props.message);
-  const gatewayUnresponsive = /gateway is not responding|sandbox list timed out/i.test(props.message);
+  const gatewayUnresponsive =
+    /gateway is not responding|sandbox list timed out/i.test(props.message);
   const credentialIssue = missingDatabase || missingApiKey;
   const needsDeleteAndRecreate = stuckProvisioning || sandboxErrorState;
 
@@ -1092,12 +1192,12 @@ function BootstrapErrorCard(props: BootstrapErrorCardProps) {
     detail =
       "The sandbox has been provisioning for over 90 seconds and hasn't become ready. " +
       "This usually means the OpenShell gateway lost track of the container. " +
-      "Click \"Delete & start fresh\" to remove the stuck sandbox and create a new one.";
+      'Click "Delete & start fresh" to remove the stuck sandbox and create a new one.';
   } else if (sandboxErrorState) {
     title = "Sandbox is in an error state.";
     detail =
       "The sandbox container failed to start or encountered a fatal error during setup. " +
-      "Click \"Delete & start fresh\" to delete the broken sandbox and create a new one.";
+      'Click "Delete & start fresh" to delete the broken sandbox and create a new one.';
   } else if (missingDatabase) {
     title = "DATABASE_URL is not configured.";
     detail =

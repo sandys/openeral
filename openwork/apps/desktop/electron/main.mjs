@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { lookup as dnsLookup } from "node:dns/promises";
 import { existsSync } from "node:fs";
+import https from "node:https";
 import net from "node:net";
 import {
   cp,
@@ -206,7 +207,43 @@ function isReservedIp(ip) {
   return true; // not a valid IP literal — reject
 }
 
-async function assertPublicHttpsUrl(rawUrl) {
+// A DNS lookup that resolves a hostname AND rejects it when any resolved
+// address is reserved — in the SAME call whose result is then used for the
+// actual TCP connection. Passing this as the socket `lookup` for every request
+// (including each redirect hop) means the address that was validated is the
+// exact address connected to. This closes the DNS-rebinding TOCTOU where a
+// host validates as public and then re-resolves to a private/loopback IP for
+// the real fetch: there is no second, unvalidated resolution.
+function pinnedPublicLookup(hostname, options, callback) {
+  const opts = { all: true };
+  if (options && typeof options.family === "number" && options.family !== 0) {
+    opts.family = options.family;
+  }
+  dnsLookup(hostname, opts).then(
+    (addresses) => {
+      if (
+        addresses.length === 0 ||
+        addresses.some((a) => isReservedIp(a.address))
+      ) {
+        callback(
+          new Error(`Blocked request to a non-public host: ${hostname}`),
+        );
+        return;
+      }
+      if (options && options.all) {
+        callback(null, addresses);
+      } else {
+        callback(null, addresses[0].address, addresses[0].family);
+      }
+    },
+    (err) => callback(err),
+  );
+}
+
+// Synchronous pre-checks that need no DNS: scheme, obvious loopback names, and
+// reserved IP literals. Hostname resolution + reserved-range rejection happens
+// at connect time in pinnedPublicLookup (the real security boundary).
+function requirePublicHttpsUrl(rawUrl) {
   let parsed;
   try {
     parsed = new URL(rawUrl);
@@ -220,24 +257,110 @@ async function assertPublicHttpsUrl(rawUrl) {
   if (/^(localhost|.*\.localhost)$/i.test(host)) {
     throw new Error("Blocked request to a loopback host.");
   }
-  // Resolve and reject any address in a reserved range (blocks DNS rebinding).
-  let addresses;
-  if (net.isIP(host)) {
-    addresses = [{ address: host }];
-  } else {
-    try {
-      addresses = await dnsLookup(host, { all: true });
-    } catch {
-      throw new Error(`Could not resolve host: ${host}`);
-    }
-  }
-  if (
-    addresses.length === 0 ||
-    addresses.some((a) => isReservedIp(a.address))
-  ) {
+  if (net.isIP(host) && isReservedIp(host)) {
     throw new Error(`Blocked request to a non-public host: ${host}`);
   }
   return parsed;
+}
+
+const MAIN_FETCH_MAX_REDIRECTS = 5;
+const MAIN_FETCH_MAX_BODY_BYTES = 32 * 1024 * 1024;
+const MAIN_FETCH_TIMEOUT_MS = 30_000;
+
+// SSRF-safe replacement for a bare fetch() in the __fetch IPC handler. Uses
+// node:https with the pinned, validating DNS lookup above so the connection can
+// only reach the vetted public address, and follows redirects MANUALLY so
+// every hop is re-validated (https scheme + resolved address) instead of
+// trusting fetch's automatic redirect following. Returns the same shape the
+// renderer's desktopFetch expects: { status, statusText, headers, body }.
+async function mainProcessFetch(
+  rawUrl,
+  init,
+  redirectsLeft = MAIN_FETCH_MAX_REDIRECTS,
+) {
+  const parsed = requirePublicHttpsUrl(rawUrl);
+  return new Promise((resolve, reject) => {
+    const req = https.request(
+      parsed,
+      {
+        method: init && typeof init.method === "string" ? init.method : "GET",
+        headers:
+          init && init.headers && typeof init.headers === "object"
+            ? init.headers
+            : undefined,
+        lookup: pinnedPublicLookup,
+      },
+      (res) => {
+        const status = res.statusCode ?? 0;
+        const location = res.headers.location;
+        if (
+          [301, 302, 303, 307, 308].includes(status) &&
+          typeof location === "string"
+        ) {
+          res.resume(); // discard the redirect body before following
+          if (redirectsLeft <= 0) {
+            reject(new Error("Too many redirects."));
+            return;
+          }
+          let nextUrl;
+          try {
+            nextUrl = new URL(location, parsed).toString();
+          } catch {
+            reject(new Error("Invalid redirect location."));
+            return;
+          }
+          // 303 downgrades to GET and drops the body; 307/308 preserve both.
+          const nextInit =
+            status === 303 ? { headers: init?.headers, method: "GET" } : init;
+          mainProcessFetch(nextUrl, nextInit, redirectsLeft - 1).then(
+            resolve,
+            reject,
+          );
+          return;
+        }
+        const chunks = [];
+        let total = 0;
+        let aborted = false;
+        res.on("data", (chunk) => {
+          if (aborted) return;
+          total += chunk.length;
+          if (total > MAIN_FETCH_MAX_BODY_BYTES) {
+            aborted = true;
+            req.destroy();
+            reject(new Error("Response body exceeded size limit."));
+            return;
+          }
+          chunks.push(chunk);
+        });
+        res.on("end", () => {
+          if (aborted) return;
+          const headers = [];
+          for (const [key, value] of Object.entries(res.headers)) {
+            if (Array.isArray(value)) {
+              for (const v of value) headers.push([key, String(v)]);
+            } else if (value != null) {
+              headers.push([key, String(value)]);
+            }
+          }
+          resolve({
+            status,
+            statusText: res.statusMessage ?? "",
+            headers,
+            body: Buffer.concat(chunks).toString("utf8"),
+          });
+        });
+        res.on("error", reject);
+      },
+    );
+    req.on("error", reject);
+    req.setTimeout(MAIN_FETCH_TIMEOUT_MS, () => {
+      req.destroy(new Error("Request timed out."));
+    });
+    if (init && typeof init.body === "string") {
+      req.write(init.body);
+    }
+    req.end();
+  });
 }
 
 // Only hand these schemes to the OS handler. Blocks file:/smb:/custom protocol
@@ -1716,24 +1839,12 @@ async function handleDesktopInvoke(event, command, ...args) {
       const url = String(args[0] ?? "").trim();
       const init = args[1] ?? {};
       if (!url) throw new Error("URL is required.");
-      // Enforce the SSRF allowlist in the MAIN process (renderer-side checks in
-      // desktop.ts are only defense-in-depth). Loopback traffic never reaches
-      // here — desktopFetch short-circuits localhost to a direct renderer fetch.
-      await assertPublicHttpsUrl(url);
-      const response = await fetch(url, {
-        method: typeof init.method === "string" ? init.method : undefined,
-        headers:
-          init.headers && typeof init.headers === "object"
-            ? init.headers
-            : undefined,
-        body: typeof init.body === "string" ? init.body : undefined,
-      });
-      return {
-        status: response.status,
-        statusText: response.statusText,
-        headers: Array.from(response.headers.entries()),
-        body: await response.text(),
-      };
+      // SSRF-safe fetch: node:https with a pinned, validating DNS lookup so the
+      // address that passes validation is the exact address connected to (no
+      // DNS-rebinding TOCTOU), and redirects are followed manually so every hop
+      // is re-validated. Loopback traffic never reaches here — desktopFetch
+      // short-circuits localhost to a direct renderer fetch.
+      return await mainProcessFetch(url, init);
     }
     case "__homeDir":
       return os.homedir();
