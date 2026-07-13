@@ -9,7 +9,7 @@ argument-hint: [optional: workspace ID]
 
 # OpenEral Shell
 
-Launch Claude Code inside an OpenShell sandbox, from the published image `ghcr.io/sandys/openeral/sandbox:just-bash`. No local clone or source build required.
+Launch Claude Code inside an OpenShell sandbox, from the published image `ghcr.io/openrind/openeral/sandbox:just-bash`. No local clone or source build required.
 
 ## Instructions
 
@@ -147,7 +147,7 @@ SANDBOX_NAME="${OPENERAL_WORKSPACE_ID:-openeral-claude}"
 
 openshell sandbox create --tty \
   --name "$SANDBOX_NAME" \
-  --from ghcr.io/sandys/openeral/sandbox:just-bash \
+  --from ghcr.io/openrind/openeral/sandbox:just-bash \
   $UPLOAD_ARGS \
   --provider claude --auto-providers \
   -- openeral
@@ -159,7 +159,7 @@ SANDBOX_NAME="${OPENERAL_WORKSPACE_ID:-openeral-openclaw}"
 
 openshell sandbox create --tty \
   --name "$SANDBOX_NAME" \
-  --from ghcr.io/sandys/openeral/sandbox:just-bash \
+  --from ghcr.io/openrind/openeral/sandbox:just-bash \
   $UPLOAD_ARGS \
   --provider openclaw --auto-providers \
   -- openeral

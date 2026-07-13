@@ -16,8 +16,8 @@ This file is for **contributors and developers** who want to modify OpenEral, bu
 ## Clone and build
 
 ```bash
-git clone https://github.com/sandys/openeral.git
-cd openeral/openeral-js
+git clone https://github.com/openrind/openrind-shell.git
+cd openrind-shell/openeral-js
 pnpm install
 pnpm build
 ```
@@ -35,7 +35,7 @@ export ANTHROPIC_API_KEY='sk-ant-...'
 npx openeral
 ```
 
-By default this **pulls the published GHCR image** `ghcr.io/sandys/openeral/sandbox:just-bash`. To use a locally-built image instead, add `--dev`:
+By default this **pulls the published GHCR image** `ghcr.io/openrind/openeral/sandbox:just-bash`. To use a locally-built image instead, add `--dev`:
 
 ```bash
 npx openeral --dev        # uses openeral-sandbox:dev (you must build it first)
@@ -98,7 +98,7 @@ All subcommands accept `--dev`/`-d` to target the local dev image.
 | `OPENERAL_AGENT` | `claude` | Agent to launch: `claude` or `openclaw`. Injected via the `openclaw` provider; not set directly. |
 | `OPENERAL_WORKSPACE_ID` | hostname | Workspace identifier |
 | `OPENERAL_HOME` | `/tmp/openeral-<id>` | Local workspace directory |
-| `OPENERAL_SANDBOX_IMAGE` | `ghcr.io/sandys/openeral/sandbox:just-bash` | Override the production sandbox image |
+| `OPENERAL_SANDBOX_IMAGE` | `ghcr.io/openrind/openeral/sandbox:just-bash` | Override the production sandbox image |
 | `OPENERAL_DEV_IMAGE` | `openeral-sandbox:dev` | Override the dev sandbox image (used with `--dev`/`-d`) |
 
 ---
@@ -205,7 +205,7 @@ tests/                        # End-to-end test scripts
 
 ## Publishing a new image
 
-Images are built and pushed by GitHub Actions on push to the `just-bash` branch (see `.github/workflows/publish-images.yml`). The tag `ghcr.io/sandys/openeral/sandbox:just-bash` always tracks the latest successful build on that branch.
+Images are built and pushed by GitHub Actions on push to the `just-bash` branch (see `.github/workflows/publish-images.yml`). The tag `ghcr.io/openrind/openeral/sandbox:just-bash` always tracks the latest successful build on that branch.
 
 To test before pushing:
 
