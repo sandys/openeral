@@ -61,7 +61,7 @@ const PROFILE_OPTIONS: ProfileOption[] = [
     value: "openeral-claude",
     label: "OpenEral — Claude Code",
     summary:
-      "ghcr.io/sandys/openeral image with Claude Code as the agent. Workspace persists via PostgreSQL. Requires DATABASE_URL configured below.",
+      "ghcr.io/openrind/openeral image with Claude Code as the agent. Workspace persists via PostgreSQL. Requires DATABASE_URL configured below.",
   },
   {
     value: "openeral-openclaw",
@@ -292,7 +292,7 @@ export function SandboxView(props: SandboxViewProps) {
               Picks which agent + image runs inside the OpenShell sandbox. Default workspaces use
               the OpenWork image. OpenEral profiles boot from the published image at{" "}
               <code className="rounded bg-gray-2/40 px-1 py-0.5 text-[11px]">
-                ghcr.io/sandys/openeral/sandbox:just-bash
+                ghcr.io/openrind/openeral/sandbox:just-bash
               </code>{" "}
               and require credentials configured below.
             </div>

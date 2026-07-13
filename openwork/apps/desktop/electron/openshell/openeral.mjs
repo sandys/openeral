@@ -40,7 +40,7 @@ import { getCliInfo } from "./cli.mjs";
 import { getCredential } from "./openeral-credentials.mjs";
 import { DISTRO_NAME, ensureWslKeepalive, wslRun, wslSpawn } from "./wsl.mjs";
 
-const SANDBOX_IMAGE = "ghcr.io/sandys/openeral/sandbox:just-bash";
+const SANDBOX_IMAGE = "ghcr.io/openrind/openeral/sandbox:just-bash";
 const IMAGE_BY_PROFILE = {
   "openeral-claude": SANDBOX_IMAGE,
   "openeral-openclaw": SANDBOX_IMAGE,

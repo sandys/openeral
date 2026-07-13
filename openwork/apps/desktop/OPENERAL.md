@@ -3,8 +3,8 @@
 How to run **Claude Code** (or **OpenClaw**) inside an OpenEral sandbox,
 embedded directly in an OpenWork workspace.
 
-OpenEral (https://github.com/stringcost/openeral) is a pre-built
-OpenShell sandbox image — `ghcr.io/sandys/openeral/sandbox:just-bash` —
+OpenEral (https://github.com/openrind/openrind-shell) is a pre-built
+OpenShell sandbox image — `ghcr.io/openrind/openeral/sandbox:just-bash` —
 that runs Claude Code as a foreground TTY process with a
 PostgreSQL-backed `/home/agent`. OpenWork wraps the install, lifecycle,
 and TTY plumbing so a banker can pick "Claude Code" as their agent and
@@ -93,7 +93,7 @@ session pane shows an embedded terminal with a three-step bootstrap
 indicator:
 
 1. **Pulling image + creating sandbox** — `docker pull
-   ghcr.io/sandys/openeral/sandbox:just-bash` (lazy, only on first use
+   ghcr.io/openrind/openeral/sandbox:just-bash` (lazy, only on first use
    per WSL distro) and `openshell sandbox create --from <image>
    --upload <credentials>:/sandbox/openeral-input --provider claude
    --auto-providers --detach -- openeral`
@@ -155,7 +155,7 @@ actions:
 | | Claude Code (default) | OpenClaw |
 |---|---|---|
 | Profile | `openeral-claude` | `openeral-openclaw` |
-| Image | `ghcr.io/sandys/openeral/sandbox:just-bash` | `ghcr.io/pavitra-programmers/openeral/sandbox:just-bash` |
+| Image | `ghcr.io/openrind/openeral/sandbox:just-bash` | `ghcr.io/openrind/openeral/sandbox:just-bash` |
 | API key delivery | OpenShell provider system or uploaded file | Uploaded file only (OpenClaw's embedded gateway can't resolve provider placeholders) |
 | StringCost cost tracking | Supported via `STRINGCOST_API_KEY` | Supported via `STRINGCOST_API_KEY` |
 | First-run latency | ~30s (image pull + sandbox create) | ~3 min (additional npm-package staging — pre-baked in newer images) |
@@ -274,4 +274,4 @@ Once inside the sandbox, OpenEral's `setup.sh` reads the files from
 
 For deeper details on OpenEral itself (StringCost integration, custom
 images, the openeral-bash daemon's protocol), see the upstream README
-at https://github.com/stringcost/openeral.
+at https://github.com/openrind/openrind-shell.

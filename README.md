@@ -3,7 +3,7 @@
 Run Claude Code inside an isolated OpenShell sandbox using the published image:
 
 ```text
-ghcr.io/sandys/openeral/sandbox:just-bash
+ghcr.io/openrind/openeral/sandbox:just-bash
 ```
 
 No local source checkout or JavaScript toolchain is required for the normal user flow. Contributor workflows live in [BUILD.md](./BUILD.md).
@@ -47,7 +47,7 @@ chmod 600 /tmp/openeral-db-url
 openshell gateway start
 
 openshell sandbox create --tty \
-  --from ghcr.io/sandys/openeral/sandbox:just-bash \
+  --from ghcr.io/openrind/openeral/sandbox:just-bash \
   --upload /tmp/openeral-db-url:/sandbox/db-url \
   --provider claude --auto-providers \
   -- openeral
@@ -101,7 +101,7 @@ openshell provider create --name stringcost --type generic \
     --credential "STRINGCOST_API_KEY=$STRINGCOST_API_KEY"
 
 openshell sandbox create --tty \
-  --from ghcr.io/sandys/openeral/sandbox:just-bash \
+  --from ghcr.io/openrind/openeral/sandbox:just-bash \
   --upload "$OPENERAL_INPUT:/sandbox/openeral-input" \
   --provider claude --auto-providers \
   -- openeral
@@ -141,7 +141,7 @@ chmod -R go-rwx "$OPENERAL_INPUT"
 openshell gateway start
 
 openshell sandbox create --tty --name openeral-openclaw \
-  --from ghcr.io/sandys/openeral/sandbox:just-bash \
+  --from ghcr.io/openrind/openeral/sandbox:just-bash \
   --upload "$OPENERAL_INPUT:/sandbox/openeral-input" \
   --provider openclaw --auto-providers \
   -- openeral
@@ -191,7 +191,7 @@ openshell provider create --name openclaw --type generic \
     --credential "OPENERAL_AGENT=openclaw"
 
 openshell sandbox create --tty --name openeral-openclaw-stringcost \
-  --from ghcr.io/sandys/openeral/sandbox:just-bash \
+  --from ghcr.io/openrind/openeral/sandbox:just-bash \
   --upload "$OPENERAL_INPUT:/sandbox/openeral-input" \
   --provider openclaw --auto-providers \
   -- openeral

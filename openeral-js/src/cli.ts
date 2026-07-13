@@ -26,7 +26,7 @@
  *
  * Optional env:
  *   OPENERAL_WORKSPACE_ID   Workspace ID (default: openeral-claude, normalized to lowercase)
- *   OPENERAL_SANDBOX_IMAGE  Override sandbox image (default: ghcr.io/sandys/openeral/sandbox:just-bash)
+ *   OPENERAL_SANDBOX_IMAGE  Override sandbox image (default: ghcr.io/openrind/openeral/sandbox:just-bash)
  *   OPENERAL_DEV_IMAGE      Override dev sandbox image (default: openeral-sandbox:dev, used with --dev)
  *
  * Features:
@@ -277,7 +277,7 @@ Required env:
 
 Optional env:
   OPENERAL_WORKSPACE_ID    Default workspace ID (will be normalized to lowercase)
-  OPENERAL_SANDBOX_IMAGE   Override prod sandbox image (default: ghcr.io/sandys/openeral/sandbox:just-bash)
+  OPENERAL_SANDBOX_IMAGE   Override prod sandbox image (default: ghcr.io/openrind/openeral/sandbox:just-bash)
   OPENERAL_DEV_IMAGE       Override dev sandbox image (default: openeral-sandbox:dev, used with --dev/-d)
   OPENERAL_AUTO_FIX_TLS    Set to 1 to suppress the TLS regeneration confirmation delay
 
@@ -1184,7 +1184,7 @@ async function cmdPresignRenew(): Promise<void> {
 async function launchViaSandbox(workspaceId: string, claudeArgs: string[], devMode = false, agent: AgentKind = 'claude'): Promise<void> {
   const sandboxImage = devMode
     ? (process.env.OPENERAL_DEV_IMAGE ?? 'openeral-sandbox:dev')
-    : (process.env.OPENERAL_SANDBOX_IMAGE ?? 'ghcr.io/sandys/openeral/sandbox:just-bash');
+    : (process.env.OPENERAL_SANDBOX_IMAGE ?? 'ghcr.io/openrind/openeral/sandbox:just-bash');
 
   // Check if openshell is installed
   const checkResult = spawnSync('openshell', ['--version'], { stdio: 'pipe' });

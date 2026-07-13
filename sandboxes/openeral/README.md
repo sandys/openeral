@@ -5,7 +5,7 @@ This directory contains the OpenShell sandbox image used by the end-user command
 Published image:
 
 ```text
-ghcr.io/sandys/openeral/sandbox:just-bash
+ghcr.io/openrind/openeral/sandbox:just-bash
 ```
 
 ## Build Locally
@@ -20,7 +20,7 @@ docker build -f sandboxes/openeral/Dockerfile -t openeral-sandbox:local .
 openshell gateway start
 
 openshell sandbox create --tty \
-  --from ghcr.io/sandys/openeral/sandbox:just-bash \
+  --from ghcr.io/openrind/openeral/sandbox:just-bash \
   --provider claude --auto-providers \
   -- openeral
 ```
@@ -34,7 +34,7 @@ printf '%s' "$DATABASE_URL" > /tmp/openeral-db-url
 chmod 600 /tmp/openeral-db-url
 
 openshell sandbox create --tty \
-  --from ghcr.io/sandys/openeral/sandbox:just-bash \
+  --from ghcr.io/openrind/openeral/sandbox:just-bash \
   --upload /tmp/openeral-db-url:/sandbox/db-url \
   --provider claude --auto-providers \
   -- openeral

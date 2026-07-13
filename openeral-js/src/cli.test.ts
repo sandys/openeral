@@ -102,7 +102,7 @@ describe('openeral-shell skill shape', () => {
   const skill = readFileSync(skillPath, 'utf8');
 
   it('launches from the published GHCR image, not a local build', () => {
-    expect(skill).toContain('ghcr.io/sandys/openeral/sandbox:just-bash');
+    expect(skill).toContain('ghcr.io/openrind/openeral/sandbox:just-bash');
     // No `docker build` or local-image references in the main flow
     expect(skill).not.toMatch(/--dev\b/);
     expect(skill).not.toMatch(/openeral-sandbox:dev/);

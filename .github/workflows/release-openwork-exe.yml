@@ -5,8 +5,8 @@ name: Release OpenWork Windows EXE
 #
 # The release step deliberately does NOT hardcode an owner/repo, so the
 # installer is attached to whatever repo the workflow runs in. On merge into
-# `just-bash` of stringcost/openeral that means the release lands on
-# stringcost/openeral.
+# `just-bash` of openrind/openrind-shell that means the release lands on
+# openrind/openrind-shell.
 #
 # Trigger: push to `just-bash` (i.e. a merged PR) that touches the openwork
 # desktop sources or this workflow. There is no scheduled or external trigger,

@@ -10,7 +10,7 @@ export type SandboxBackend = "none" | "docker" | "microsandbox" | "openshell";
  * Sandbox profile — picks the launch protocol when SandboxBackend is
  * "openshell". "openwork" is the default OpenCode-based flow we ship;
  * "openeral-claude" / "openeral-openclaw" boot from the published
- * OpenEral image (ghcr.io/sandys/openeral/sandbox:just-bash) with the
+ * OpenEral image (ghcr.io/openrind/openeral/sandbox:just-bash) with the
  * named agent.
  */
 export type SandboxProfile = "openwork" | "openeral-claude" | "openeral-openclaw";

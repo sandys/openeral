@@ -72,18 +72,18 @@ const credentials =
 
 // ── Pure helpers ───────────────────────────────────────────────────────
 
-test("imageForProfile: maps claude profile to sandys image", () => {
+test("imageForProfile: maps claude profile to openrind image", () => {
   assert.equal(
     openeral.imageForProfile("openeral-claude"),
-    "ghcr.io/sandys/openeral/sandbox:just-bash",
+    "ghcr.io/openrind/openeral/sandbox:just-bash",
   );
 });
 
-test("imageForProfile: maps openclaw profile to sandys image (same as claude)", () => {
+test("imageForProfile: maps openclaw profile to openrind image (same as claude)", () => {
   // openeral README: same image, only --provider differs.
   assert.equal(
     openeral.imageForProfile("openeral-openclaw"),
-    "ghcr.io/sandys/openeral/sandbox:just-bash",
+    "ghcr.io/openrind/openeral/sandbox:just-bash",
   );
 });
 
@@ -436,7 +436,7 @@ test("createOpenEralSandbox: claude profile builds canonical openeral argv", asy
     skipImagePull: true,
   });
   assert.equal(result.existed, false);
-  assert.equal(result.imageRef, "ghcr.io/sandys/openeral/sandbox:just-bash");
+  assert.equal(result.imageRef, "ghcr.io/openrind/openeral/sandbox:just-bash");
 
   const lines = readArgsLog();
 
@@ -482,7 +482,7 @@ test("createOpenEralSandbox: claude profile builds canonical openeral argv", asy
   assert.match(createLine, /--name 'openeral-new'/);
   assert.match(
     createLine,
-    /--from 'ghcr\.io\/sandys\/openeral\/sandbox:just-bash'/,
+    /--from 'ghcr\.io\/openrind\/openeral\/sandbox:just-bash'/,
   );
   assert.match(
     createLine,
