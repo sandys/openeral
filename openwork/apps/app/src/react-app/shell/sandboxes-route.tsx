@@ -87,7 +87,10 @@ export function SandboxesRoute() {
     setListError(null);
     try {
       const [list, status] = await Promise.all([
-        invoke<SandboxRow[]>("openeralListSandboxes").catch(() => invoke<SandboxRow[]>("openeralListSessions")),
+        // No openeralListSessions fallback: that handler returns PTY session
+        // records (a different shape) and rendered as blank rows. A list
+        // failure now surfaces as listError with the Refresh retry.
+        invoke<SandboxRow[]>("openeralListSandboxes"),
         invoke<CredentialStatus>("openeralCredentialStatus").catch(() => null),
       ]);
       setRows(Array.isArray(list) ? list : []);

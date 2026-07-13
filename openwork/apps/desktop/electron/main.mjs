@@ -2311,7 +2311,9 @@ async function handleDesktopInvoke(event, command, ...args) {
       // the openeral- prefix — the sandboxes OpenWork created. Uses the text
       // parser in openeral.mjs because CLI 0.0.45 rejects `sandbox list --json`,
       // which left openshellClient.listSandboxes() (and this handler) empty.
-      const list = await openeral.listSandboxes().catch(() => []);
+      // Failures PROPAGATE to the renderer so a cold gateway at boot reads as
+      // "still loading, retry" rather than "no sandboxes exist".
+      const list = await openeral.listSandboxes();
       return Array.isArray(list)
         ? list.filter(
             (s) =>

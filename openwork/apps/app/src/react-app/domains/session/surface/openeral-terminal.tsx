@@ -762,16 +762,6 @@ export function OpenEralTerminal(props: OpenEralTerminalProps) {
           as ONE consistent header instead of two stacked ones. */}
       <div className="z-10 flex h-12 shrink-0 items-center justify-between gap-3 border-b border-dls-border bg-dls-surface px-4 md:px-6">
         <div className="flex min-w-0 items-center gap-2.5">
-          <span
-            className={`inline-block h-2 w-2 shrink-0 rounded-full ${
-              phase === "connected"
-                ? "bg-green-9"
-                : phase === "exited" || phase === "error"
-                  ? "bg-red-9"
-                  : "bg-amber-9"
-            }`}
-            title={phaseLabel(phase)}
-          />
           {isRenaming ? (
             <input
               autoFocus
@@ -806,7 +796,15 @@ export function OpenEralTerminal(props: OpenEralTerminalProps) {
               />
             </button>
           )}
-          <span className="hidden shrink-0 text-[13px] text-dls-secondary sm:inline">
+          <span
+            className={`inline-flex shrink-0 items-center rounded-full border px-2.5 py-0.5 text-[11px] font-medium ${
+              phase === "connected"
+                ? "border-green-7/60 bg-green-3/30 text-green-11"
+                : phase === "exited" || phase === "error"
+                  ? "border-red-7/50 bg-red-2/30 text-red-11"
+                  : "border-amber-7/50 bg-amber-2/30 text-amber-11"
+            }`}
+          >
             {phaseLabel(phase)}
           </span>
         </div>

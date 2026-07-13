@@ -29,6 +29,7 @@ import { DebugView } from "../domains/settings/pages/debug-view";
 import { DenView } from "../domains/settings/pages/den-view";
 import { EnvironmentView } from "../domains/settings/pages/environment-view";
 import { OpenEralCredentialsPanel } from "../domains/settings/pages/openeral-credentials-panel";
+import { SandboxSessionList } from "../domains/session/sidebar/sandbox-session-list";
 import { ExtensionsView } from "../domains/settings/pages/extensions-view";
 import { McpView } from "../domains/settings/pages/mcp-view";
 import { RecoveryView } from "../domains/settings/pages/recovery-view";
@@ -1385,6 +1386,22 @@ export function SettingsRoute() {
         headerStatus={routeOpenworkStatus}
         busyHint={loading ? t("session.loading_detail") : busyLabel}
         workspaceSessionListProps={{
+          // Same sandbox section as the session sidebar. Picking a
+          // sandbox hands off to the session route (the same
+          // location.state mechanism the /sandboxes manager uses), which
+          // mounts its terminal with the entry selected.
+          beforeFooter: (
+            <SandboxSessionList
+              selectedSandboxName={null}
+              onSelectSandbox={(name, profile) =>
+                navigate("/session", {
+                  state: { openeralSandbox: { name, profile } },
+                })
+              }
+              onOpenManager={() => navigate("/sandboxes")}
+              onOpenSettings={() => navigate("/settings/sandbox")}
+            />
+          ),
           workspaceSessionGroups,
           selectedWorkspaceId,
           developerMode,

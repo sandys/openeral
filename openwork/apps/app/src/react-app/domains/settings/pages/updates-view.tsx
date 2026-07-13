@@ -110,17 +110,13 @@ export function UpdatesView(props: UpdatesViewProps) {
                 <div className="text-sm text-gray-12">{t("settings.background_checks_title")}</div>
                 <div className="text-xs text-gray-7">{t("settings.background_checks_desc")}</div>
               </div>
-              <button
-                type="button"
-                className={`min-w-[70px] rounded-full border px-4 py-1.5 text-xs font-medium shadow-[inset_0_1px_0_rgba(255,255,255,0.5)] transition-colors ${
-                  props.updateAutoCheck
-                    ? "border-gray-6/30 bg-gray-12/12 text-gray-12"
-                    : "border-gray-6/60 bg-gray-1/70 text-gray-10 hover:bg-gray-2/70 hover:text-gray-12"
-                }`}
+              <Button
+                variant="outline"
+                className="h-9 min-w-[70px] rounded-full border-gray-6/60 bg-gray-1/70 px-4 py-0 text-xs hover:bg-gray-2/70"
                 onClick={props.toggleUpdateAutoCheck}
               >
                 {props.updateAutoCheck ? t("settings.on") : t("settings.off")}
-              </button>
+              </Button>
             </div>
 
             <div className="flex items-center justify-between rounded-xl border border-gray-6 bg-gray-1 p-3">
@@ -128,17 +124,13 @@ export function UpdatesView(props: UpdatesViewProps) {
                 <div className="text-sm text-gray-12">{t("settings.auto_update_title")}</div>
                 <div className="text-xs text-gray-7">{t("settings.auto_update_desc")}</div>
               </div>
-              <button
-                type="button"
-                className={`min-w-[70px] rounded-full border px-4 py-1.5 text-xs font-medium shadow-[inset_0_1px_0_rgba(255,255,255,0.5)] transition-colors ${
-                  props.updateAutoDownload
-                    ? "border-gray-6/30 bg-gray-12/12 text-gray-12"
-                    : "border-gray-6/60 bg-gray-1/70 text-gray-10 hover:bg-gray-2/70 hover:text-gray-12"
-                }`}
+              <Button
+                variant="outline"
+                className="h-9 min-w-[70px] rounded-full border-gray-6/60 bg-gray-1/70 px-4 py-0 text-xs hover:bg-gray-2/70"
                 onClick={props.toggleUpdateAutoDownload}
               >
                 {props.updateAutoDownload ? t("settings.on") : t("settings.off")}
-              </button>
+              </Button>
             </div>
 
             <div className="space-y-3 rounded-xl border border-gray-6 bg-gray-1 p-3">

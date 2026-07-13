@@ -96,10 +96,10 @@ export function SandboxSessionList(props: SandboxSessionListProps) {
     };
   }, [anyMenuOpen]);
 
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(async (): Promise<boolean> => {
     const currentBridge = getBridge();
-    if (!currentBridge?.invokeDesktop) return;
-    if (refreshInFlightRef.current) return;
+    if (!currentBridge?.invokeDesktop) return false;
+    if (refreshInFlightRef.current) return true;
     refreshInFlightRef.current = true;
     try {
       const list = (await currentBridge.invokeDesktop(
@@ -114,16 +114,31 @@ export function SandboxSessionList(props: SandboxSessionListProps) {
           ),
         );
       }
+      setLoaded(true);
+      return true;
     } catch {
+      return false;
     } finally {
       refreshInFlightRef.current = false;
-      setLoaded(true);
     }
   }, []);
 
   useEffect(() => {
     if (!bridge) return;
-    void refresh();
+    let cancelled = false;
+    let retryTimer: number | null = null;
+    const retryDelays = [2_000, 4_000, 8_000, 15_000, 30_000];
+    let attempt = 0;
+    const kick = async () => {
+      const ok = await refresh();
+      if (cancelled || ok) return;
+      if (attempt < retryDelays.length) {
+        const delay = retryDelays[attempt];
+        attempt += 1;
+        retryTimer = window.setTimeout(() => void kick(), delay);
+      }
+    };
+    void kick();
     let debounce: number | null = null;
     const unsubscribe = bridge.openeral?.onSessionProgress?.(() => {
       if (debounce !== null) window.clearTimeout(debounce);
@@ -134,6 +149,8 @@ export function SandboxSessionList(props: SandboxSessionListProps) {
     });
     const interval = window.setInterval(() => void refresh(), 60_000);
     return () => {
+      cancelled = true;
+      if (retryTimer !== null) window.clearTimeout(retryTimer);
       unsubscribe?.();
       if (debounce !== null) window.clearTimeout(debounce);
       window.clearInterval(interval);

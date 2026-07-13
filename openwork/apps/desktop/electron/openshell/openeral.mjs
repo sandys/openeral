@@ -266,23 +266,28 @@ function parseListTextPhase(stdout, sandboxName) {
  * @returns {Promise<Array<{ name: string, created: string, phase: string }>>}
  */
 export async function listSandboxes() {
-  let r;
-  try {
-    r = await wslRun(
-      [
-        "-d",
-        DISTRO_NAME,
-        "--",
-        "bash",
-        "-c",
-        "timeout 15 openshell sandbox list",
-      ],
-      { timeout: 25_000 },
+  // THROWS on spawn failure / non-zero exit instead of returning [] — the
+  // callers (sidebar section, manager) must be able to tell "the gateway is
+  // still coming up" (retry with backoff) from "there really are no
+  // sandboxes" (show the empty state). At app boot the first list reliably
+  // fails while the WSL VM + gateway start, and swallowing that error left
+  // the sidebar claiming no sandboxes existed for up to a minute.
+  const r = await wslRun(
+    [
+      "-d",
+      DISTRO_NAME,
+      "--",
+      "bash",
+      "-c",
+      "timeout 15 openshell sandbox list",
+    ],
+    { timeout: 25_000 },
+  );
+  if (r.exitCode !== 0) {
+    throw new Error(
+      `openshell sandbox list failed (exit ${r.exitCode}): ${(r.stderr || r.stdout).trim().slice(0, 300) || "(no output)"}`,
     );
-  } catch {
-    return [];
   }
-  if (r.exitCode !== 0) return [];
   // Strip ANSI colour/style codes, then parse by the header's column offsets.
   const clean = r.stdout.replace(/\x1b\[[0-9;]*[A-Za-z]/g, "");
   const lines = clean.split(/\r?\n/);
