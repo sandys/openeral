@@ -1,0 +1,18 @@
+[package]
+name = "openrind-shell"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "openrind-shell"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+openrind-shell-core = { path = "../openrind-shell-core" }
+tokio = { version = "1", features = ["full"] }
+clap = { version = "4", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

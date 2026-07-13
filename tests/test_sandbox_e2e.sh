@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# test_sandbox_e2e.sh — Docker-based image verification for the openeral sandbox.
+# test_sandbox_e2e.sh — Docker-based image verification for the openrind-shell sandbox.
 #
 # Builds the image, runs individual checks inside it as the sandbox user.
 # Validates image shape, permissions, npm config, migrations, and daemon.
@@ -18,7 +18,7 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$repo_root"
 
-IMAGE="${OPENERAL_E2E_IMAGE:-openeral-e2e:local}"
+IMAGE="${OPENRIND_SHELL_E2E_IMAGE:-openrind-shell-e2e:local}"
 DB_URL="${DATABASE_URL:?DATABASE_URL required}"
 PASSED=0
 FAILED=0
@@ -46,7 +46,7 @@ run_in_image_root() {
 
 echo ""
 echo "=== Building image ==="
-docker build -f sandboxes/openeral/Dockerfile -t "$IMAGE" . 2>&1 | tail -3
+docker build -f sandboxes/openrind-shell/Dockerfile -t "$IMAGE" . 2>&1 | tail -3
 
 echo ""
 echo "=== Test 1: /home/agent ownership ==="
@@ -67,34 +67,34 @@ else
 fi
 
 echo ""
-echo "=== Test 3: openeral-npmrc written to /tmp when SOCKET_TOKEN is set ==="
+echo "=== Test 3: openrind-shell-npmrc written to /tmp when SOCKET_TOKEN is set ==="
 out=$(run_in_image '
-  OPENERAL_NPMRC=/tmp/openeral-npmrc
-  rm -f "$OPENERAL_NPMRC"
-  cat > "$OPENERAL_NPMRC" <<NPMRC
+  OPENRIND_SHELL_NPMRC=/tmp/openrind-shell-npmrc
+  rm -f "$OPENRIND_SHELL_NPMRC"
+  cat > "$OPENRIND_SHELL_NPMRC" <<NPMRC
 registry=https://registry.socket.dev/npm/
 //registry.socket.dev/npm/:_authToken=${SOCKET_TOKEN}
 NPMRC
-  cat "$OPENERAL_NPMRC"
+  cat "$OPENRIND_SHELL_NPMRC"
 ')
 if echo "$out" | grep -q 'registry.socket.dev'; then
-  pass "openeral-npmrc contains registry.socket.dev"
+  pass "openrind-shell-npmrc contains registry.socket.dev"
 else
-  fail "openeral-npmrc missing registry.socket.dev: $out"
+  fail "openrind-shell-npmrc missing registry.socket.dev: $out"
 fi
 if echo "$out" | grep -q '_authToken=placeholder-for-test'; then
-  pass "openeral-npmrc contains SOCKET_TOKEN placeholder"
+  pass "openrind-shell-npmrc contains SOCKET_TOKEN placeholder"
 else
-  fail "openeral-npmrc missing token: $out"
+  fail "openrind-shell-npmrc missing token: $out"
 fi
 
 echo ""
 echo "=== Test 4: npm reads registry via NPM_CONFIG_USERCONFIG ==="
 out=$(run_in_image '
-  cat > /tmp/openeral-npmrc <<NPMRC
+  cat > /tmp/openrind-shell-npmrc <<NPMRC
 registry=https://registry.socket.dev/npm/
 NPMRC
-  NPM_CONFIG_USERCONFIG=/tmp/openeral-npmrc npm config get registry 2>/dev/null || echo "npm-config-failed"
+  NPM_CONFIG_USERCONFIG=/tmp/openrind-shell-npmrc npm config get registry 2>/dev/null || echo "npm-config-failed"
 ')
 if echo "$out" | grep -q 'registry.socket.dev'; then
   pass "npm config reads Socket.dev registry"
@@ -106,8 +106,8 @@ echo ""
 echo "=== Test 5: Migrations against live PostgreSQL ==="
 out=$(run_in_image '
   node -e "
-    import(\"/opt/openeral/dist/db/pool.js\").then(async({createPool})=>{
-      const{runMigrations}=await import(\"/opt/openeral/dist/db/migrations.js\");
+    import(\"/opt/openrind-shell/dist/db/pool.js\").then(async({createPool})=>{
+      const{runMigrations}=await import(\"/opt/openrind-shell/dist/db/migrations.js\");
       const p=createPool(process.env.DATABASE_URL);
       await runMigrations(p);await p.end();console.log(\"migrations-ok\");
     }).catch(e=>{console.error(e.message);process.exit(1)});
@@ -120,20 +120,20 @@ else
 fi
 
 echo ""
-echo "=== Test 6: openeral-bash daemon starts ==="
+echo "=== Test 6: openrind-shell-bash daemon starts ==="
 out=$(timeout 30 docker run --rm --network host \
   -e DATABASE_URL="$DB_URL" \
   -e WORKSPACE_ID="e2e-sandbox-$$" \
   --user sandbox \
   --entrypoint /bin/sh \
   "$IMAGE" -c '
-    node /opt/openeral/openeral-bash.mjs --daemon &
+    node /opt/openrind-shell/openrind-shell-bash.mjs --daemon &
     DPID=$!
-    for i in $(seq 1 30); do [ -S /tmp/openeral-bash.sock ] && break; sleep 0.1; done
-    if [ -S /tmp/openeral-bash.sock ]; then
+    for i in $(seq 1 30); do [ -S /tmp/openrind-shell-bash.sock ] && break; sleep 0.1; done
+    if [ -S /tmp/openrind-shell-bash.sock ]; then
       echo "daemon-ok"
       node -e "
-        const net=require(\"net\"),c=net.createConnection(\"/tmp/openeral-bash.sock\");
+        const net=require(\"net\"),c=net.createConnection(\"/tmp/openrind-shell-bash.sock\");
         let d=\"\";
         c.on(\"connect\",()=>c.write(JSON.stringify({command:\"echo hello-e2e\"})+\"\n\"));
         c.on(\"data\",chunk=>d+=chunk);
@@ -172,8 +172,8 @@ fi
 echo ""
 echo "=== Test 8: dist/ and node_modules/ present ==="
 out=$(run_in_image '
-  [ -d /opt/openeral/dist ] && echo "dist-ok" || echo "dist-missing"
-  [ -d /opt/openeral/node_modules ] && echo "nm-ok" || echo "nm-missing"
+  [ -d /opt/openrind-shell/dist ] && echo "dist-ok" || echo "dist-missing"
+  [ -d /opt/openrind-shell/node_modules ] && echo "nm-ok" || echo "nm-missing"
 ')
 if echo "$out" | grep -q 'dist-ok' && echo "$out" | grep -q 'nm-ok'; then
   pass "dist/ and node_modules/ present in image"
@@ -186,11 +186,11 @@ echo "=== Test 9: user .npmrc is never touched ==="
 out=$(run_in_image '
   # Create a user .npmrc
   echo "user-config=true" > /home/agent/.npmrc
-  # Simulate openeral Socket.dev config (writes to /tmp, not /home/agent)
-  OPENERAL_NPMRC=/tmp/openeral-npmrc
-  rm -f "$OPENERAL_NPMRC"
+  # Simulate openrind-shell Socket.dev config (writes to /tmp, not /home/agent)
+  OPENRIND_SHELL_NPMRC=/tmp/openrind-shell-npmrc
+  rm -f "$OPENRIND_SHELL_NPMRC"
   if [ -n "${SOCKET_TOKEN:-}" ]; then
-    cat > "$OPENERAL_NPMRC" <<NPMRC
+    cat > "$OPENRIND_SHELL_NPMRC" <<NPMRC
 registry=https://registry.socket.dev/npm/
 NPMRC
   fi
@@ -231,8 +231,8 @@ fi
 node -e "
   import('pg').then(async({default:pg})=>{
     const pool=new pg.Pool({connectionString:process.env.DATABASE_URL});
-    await pool.query('DELETE FROM _openeral.workspace_files WHERE workspace_id=\$1',['e2e-sandbox-$$']);
-    await pool.query('DELETE FROM _openeral.workspace_config WHERE id=\$1',['e2e-sandbox-$$']);
+    await pool.query('DELETE FROM _openrind.workspace_files WHERE workspace_id=\$1',['e2e-sandbox-$$']);
+    await pool.query('DELETE FROM _openrind.workspace_config WHERE id=\$1',['e2e-sandbox-$$']);
     await pool.end();
   }).catch(()=>{});
 " 2>/dev/null || true

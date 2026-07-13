@@ -33,18 +33,18 @@ unresponsive to keyboard input.
 # gateway process only. Passing it to the TUI/client process causes openclaw
 # to run its own plugin staging loop on startup, which saturates the Node.js
 # event loop and makes the terminal completely unresponsive to keyboard input.
-exec env -u STRINGCOST_API_KEY -u ANTHROPIC_AUTH_TOKEN -u ANTHROPIC_API_KEY \
+exec env -u OPENRIND_GATEWAY_API_KEY -u ANTHROPIC_AUTH_TOKEN -u ANTHROPIC_API_KEY \
   -u OPENCLAW_PLUGIN_STAGE_DIR \
   HOME=/home/agent \
-  SHELL=/usr/local/bin/openeral-bash \
+  SHELL=/usr/local/bin/openrind-shell-bash \
   PATH="$PATH" \
   openclaw "$@"
 ```
 
 ### 2. **Reconnect HOME Mismatch** (fixed in commit 177b9b3)
 
-The `HOME=/home/agent` bashrc patch was inside the StringCost `if`-block, so sandboxes
-without StringCost never got it. On reconnect (`openshell sandbox connect`), openclaw
+The `HOME=/home/agent` bashrc patch was inside the OpenrindGateway `if`-block, so sandboxes
+without OpenrindGateway never got it. On reconnect (`openshell sandbox connect`), openclaw
 could not find its config or gateway auth token because `HOME` pointed at `/sandbox`
 instead of `/home/agent`.
 
@@ -53,8 +53,8 @@ instead of `/home/agent`.
 # Always patch the connect shell's .bashrc so reconnect sessions use the correct HOME
 if [ "$SANDBOX_USER_HOME" != "/home/agent" ] && [ -n "$SANDBOX_USER_HOME" ]; then
   CONNECT_BASHRC="$SANDBOX_USER_HOME/.bashrc"
-  if ! grep -q 'openeral-connect' "$CONNECT_BASHRC" 2>/dev/null; then
-    printf '\n# openeral-connect: set agent HOME for sandbox connect sessions\nexport HOME=/home/agent\n[ -f /home/agent/.openeral/env.sh ] && . /home/agent/.openeral/env.sh\n' \
+  if ! grep -q 'openrind-shell-connect' "$CONNECT_BASHRC" 2>/dev/null; then
+    printf '\n# openrind-shell-connect: set agent HOME for sandbox connect sessions\nexport HOME=/home/agent\n[ -f /home/agent/.openrind-shell/env.sh ] && . /home/agent/.openrind-shell/env.sh\n' \
       >> "$CONNECT_BASHRC"
   fi
 fi
@@ -74,14 +74,14 @@ case "${ANTHROPIC_API_KEY:-}" in
   ''|openshell:resolve:env:*) ;;          # empty OR placeholder — not usable
   *) _openclaw_key_ok=true ;;
 esac
-if [ -z "${STRINGCOST_PROXY_URL:-}" ] && [ "$_openclaw_key_ok" = "false" ]; then
+if [ -z "${OPENRIND_GATEWAY_PROXY_URL:-}" ] && [ "$_openclaw_key_ok" = "false" ]; then
   echo "setup.sh: WARNING: OpenClaw has no usable API credentials." >&2
   echo "setup.sh:   ANTHROPIC_API_KEY is missing or is an OpenShell placeholder that" >&2
   echo "setup.sh:   OpenClaw's gateway cannot resolve. Responses will hang." >&2
   echo "setup.sh:   Fix A — upload a real key file before creating the sandbox:" >&2
   echo "setup.sh:     echo 'sk-ant-...' > /tmp/anthropic-api-key" >&2
   echo "setup.sh:     openshell sandbox create --upload /tmp/anthropic-api-key:/sandbox/anthropic-api-key ..." >&2
-  echo "setup.sh:   Fix B — set STRINGCOST_API_KEY so setup.sh can create a presign automatically." >&2
+  echo "setup.sh:   Fix B — set OPENRIND_GATEWAY_API_KEY so setup.sh can create a presign automatically." >&2
 fi
 ```
 
@@ -104,13 +104,13 @@ if (!config.gateway.handshakeTimeoutMs) config.gateway.handshakeTimeoutMs = 3000
 If the gateway is slow to respond or the WebSocket connection is unstable, messages
 can timeout silently.
 
-### 5. **StringCost Proxy Misconfiguration**
+### 5. **OpenrindGateway Proxy Misconfiguration**
 
-If `STRINGCOST_PROXY_URL` is set but the token has expired or the network is
+If `OPENRIND_GATEWAY_PROXY_URL` is set but the token has expired or the network is
 unreachable, API calls fail silently:
 - The proxy URL might be malformed
 - The presign token might be expired
-- Network connectivity to StringCost might be blocked
+- Network connectivity to OpenrindGateway might be blocked
 
 ## Diagnostic Steps
 
@@ -136,8 +136,8 @@ echo "ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-NOT SET}"
 # A placeholder looks like: openshell:resolve:env:ANTHROPIC_API_KEY
 # OpenClaw's gateway cannot use placeholders — only real sk-ant-... values work
 
-# Check StringCost proxy
-echo "STRINGCOST_PROXY_URL: ${STRINGCOST_PROXY_URL:-NOT SET}"
+# Check OpenrindGateway proxy
+echo "OPENRIND_GATEWAY_PROXY_URL: ${OPENRIND_GATEWAY_PROXY_URL:-NOT SET}"
 
 # Check what credentials OpenClaw is actually using
 cat ~/.openclaw/openclaw.json | grep -A 5 '"env"'
@@ -157,7 +157,7 @@ curl -v http://127.0.0.1:18789/readyz
 ### Step 4: Test API Connectivity
 
 ```bash
-# Test if the API key works (if not using StringCost)
+# Test if the API key works (if not using OpenrindGateway)
 curl -X POST https://api.anthropic.com/v1/messages \
   -H "x-api-key: $ANTHROPIC_API_KEY" \
   -H "anthropic-version: 2023-06-01" \
@@ -176,11 +176,11 @@ curl -X POST https://api.anthropic.com/v1/messages \
 The plugin staging hot loop and HOME mismatch are fully fixed in commit 177b9b3.
 Rebuild the sandbox image:
 ```bash
-docker build -f sandboxes/openeral/Dockerfile -t openeral-sandbox:dev .
+docker build -f sandboxes/openrind-shell/Dockerfile -t openrind-shell-sandbox:dev .
 ```
 Then relaunch:
 ```bash
-npx openeral --dev
+npx openrind-shell --dev
 ```
 
 ### Solution 2: Fix API Key (Primary Fix for Credential Hangs)
@@ -197,15 +197,15 @@ openshell sandbox create --upload /tmp/anthropic-api-key:/sandbox/anthropic-api-
 setup.sh reads it at `/sandbox/anthropic-api-key` and writes the real value into
 `~/.openclaw/openclaw.json`, bypassing the placeholder resolution problem entirely.
 
-### Solution 3: Use StringCost Proxy (Alternative)
+### Solution 3: Use OpenrindGateway Proxy (Alternative)
 
-If you have a StringCost account:
+If you have a OpenrindGateway account:
 ```bash
 export ANTHROPIC_API_KEY='sk-ant-...'
-export STRINGCOST_API_KEY='your-stringcost-key'
+export OPENRIND_GATEWAY_API_KEY='your-openrind-gateway-key'
 
 # setup.sh will create a presign automatically and configure openclaw to use it
-npx openeral --agent openclaw
+npx openrind-shell --agent openclaw
 ```
 
 ### Solution 4: Restart the Gateway (for gateway crashes)
@@ -272,7 +272,7 @@ After applying fixes, verify all of the following:
 4. **Config has real (non-placeholder) credentials:**
    ```bash
    cat ~/.openclaw/openclaw.json | grep -A 5 '"env"'
-   # ANTHROPIC_API_KEY should be sk-ant-... OR ANTHROPIC_BASE_URL should be a StringCost URL
+   # ANTHROPIC_API_KEY should be sk-ant-... OR ANTHROPIC_BASE_URL should be a OpenrindGateway URL
    ```
 
 5. **Test a simple message:**
@@ -287,12 +287,12 @@ After applying fixes, verify all of the following:
 | **Architecture** | Single process | Gateway + Client (2 processes) |
 | **Credential Resolution** | Binary patched by OpenShell to resolve `openshell:resolve:env:*` | Node.js gateway calls Anthropic SDK directly — cannot resolve placeholders |
 | **Placeholder Support** | Yes (proxy resolves them) | No (sends placeholder raw to Anthropic → rejected) |
-| **Failure Mode** | Routes through StringCost proxy, auth managed by proxy | Hangs silently on first API call with no error in TUI |
+| **Failure Mode** | Routes through OpenrindGateway proxy, auth managed by proxy | Hangs silently on first API call with no error in TUI |
 | **Plugin staging** | N/A | Must be isolated to gateway process only; leaking to TUI causes event-loop saturation |
 
 ## Fixed Root Causes (Summary)
 
 1. **Plugin loader hot loop** (commit 177b9b3) — `OPENCLAW_PLUGIN_STAGE_DIR` unset with `-u` before exec
-2. **Reconnect HOME mismatch** (commit 177b9b3) — `HOME=/home/agent` bashrc patch moved outside StringCost if-block
+2. **Reconnect HOME mismatch** (commit 177b9b3) — `HOME=/home/agent` bashrc patch moved outside OpenrindGateway if-block
 3. **Gateway SIGHUP** (commit 02b6c5d) — `setsid` prevents gateway from dying when TUI is closed
 4. **API key placeholder** (existing code) — credential check catches both empty AND `openshell:resolve:env:*` values

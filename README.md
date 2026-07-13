@@ -1,9 +1,9 @@
-# OpenEral
+# Openrind Shell
 
 Run Claude Code inside an isolated OpenShell sandbox using the published image:
 
 ```text
-ghcr.io/openrind/openeral/sandbox:just-bash
+ghcr.io/openrind/openrind-shell/sandbox:just-bash
 ```
 
 No local source checkout or JavaScript toolchain is required for the normal user flow. Contributor workflows live in [BUILD.md](./BUILD.md).
@@ -12,9 +12,9 @@ No local source checkout or JavaScript toolchain is required for the normal user
 
 - Docker is running.
 - The [`openshell` CLI](https://github.com/NVIDIA/OpenShell-Community) is installed.
-- `curl` is available for creating the optional StringCost presign.
+- `curl` is available for creating the optional Openrind Gateway presign.
 - `ANTHROPIC_API_KEY` is set in the shell where you run `openshell`.
-- `DATABASE_URL` points at an external PostgreSQL (Supabase, Neon, etc.). OpenEral has no embedded database — workspaces always live in PostgreSQL.
+- `DATABASE_URL` points at an external PostgreSQL (Supabase, Neon, etc.). Openrind Shell has no embedded database — workspaces always live in PostgreSQL.
 
 If you keep credentials in `.env`, load them first:
 
@@ -41,40 +41,40 @@ export DATABASE_URL='postgresql://...'
 # Compatibility with .env files that use POSTGRES_URL.
 export DATABASE_URL="${DATABASE_URL:-${POSTGRES_URL:-}}"
 
-printf '%s' "$DATABASE_URL" > /tmp/openeral-db-url
-chmod 600 /tmp/openeral-db-url
+printf '%s' "$DATABASE_URL" > /tmp/openrind-shell-db-url
+chmod 600 /tmp/openrind-shell-db-url
 
 openshell gateway start
 
 openshell sandbox create --tty \
-  --from ghcr.io/openrind/openeral/sandbox:just-bash \
-  --upload /tmp/openeral-db-url:/sandbox/db-url \
+  --from ghcr.io/openrind/openrind-shell/sandbox:just-bash \
+  --upload /tmp/openrind-shell-db-url:/sandbox/db-url \
   --provider claude --auto-providers \
-  -- openeral
+  -- openrind-shell
 
-rm -f /tmp/openeral-db-url
+rm -f /tmp/openrind-shell-db-url
 ```
 
 The first Claude Code launch may ask you to choose a theme, accept the security notice, trust `/sandbox`, and confirm API usage billing. After that, Claude opens with `HOME=/home/agent` inside the sandbox.
 
-OpenEral reads `/sandbox/db-url`, creates the `_openeral` schema, runs migrations, restores the persisted workspace into `/home/agent`, syncs changes during runtime, and does a final flush on shutdown. In Supabase, switch the Table Editor schema selector to `_openeral` to inspect the rows.
+Openrind Shell reads `/sandbox/db-url`, creates the `_openrind` schema, runs migrations, restores the persisted workspace into `/home/agent`, syncs changes during runtime, and does a final flush on shutdown. In Supabase, switch the Table Editor schema selector to `_openrind` to inspect the rows.
 
-Reuse the same sandbox name on every machine, and point it at the same `DATABASE_URL`. OpenEral uses the OpenShell sandbox ID as the workspace ID, so `--name openeral-claude` is what makes the same PostgreSQL-backed home restore after deletion or from another host.
+Reuse the same sandbox name on every machine, and point it at the same `DATABASE_URL`. Openrind Shell uses the OpenShell sandbox ID as the workspace ID, so `--name openrind-shell-claude` is what makes the same PostgreSQL-backed home restore after deletion or from another host.
 
 Do not pass the database URL through an OpenShell generic provider. PostgreSQL is raw TCP, so the credential must be delivered by `--upload`.
 
-## Add StringCost Tracking for Claude Code
+## Add Openrind Gateway Tracking for Claude Code
 
-StringCost is optional. It routes Claude Code API calls through a presigned proxy URL for token and cost metering.
+Openrind Gateway is optional. It routes Claude Code API calls through a presigned proxy URL for token and cost metering.
 
 ```bash
 export ANTHROPIC_API_KEY='sk-ant-...'
-export STRINGCOST_API_KEY='sk-st-...'
+export OPENRIND_GATEWAY_API_KEY='sk-st-...'
 
-OPENERAL_INPUT="$(mktemp -d)"
+OPENRIND_SHELL_INPUT="$(mktemp -d)"
 
-curl -fsS https://app.stringcost.com/v1/presign \
-  -H "Authorization: Bearer $STRINGCOST_API_KEY" \
+curl -fsS https://app.openrind.com/v1/presign \
+  -H "Authorization: Bearer $OPENRIND_GATEWAY_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
     "provider": "anthropic",
@@ -83,33 +83,33 @@ curl -fsS https://app.stringcost.com/v1/presign \
     "expires_in": -1,
     "max_uses": -1,
     "cost_limit": 10000000,
-    "metadata": { "source": "openeral-sandbox", "client": "claude-code", "labels": ["openeral", "claude-code"] }
+    "metadata": { "source": "openrind-shell-sandbox", "client": "claude-code", "labels": ["openrind-shell", "claude-code"] }
   }' \
-  > "$OPENERAL_INPUT/presign.json"
+  > "$OPENRIND_SHELL_INPUT/presign.json"
 
 # Optional: combine PostgreSQL persistence in the same upload.
 export DATABASE_URL="${DATABASE_URL:-${POSTGRES_URL:-}}"
 if [ -n "${DATABASE_URL:-}" ]; then
-  printf '%s' "$DATABASE_URL" > "$OPENERAL_INPUT/db-url"
+  printf '%s' "$DATABASE_URL" > "$OPENRIND_SHELL_INPUT/db-url"
 fi
 
-chmod -R go-rwx "$OPENERAL_INPUT"
+chmod -R go-rwx "$OPENRIND_SHELL_INPUT"
 
-openshell provider create --name stringcost --type generic \
-  --credential "STRINGCOST_API_KEY=$STRINGCOST_API_KEY" \
-  || openshell provider update stringcost \
-    --credential "STRINGCOST_API_KEY=$STRINGCOST_API_KEY"
+openshell provider create --name openrind-gateway --type generic \
+  --credential "OPENRIND_GATEWAY_API_KEY=$OPENRIND_GATEWAY_API_KEY" \
+  || openshell provider update openrind-gateway \
+    --credential "OPENRIND_GATEWAY_API_KEY=$OPENRIND_GATEWAY_API_KEY"
 
 openshell sandbox create --tty \
-  --from ghcr.io/openrind/openeral/sandbox:just-bash \
-  --upload "$OPENERAL_INPUT:/sandbox/openeral-input" \
+  --from ghcr.io/openrind/openrind-shell/sandbox:just-bash \
+  --upload "$OPENRIND_SHELL_INPUT:/sandbox/openrind-shell-input" \
   --provider claude --auto-providers \
-  -- openeral
+  -- openrind-shell
 
-rm -rf "$OPENERAL_INPUT"
+rm -rf "$OPENRIND_SHELL_INPUT"
 ```
 
-Create the presign on the host. Inside OpenShell, provider secrets are placeholders; they work for HTTP headers but not as JSON body values for StringCost's `client_api_key`.
+Create the presign on the host. Inside OpenShell, provider secrets are placeholders; they work for HTTP headers but not as JSON body values for Openrind Gateway's `client_api_key`.
 
 ---
 
@@ -121,54 +121,54 @@ Create the provider once (this is the only one-time step — the provider persis
 
 ```bash
 openshell provider create --name openclaw --type generic \
-  --credential "OPENERAL_AGENT=openclaw" \
+  --credential "OPENRIND_SHELL_AGENT=openclaw" \
   || openshell provider update openclaw \
-    --credential "OPENERAL_AGENT=openclaw"
+    --credential "OPENRIND_SHELL_AGENT=openclaw"
 ```
 
-OpenClaw uses the same `_openeral` schema as Claude Code. Both `ANTHROPIC_API_KEY` and `DATABASE_URL` must be delivered as uploaded files — OpenShell provider credentials arrive as opaque placeholders that OpenClaw's gateway cannot resolve, and PostgreSQL is raw TCP that needs the literal connection string.
+OpenClaw uses the same `_openrind` schema as Claude Code. Both `ANTHROPIC_API_KEY` and `DATABASE_URL` must be delivered as uploaded files — OpenShell provider credentials arrive as opaque placeholders that OpenClaw's gateway cannot resolve, and PostgreSQL is raw TCP that needs the literal connection string.
 
 ```bash
 export ANTHROPIC_API_KEY='sk-ant-...'
 export DATABASE_URL='postgresql://...'
 export DATABASE_URL="${DATABASE_URL:-${POSTGRES_URL:-}}"
 
-OPENERAL_INPUT="$(mktemp -d)"
-printf '%s' "$ANTHROPIC_API_KEY" > "$OPENERAL_INPUT/anthropic-api-key"
-printf '%s' "$DATABASE_URL"      > "$OPENERAL_INPUT/db-url"
-chmod -R go-rwx "$OPENERAL_INPUT"
+OPENRIND_SHELL_INPUT="$(mktemp -d)"
+printf '%s' "$ANTHROPIC_API_KEY" > "$OPENRIND_SHELL_INPUT/anthropic-api-key"
+printf '%s' "$DATABASE_URL"      > "$OPENRIND_SHELL_INPUT/db-url"
+chmod -R go-rwx "$OPENRIND_SHELL_INPUT"
 
 openshell gateway start
 
-openshell sandbox create --tty --name openeral-openclaw \
-  --from ghcr.io/openrind/openeral/sandbox:just-bash \
-  --upload "$OPENERAL_INPUT:/sandbox/openeral-input" \
+openshell sandbox create --tty --name openrind-shell-openclaw \
+  --from ghcr.io/openrind/openrind-shell/sandbox:just-bash \
+  --upload "$OPENRIND_SHELL_INPUT:/sandbox/openrind-shell-input" \
   --provider openclaw --auto-providers \
-  -- openeral
+  -- openrind-shell
 
-rm -rf "$OPENERAL_INPUT"
+rm -rf "$OPENRIND_SHELL_INPUT"
 ```
 
-`setup.sh` reads `/sandbox/openeral-input/anthropic-api-key`, writes it into `~/.openclaw/openclaw.json`, starts the openclaw gateway on `ws://127.0.0.1:18789`, waits for `/readyz`, then launches the OpenClaw TUI. Reuse `--name openeral-openclaw` on every machine and point it at the same `DATABASE_URL` so the PostgreSQL-backed home restores after deletion or on another host.
+`setup.sh` reads `/sandbox/openrind-shell-input/anthropic-api-key`, writes it into `~/.openclaw/openclaw.json`, starts the openclaw gateway on `ws://127.0.0.1:18789`, waits for `/readyz`, then launches the OpenClaw TUI. Reuse `--name openrind-shell-openclaw` on every machine and point it at the same `DATABASE_URL` so the PostgreSQL-backed home restores after deletion or on another host.
 
 > **If Claude Code launches instead of OpenClaw**, the `openclaw` provider was not created or was not passed. Run the `openshell provider create` command above (one-time) and ensure you pass `--provider openclaw` in the sandbox create command.
 
-> **Note:** For StringCost cost tracking on OpenClaw, see [Add StringCost Tracking for OpenClaw](#add-stringcost-tracking-for-openclaw).
+> **Note:** For Openrind Gateway cost tracking on OpenClaw, see [Add Openrind Gateway Tracking for OpenClaw](#add-openrind-gateway-tracking-for-openclaw).
 
-## Add StringCost Tracking for OpenClaw
+## Add Openrind Gateway Tracking for OpenClaw
 
-StringCost is optional. It routes OpenClaw's Anthropic API calls through a presigned proxy URL so token spend, COGS, and revenue land in your StringCost vendor portfolio under the `openclaw` label.
+Openrind Gateway is optional. It routes OpenClaw's Anthropic API calls through a presigned proxy URL so token spend, COGS, and revenue land in your Openrind Gateway vendor portfolio under the `openclaw` label.
 
 ```bash
 export ANTHROPIC_API_KEY='sk-ant-...'
-export STRINGCOST_API_KEY='sk-st-...'
+export OPENRIND_GATEWAY_API_KEY='sk-st-...'
 export DATABASE_URL='postgresql://...'
 export DATABASE_URL="${DATABASE_URL:-${POSTGRES_URL:-}}"
 
-OPENERAL_INPUT="$(mktemp -d)"
+OPENRIND_SHELL_INPUT="$(mktemp -d)"
 
-curl -fsS https://app.stringcost.com/v1/presign \
-  -H "Authorization: Bearer $STRINGCOST_API_KEY" \
+curl -fsS https://app.openrind.com/v1/presign \
+  -H "Authorization: Bearer $OPENRIND_GATEWAY_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
     "provider": "anthropic",
@@ -177,31 +177,31 @@ curl -fsS https://app.stringcost.com/v1/presign \
     "expires_in": -1,
     "max_uses": -1,
     "cost_limit": 10000000,
-    "metadata": { "source": "openeral-sandbox", "client": "openclaw", "labels": ["openeral", "openclaw"] }
+    "metadata": { "source": "openrind-shell-sandbox", "client": "openclaw", "labels": ["openrind-shell", "openclaw"] }
   }' \
-  > "$OPENERAL_INPUT/presign.json"
+  > "$OPENRIND_SHELL_INPUT/presign.json"
 
-printf '%s' "$ANTHROPIC_API_KEY" > "$OPENERAL_INPUT/anthropic-api-key"
-printf '%s' "$DATABASE_URL"      > "$OPENERAL_INPUT/db-url"
-chmod -R go-rwx "$OPENERAL_INPUT"
+printf '%s' "$ANTHROPIC_API_KEY" > "$OPENRIND_SHELL_INPUT/anthropic-api-key"
+printf '%s' "$DATABASE_URL"      > "$OPENRIND_SHELL_INPUT/db-url"
+chmod -R go-rwx "$OPENRIND_SHELL_INPUT"
 
 openshell provider create --name openclaw --type generic \
-  --credential "OPENERAL_AGENT=openclaw" \
+  --credential "OPENRIND_SHELL_AGENT=openclaw" \
   || openshell provider update openclaw \
-    --credential "OPENERAL_AGENT=openclaw"
+    --credential "OPENRIND_SHELL_AGENT=openclaw"
 
-openshell sandbox create --tty --name openeral-openclaw-stringcost \
-  --from ghcr.io/openrind/openeral/sandbox:just-bash \
-  --upload "$OPENERAL_INPUT:/sandbox/openeral-input" \
+openshell sandbox create --tty --name openrind-shell-openclaw-openrind-gateway \
+  --from ghcr.io/openrind/openrind-shell/sandbox:just-bash \
+  --upload "$OPENRIND_SHELL_INPUT:/sandbox/openrind-shell-input" \
   --provider openclaw --auto-providers \
-  -- openeral
+  -- openrind-shell
 
-rm -rf "$OPENERAL_INPUT"
+rm -rf "$OPENRIND_SHELL_INPUT"
 ```
 
-Create the presign on the host. Inside OpenShell, provider secrets are placeholders; they work for HTTP headers but not as JSON body values for StringCost's `client_api_key`. The `metadata.labels: ["openeral", "openclaw"]` field is what StringCost's vendor portfolio classifier reads, so OpenClaw usage shows up separately from Claude Code in your dashboard.
+Create the presign on the host. Inside OpenShell, provider secrets are placeholders; they work for HTTP headers but not as JSON body values for Openrind Gateway's `client_api_key`. The `metadata.labels: ["openrind-shell", "openclaw"]` field is what Openrind Gateway's vendor portfolio classifier reads, so OpenClaw usage shows up separately from Claude Code in your dashboard.
 
-`setup.sh` reads the uploaded `presign.json`, exports `ANTHROPIC_BASE_URL` so the openclaw gateway routes all Anthropic traffic through the proxy, and writes the URL into `~/.openclaw/openclaw.json` so reconnect sessions also get the override. The real `ANTHROPIC_API_KEY` is still required — `openclaw onboard` writes it to `~/.openclaw/agents/main/agent/auth-profiles.json`, and the StringCost proxy ignores the inbound `x-api-key` because it authenticates via the token embedded in the proxy URL.
+`setup.sh` reads the uploaded `presign.json`, exports `ANTHROPIC_BASE_URL` so the openclaw gateway routes all Anthropic traffic through the proxy, and writes the URL into `~/.openclaw/openclaw.json` so reconnect sessions also get the override. The real `ANTHROPIC_API_KEY` is still required — `openclaw onboard` writes it to `~/.openclaw/agents/main/agent/auth-profiles.json`, and the Openrind Gateway proxy ignores the inbound `x-api-key` because it authenticates via the token embedded in the proxy URL.
 
 ## Manage Sandboxes
 
@@ -214,13 +214,13 @@ openshell sandbox delete <name>
 Run one-off commands through SSH config:
 
 ```bash
-openshell sandbox ssh-config <name> > /tmp/openeral-sandbox-ssh
+openshell sandbox ssh-config <name> > /tmp/openrind-shell-sandbox-ssh
 
-ssh -F /tmp/openeral-sandbox-ssh openshell-<name> \
-  'HOME=/home/agent node /opt/openeral/dist/bin/openeral.js memory refresh'
+ssh -F /tmp/openrind-shell-sandbox-ssh openshell-<name> \
+  'HOME=/home/agent node /opt/openrind-shell/dist/bin/openrind-shell.js memory refresh'
 ```
 
-Keep the `HOME=/home/agent` prefix. OpenShell SSH starts in `/sandbox`, while OpenEral state lives under `/home/agent`.
+Keep the `HOME=/home/agent` prefix. OpenShell SSH starts in `/sandbox`, while Openrind Shell state lives under `/home/agent`.
 
 ## Troubleshooting
 
@@ -234,28 +234,28 @@ Keep the `HOME=/home/agent` prefix. OpenShell SSH starts in `/sandbox`, while Op
 
 **Files disappear after `sandbox delete`** - PostgreSQL persistence was not enabled. Use the `/sandbox/db-url` upload flow above.
 
-**OpenClaw hangs at `noodling…` and never responds** — the API key was not delivered to OpenClaw. The `openclaw` provider credential arrives as an opaque placeholder that OpenClaw cannot use directly. You must upload the real key as a file: include `anthropic-api-key` in the `openeral-input` directory as shown in [Start OpenClaw](#start-openclaw).
+**OpenClaw hangs at `noodling…` and never responds** — the API key was not delivered to OpenClaw. The `openclaw` provider credential arrives as an opaque placeholder that OpenClaw cannot use directly. You must upload the real key as a file: include `anthropic-api-key` in the `openrind-shell-input` directory as shown in [Start OpenClaw](#start-openclaw).
 
 **OpenClaw shows `Gateway: not reachable at ws://127.0.0.1:18789`** — the openclaw gateway failed to start before the TUI launched. Check `/tmp/openclaw-gateway.log` inside the sandbox (`openshell sandbox connect <name>` then `cat /tmp/openclaw-gateway.log`). The gateway stages 35 npm packages on first cold start and can take a few minutes; setup waits up to 10 minutes before giving up.
 
-**`setup.sh: error: DATABASE_URL is required.`** — no PostgreSQL connection string was uploaded. OpenEral has no embedded fallback. Pass `--upload /tmp/openeral-db-url:/sandbox/db-url` (or place `db-url` inside `/sandbox/openeral-input/` for OpenClaw) as shown in [Start Claude Code](#start-claude-code) or [Start OpenClaw](#start-openclaw).
+**`setup.sh: error: DATABASE_URL is required.`** — no PostgreSQL connection string was uploaded. Openrind Shell has no embedded fallback. Pass `--upload /tmp/openrind-shell-db-url:/sandbox/db-url` (or place `db-url` inside `/sandbox/openrind-shell-input/` for OpenClaw) as shown in [Start Claude Code](#start-claude-code) or [Start OpenClaw](#start-openclaw).
 
 **Migration fails with `tunnel to ... denied - 403`** - the PostgreSQL host is not allowlisted in the image policy. Common Supabase pooler hosts are included. Other hosts require a custom image; see [BUILD.md](./BUILD.md#custom-postgresql-hosts).
 
-**Migration fails with `EAI_AGAIN` or a placeholder-looking database URL** - do not use a generic `db` provider for PostgreSQL. Upload the connection string file with `--upload /tmp/openeral-db-url:/sandbox/db-url`.
+**Migration fails with `EAI_AGAIN` or a placeholder-looking database URL** - do not use a generic `db` provider for PostgreSQL. Upload the connection string file with `--upload /tmp/openrind-shell-db-url:/sandbox/db-url`.
 
-## OpenWork
+## Openrind Desktop
 
-The [`openwork/`](./openwork) subdirectory contains the source of [OpenWork](https://github.com/different-ai/openwork) — the open-source, local-first desktop app and CLI for AI-assisted workflows, built on top of OpenCode.
+The [`openrind-desktop/`](./openrind-desktop) subdirectory is Openrind Desktop — our rebrand of the open-source [OpenWork](https://github.com/different-ai/openwork) project (the local-first desktop app and CLI for AI-assisted workflows, built on top of OpenCode).
 
-OpenWork provides sessions, live SSE streaming, permissions, templates, and a skills manager. The non-opensource `ee/` directory has been removed; everything here is MIT-licensed.
+Openrind Desktop provides sessions, live SSE streaming, permissions, templates, and a skills manager. The non-opensource `ee/` directory has been removed; everything here is MIT-licensed.
 
-To restore dependencies after cloning, see [openwork/README.md](./openwork/README.md).
+To restore dependencies after cloning, see [openrind-desktop/README.md](./openrind-desktop/README.md).
 
-To sync openwork to a newer version:
+To sync openrind-desktop to a newer version:
 ```bash
 git fetch https://github.com/Pavitra-programmers/openwork feat/openshell-integration
-git read-tree --prefix=openwork/ -u FETCH_HEAD
+git read-tree --prefix=openrind-desktop/ -u FETCH_HEAD
 ```
 
 ## Contributing

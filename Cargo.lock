@@ -866,18 +866,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
-name = "openeral"
+name = "openrind-shell"
 version = "0.1.0"
 dependencies = [
  "clap",
- "openeral-core",
+ "openrind-shell-core",
  "tokio",
  "tracing",
  "tracing-subscriber",
 ]
 
 [[package]]
-name = "openeral-core"
+name = "openrind-shell-core"
 version = "0.1.0"
 dependencies = [
  "chrono",

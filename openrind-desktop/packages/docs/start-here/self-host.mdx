@@ -1,0 +1,69 @@
+---
+title: "Self-host"
+description: "Run OpenrindDesktop on your own server with openrind-desktop-orchestrator."
+---
+
+Most users just use the [desktop app](https://openrind-desktoplabs.com/download). This guide covers self-hosting OpenrindDesktop via the CLI so you can run tasks on your own server and connect the desktop app to it remotely.
+
+Want hosted workspaces, team skill hubs, or shared providers without running infra? Use [OpenrindDesktop Cloud](/cloud/get-started) instead. Rolling this out across a company? [Book a call](https://calendar.app.google/86QpCENvhfEzDFLu5) about [Enterprise](/cloud/enterprise).
+
+## Step 1: Install on your server
+
+```bash
+npm install -g openrind-desktop-orchestrator
+```
+
+## Step 2: Start OpenrindDesktop in your workspace
+
+Run it where your code lives:
+
+```bash
+openrind-desktop start --workspace /path/to/your/workspace --approval auto
+```
+
+<Frame>
+  ![OpenrindDesktop CLI terminal output showing URL and owner token](/images/get-started-cli-output.png)
+</Frame>
+
+Copy:
+
+- `OpenrindDesktop URL`
+- `OpenrindDesktop Owner Token`
+
+## Step 3: Connect the desktop app
+
+On your local machine, open the OpenrindDesktop desktop app and connect to the remote workspace:
+
+- Click `+ Add workspace` (bottom left)
+- Click `+ Connect Remote workspace`
+- Paste the `OpenrindDesktop URL` and `OpenrindDesktop Owner Token` from Step 2
+
+<Frame>
+  ![Add Remote Workspace dialog in OpenrindDesktop desktop app](/images/get-started-add-remote-workspace.png)
+</Frame>
+
+## What this gives you
+
+- Your code, data, models, and credentials stay on your machine.
+- Your local machine stays light — work runs on the server.
+- A fast path from install to a connected remote OpenrindDesktop workspace.
+
+## Don't want to run infra?
+
+Skip the server. [**OpenrindDesktop Cloud**](/cloud/get-started) runs hosted workers for your team.
+
+Cloud also gives you org-wide primitives you'd otherwise have to build: [team skill hubs](/cloud/share-with-your-team/skill-hubs), [shared LLM providers](/cloud/share-with-your-team/managed-llm-provider), [RBAC](/cloud/members-and-rbac), and [shared workspaces](/cloud/run-in-the-cloud/shared-workspace).
+
+## Looking for support for a larger rollout?
+
+If you're rolling OpenrindDesktop out across a company of 150+ employees, the orchestrator on a single VM might be harder to manage. 
+
+At that scale our customers typically want:
+
+- **SSO (SAML/OIDC)** so people sign in with the identity your company already uses
+- **Audit logs** across sessions, tool calls, and model usage
+- **Model and tool allowlists** enforced centrally, not per-workspace
+- **VPC / on-prem deployment** with your own networking and compliance constraints
+- **Support and rollout help** from our team and custom deployment, not just in GitHub.
+
+You can check the [**Enterprise**](/cloud/enterprise) page or [book a 30-minute call](https://calendar.app.google/86QpCENvhfEzDFLu5).

@@ -1,19 +1,19 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# test_claude_e2e.sh — Runs real Claude Code via the built openeral bin and verifies
+# test_claude_e2e.sh — Runs real Claude Code via the built openrind-shell bin and verifies
 # end-to-end: persistence across sessions, pg command, file operations.
 #
 # This is the REAL test — not structural, not Docker shape. It launches
 # Claude Code, has it write files, then launches again and reads them back.
 #
-# Requires: DATABASE_URL, ANTHROPIC_API_KEY, openeral-js built (dist/ + node_modules/)
+# Requires: DATABASE_URL, ANTHROPIC_API_KEY, openrind-shell-js built (dist/ + node_modules/)
 # Usage:
 #   source .env
 #   DATABASE_URL='postgresql://...' ./tests/test_claude_e2e.sh
 
 repo_root="$(cd "$(dirname "$0")/.." && pwd)"
-cd "$repo_root/openeral-js"
+cd "$repo_root/openrind-shell-js"
 
 DB_URL="${DATABASE_URL:?DATABASE_URL required}"
 API_KEY="${ANTHROPIC_API_KEY:?ANTHROPIC_API_KEY required}"
@@ -26,18 +26,18 @@ fail() { echo "  ✗ $1"; FAILED=$((FAILED + 1)); }
 
 # Ensure built
 if [ ! -d dist ] || [ ! -d node_modules ]; then
-  echo "Building openeral-js..."
+  echo "Building openrind-shell-js..."
   pnpm install && pnpm build
 fi
 
 # Clean any leftover home dir
-rm -rf "/tmp/openeral-$WORKSPACE"
+rm -rf "/tmp/openrind-shell-$WORKSPACE"
 
 run_claude() {
   DATABASE_URL="$DB_URL" \
   ANTHROPIC_API_KEY="$API_KEY" \
-  OPENERAL_WORKSPACE_ID="$WORKSPACE" \
-  node dist/bin/openeral.js -- "$@" --dangerously-skip-permissions 2>&1
+  OPENRIND_SHELL_WORKSPACE_ID="$WORKSPACE" \
+  node dist/bin/openrind-shell.js -- "$@" --dangerously-skip-permissions 2>&1
 }
 
 echo ""
@@ -64,7 +64,7 @@ echo ""
 echo "=== Session 1: Verify HOME ==="
 out=$(run_claude -p 'Run: echo $HOME — reply with just the output')
 echo "$out" | tail -5
-if echo "$out" | grep -q "/tmp/openeral-$WORKSPACE"; then
+if echo "$out" | grep -q "/tmp/openrind-shell-$WORKSPACE"; then
   pass "session 1: HOME is correct"
 else
   fail "session 1: HOME unexpected"
@@ -73,7 +73,7 @@ fi
 # Delete the local home dir to prove session 2 restores from PostgreSQL
 echo ""
 echo "=== Deleting local home dir (force restore from PostgreSQL) ==="
-rm -rf "/tmp/openeral-$WORKSPACE"
+rm -rf "/tmp/openrind-shell-$WORKSPACE"
 
 echo ""
 echo "=== Session 2: Read persisted file ==="
@@ -101,12 +101,12 @@ echo "=== Cleanup ==="
 DATABASE_URL="$DB_URL" node -e "
   import('pg').then(async({default:pg})=>{
     const pool=new pg.Pool({connectionString:process.env.DATABASE_URL});
-    await pool.query('DELETE FROM _openeral.workspace_files WHERE workspace_id=\$1',['$WORKSPACE']);
-    await pool.query('DELETE FROM _openeral.workspace_config WHERE id=\$1',['$WORKSPACE']);
+    await pool.query('DELETE FROM _openrind.workspace_files WHERE workspace_id=\$1',['$WORKSPACE']);
+    await pool.query('DELETE FROM _openrind.workspace_config WHERE id=\$1',['$WORKSPACE']);
     await pool.end();console.log('cleaned up');
   });
 " 2>/dev/null || true
-rm -rf "/tmp/openeral-$WORKSPACE"
+rm -rf "/tmp/openrind-shell-$WORKSPACE"
 
 echo ""
 echo "=== Results: $PASSED passed, $FAILED failed ==="

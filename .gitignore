@@ -3,19 +3,19 @@ node_modules/
 dist/
 package-lock.json
 agent-task.txt
-openeral-shell/.env
+openrind-shell/.env
 target/
 .omx/
 .codex/*
 !.codex/skills
 AGENTS.md
 .claude/skills/*
-!.claude/skills/openeral-dev/
-!.claude/skills/openeral-dev/**
-!.claude/skills/openeral-navigate/
-!.claude/skills/openeral-navigate/**
-!.claude/skills/openeral-shell/
-!.claude/skills/openeral-shell/**
+!.claude/skills/openrind-dev/
+!.claude/skills/openrind-dev/**
+!.claude/skills/openrind-navigate/
+!.claude/skills/openrind-navigate/**
+!.claude/skills/openrind-shell/
+!.claude/skills/openrind-shell/**
 
 # Node
 node_modules/

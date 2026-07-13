@@ -1,0 +1,69 @@
+import type { OpenrindDesktopServerClient } from "../../../../app/lib/openrind-desktop-server";
+import { readOpenrindDesktopEnvPendingChanges } from "../../../../app/lib/openrind-desktop-env-runtime";
+
+const DEFAULT_CACHE_KEY = "__openrind_desktop_env_default__";
+const MAX_CONTEXT_CACHE_ENTRIES = 100;
+
+const envSystemContextCache = new Map<string, string | undefined>();
+
+export function clearOpenrindDesktopEnvSystemContextCache(): void {
+  envSystemContextCache.clear();
+}
+
+function normalizeEnvKeys(keys: string[]): string[] {
+  return Array.from(
+    new Set(
+      keys
+        .map((key) => key.trim())
+        .filter((key) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(key)),
+    ),
+  ).sort((a, b) => a.localeCompare(b));
+}
+
+export async function buildOpenrindDesktopEnvSystemContext(
+  client: OpenrindDesktopServerClient | null,
+  options: {
+    cacheKey?: string;
+    runtimeKey?: string | null;
+    readPendingChanges?: () => boolean;
+  } = {},
+): Promise<string | undefined> {
+  if (!client) return undefined;
+  const readPendingChanges = options.readPendingChanges ??
+    (() => readOpenrindDesktopEnvPendingChanges(options.runtimeKey));
+  if (readPendingChanges()) return undefined;
+
+  const cacheKey = `${client.baseUrl}:${options.cacheKey ?? DEFAULT_CACHE_KEY}`;
+  if (envSystemContextCache.has(cacheKey)) {
+    return envSystemContextCache.get(cacheKey);
+  }
+
+  try {
+    const response = await client.listUserEnvKeys();
+    const keys = normalizeEnvKeys(response.keys ?? []);
+    if (keys.length === 0) {
+      rememberEnvSystemContext(cacheKey, undefined);
+      return undefined;
+    }
+
+    const keyList = keys.map((key) => `- ${key}`).join("\n");
+
+    const context = [
+      "Openrind Desktop environment variables configured:",
+      keyList,
+      "Only names are shown; values are secret. Use these names when relevant.",
+    ].join("\n");
+    rememberEnvSystemContext(cacheKey, context);
+    return context;
+  } catch {
+    return undefined;
+  }
+}
+
+function rememberEnvSystemContext(cacheKey: string, context: string | undefined): void {
+  if (envSystemContextCache.size >= MAX_CONTEXT_CACHE_ENTRIES && !envSystemContextCache.has(cacheKey)) {
+    const firstKey = envSystemContextCache.keys().next().value;
+    if (firstKey) envSystemContextCache.delete(firstKey);
+  }
+  envSystemContextCache.set(cacheKey, context);
+}

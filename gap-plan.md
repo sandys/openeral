@@ -2,9 +2,9 @@
 
 ## Goal
 
-Let users run `openeral memory refresh --query "..."` and have OpenEral regenerate Claude Code's memory files (`~/.claude/projects/<slug>/memory/MEMORY.md` + topic files) with semantically relevant content pulled from PostgreSQL, using pgvector embeddings.
+Let users run `openrind-shell memory refresh --query "..."` and have Openrind Shell regenerate Claude Code's memory files (`~/.claude/projects/<slug>/memory/MEMORY.md` + topic files) with semantically relevant content pulled from PostgreSQL, using pgvector embeddings.
 
-Default behaviour (`openeral memory refresh` with no query) must match what Claude Code itself expects — the existing 5 topic templates already do this.
+Default behaviour (`openrind-shell memory refresh` with no query) must match what Claude Code itself expects — the existing 5 topic templates already do this.
 
 ---
 
@@ -14,20 +14,20 @@ Default behaviour (`openeral memory refresh` with no query) must match what Clau
 
 | Area | Status | File |
 |---|---|---|
-| Data model (types) | ✅ | `openeral-js/src/memory/types.ts` |
-| Filesystem walker + chunker | ✅ | `openeral-js/src/memory/collect.ts` |
-| Lexical ranker (token/freshness/kind) | ✅ | `openeral-js/src/memory/rank.ts` |
-| Markdown renderer (MEMORY.md + topic files) | ✅ | `openeral-js/src/memory/render.ts` |
-| Project-slug / memory-dir resolver | ✅ | `openeral-js/src/memory/resolve.ts` |
-| Orchestrator (default + focus modes) | ✅ | `openeral-js/src/memory/refresh.ts` |
-| CLI argument parsing | ✅ | `openeral-js/src/cli.ts:150-183` |
-| Existing DB schema (workspace_files etc.) | ✅ | `openeral-js/src/db/migrations.ts` (V1–V5) |
+| Data model (types) | ✅ | `openrind-shell-js/src/memory/types.ts` |
+| Filesystem walker + chunker | ✅ | `openrind-shell-js/src/memory/collect.ts` |
+| Lexical ranker (token/freshness/kind) | ✅ | `openrind-shell-js/src/memory/rank.ts` |
+| Markdown renderer (MEMORY.md + topic files) | ✅ | `openrind-shell-js/src/memory/render.ts` |
+| Project-slug / memory-dir resolver | ✅ | `openrind-shell-js/src/memory/resolve.ts` |
+| Orchestrator (default + focus modes) | ✅ | `openrind-shell-js/src/memory/refresh.ts` |
+| CLI argument parsing | ✅ | `openrind-shell-js/src/cli.ts:150-183` |
+| Existing DB schema (workspace_files etc.) | ✅ | `openrind-shell-js/src/db/migrations.ts` (V1–V5) |
 
 ### Not yet built (the gaps)
 
 | # | Gap | Consequence |
 |---|---|---|
-| 1 | CLI handler is a stub | `openeral memory refresh` exits with "not yet implemented" at `src/cli.ts:1999-2001` |
+| 1 | CLI handler is a stub | `openrind-shell memory refresh` exits with "not yet implemented" at `src/cli.ts:1999-2001` |
 | 2 | No pgvector, no embeddings column | `--query` can only rank lexically; "how does auth work" misses files that say "login flow" |
 | 3 | No embedding provider client | Cannot call OpenAI/Voyage — even if schema existed, we have no way to populate it |
 | 4 | No session-log indexing | Claude's own `~/.claude/projects/<slug>/*.jsonl` transcripts are never searched |
@@ -49,12 +49,12 @@ Default behaviour (`openeral memory refresh` with no query) must match what Clau
 
 ### Gap 1: Wire the CLI handler
 
-**File**: `openeral-js/src/cli.ts` (replace lines ~1999–2001)
+**File**: `openrind-shell-js/src/cli.ts` (replace lines ~1999–2001)
 
 Replace:
 ```ts
 if (parsed.kind === 'memory-refresh') {
-  process.stderr.write('\x1b[31mopeneral: memory refresh not yet implemented\x1b[0m\n');
+  process.stderr.write('\x1b[31mopenrind-shell: memory refresh not yet implemented\x1b[0m\n');
   process.exit(1);
 }
 ```
@@ -67,15 +67,15 @@ With a call to `refreshClaudeMemory()` that:
 
 ### Gap 2: pgvector schema (V6 migration)
 
-**File**: `openeral-js/src/db/migrations.ts` — add V6 inside the existing advisory-lock block.
+**File**: `openrind-shell-js/src/db/migrations.ts` — add V6 inside the existing advisory-lock block.
 
 ```sql
 -- Skip gracefully if extension is not installed; report degraded state.
 CREATE EXTENSION IF NOT EXISTS vector;
 
-CREATE TABLE IF NOT EXISTS _openeral.memory_chunks (
+CREATE TABLE IF NOT EXISTS _openrind.memory_chunks (
   workspace_id   TEXT NOT NULL
-                 REFERENCES _openeral.workspace_config(id) ON DELETE CASCADE,
+                 REFERENCES _openrind.workspace_config(id) ON DELETE CASCADE,
   chunk_id       TEXT NOT NULL,          -- <source>:<path>:<ordinal>
   source_kind    TEXT NOT NULL,          -- 'file' | 'session'
   source_path    TEXT NOT NULL,
@@ -90,13 +90,13 @@ CREATE TABLE IF NOT EXISTS _openeral.memory_chunks (
 );
 
 CREATE INDEX IF NOT EXISTS idx_memory_chunks_ws
-  ON _openeral.memory_chunks (workspace_id);
+  ON _openrind.memory_chunks (workspace_id);
 CREATE INDEX IF NOT EXISTS idx_memory_chunks_hash
-  ON _openeral.memory_chunks (workspace_id, content_hash);
+  ON _openrind.memory_chunks (workspace_id, content_hash);
 
 -- IVFFlat cosine index (only if pgvector is actually available)
 CREATE INDEX IF NOT EXISTS idx_memory_chunks_embedding
-  ON _openeral.memory_chunks USING ivfflat (embedding vector_cosine_ops)
+  ON _openrind.memory_chunks USING ivfflat (embedding vector_cosine_ops)
   WITH (lists = 100);
 ```
 
@@ -106,7 +106,7 @@ Notes:
 
 ### Gap 3: Embedding provider client
 
-**New file**: `openeral-js/src/memory/embed.ts`
+**New file**: `openrind-shell-js/src/memory/embed.ts`
 
 ```ts
 export type Provider = 'voyage' | 'openai' | null;
@@ -132,7 +132,7 @@ export async function embed(
 
 ### Gap 4: Session-log corpus
 
-**New file**: `openeral-js/src/memory/session-logs.ts`
+**New file**: `openrind-shell-js/src/memory/session-logs.ts`
 
 ```ts
 export async function collectSessionLogs(
@@ -148,7 +148,7 @@ export async function collectSessionLogs(
 
 ### Gap 5: Continuous embedding pipeline
 
-**New file**: `openeral-js/src/memory/sync-embeddings.ts`
+**New file**: `openrind-shell-js/src/memory/sync-embeddings.ts`
 
 ```ts
 export async function embedChunks(
@@ -163,11 +163,11 @@ export async function embedChunks(
 - `SELECT content_hash FROM memory_chunks WHERE workspace_id = $1 AND chunk_id = $2` — skip if hash matches.
 - Batch new/changed chunks by 100, call `embed()`, `UPSERT` into `memory_chunks`.
 
-**Hook site**: `openeral-js/src/sync.ts` — after `syncFromFs` finishes its walk, call `embedChunks()` for changed files. Guard behind `provider !== null`; never block the sync on embedding errors.
+**Hook site**: `openrind-shell-js/src/sync.ts` — after `syncFromFs` finishes its walk, call `embedChunks()` for changed files. Guard behind `provider !== null`; never block the sync on embedding errors.
 
 ### Gap 6: Vector ranking
 
-**New file**: `openeral-js/src/memory/vector-rank.ts`
+**New file**: `openrind-shell-js/src/memory/vector-rank.ts`
 
 ```ts
 export async function rankByVector(
@@ -183,7 +183,7 @@ SQL:
 ```sql
 SELECT chunk_id, source_kind, source_path, title, excerpt,
        1 - (embedding <=> $1::vector) AS cosine
-FROM _openeral.memory_chunks
+FROM _openrind.memory_chunks
 WHERE workspace_id = $2 AND embed_dims = $3
 ORDER BY embedding <=> $1::vector
 LIMIT $4;
@@ -193,13 +193,13 @@ Final score = `0.7 * cosine + 0.3 * lexicalScore` (weights tunable), reasons arr
 
 ### Gap 7: CLI additions
 
-**File**: `openeral-js/src/cli.ts`
+**File**: `openrind-shell-js/src/cli.ts`
 
 Parse two new subcommands:
 
 ```
-openeral memory stats      # chunk count, embed coverage %, provider in use, dims
-openeral memory reindex    # drop embedding, re-embed every chunk (e.g. after switching provider)
+openrind-shell memory stats      # chunk count, embed coverage %, provider in use, dims
+openrind-shell memory reindex    # drop embedding, re-embed every chunk (e.g. after switching provider)
 ```
 
 Both reuse the existing pool/workspace resolution.
@@ -210,32 +210,32 @@ Both reuse the existing pool/workspace resolution.
 
 ### New
 
-- `openeral-js/src/memory/embed.ts`
-- `openeral-js/src/memory/vector-rank.ts`
-- `openeral-js/src/memory/session-logs.ts`
-- `openeral-js/src/memory/sync-embeddings.ts`
-- `openeral-js/src/db/memory-queries.ts`
-- `openeral-js/src/memory/embed.test.ts`
-- `openeral-js/src/memory/vector-rank.test.ts`
-- `openeral-js/src/memory/session-logs.test.ts`
+- `openrind-shell-js/src/memory/embed.ts`
+- `openrind-shell-js/src/memory/vector-rank.ts`
+- `openrind-shell-js/src/memory/session-logs.ts`
+- `openrind-shell-js/src/memory/sync-embeddings.ts`
+- `openrind-shell-js/src/db/memory-queries.ts`
+- `openrind-shell-js/src/memory/embed.test.ts`
+- `openrind-shell-js/src/memory/vector-rank.test.ts`
+- `openrind-shell-js/src/memory/session-logs.test.ts`
 
 ### Modified
 
-- `openeral-js/src/cli.ts` (wire handler, add `stats` and `reindex` subcommands)
-- `openeral-js/src/memory/refresh.ts` (route query mode through vector-rank when available)
-- `openeral-js/src/memory/rank.ts` (return named lexical score map for blending)
-- `openeral-js/src/memory/types.ts` (add `source`, `contentHash`, optional `embedding`)
-- `openeral-js/src/sync.ts` (trigger embedChunks after walks)
-- `openeral-js/src/db/migrations.ts` (V6 inside advisory-lock block)
-- `.claude/skills/openeral-shell/SKILL.md` (document new subcommands)
+- `openrind-shell-js/src/cli.ts` (wire handler, add `stats` and `reindex` subcommands)
+- `openrind-shell-js/src/memory/refresh.ts` (route query mode through vector-rank when available)
+- `openrind-shell-js/src/memory/rank.ts` (return named lexical score map for blending)
+- `openrind-shell-js/src/memory/types.ts` (add `source`, `contentHash`, optional `embedding`)
+- `openrind-shell-js/src/sync.ts` (trigger embedChunks after walks)
+- `openrind-shell-js/src/db/migrations.ts` (V6 inside advisory-lock block)
+- `.claude/skills/openrind-shell/SKILL.md` (document new subcommands)
 - `README.md` (document `--query`, env vars, pgvector requirement)
-- `openeral-js/lint.mjs` (new lints — see below)
+- `openrind-shell-js/lint.mjs` (new lints — see below)
 
 ---
 
 ## Lints and tests
 
-### Lints (add to `openeral-js/lint.mjs`)
+### Lints (add to `openrind-shell-js/lint.mjs`)
 
 | # | Rule |
 |---|---|
@@ -258,7 +258,7 @@ Fixture: insert 10 chunks with known vectors (mocked provider that maps strings 
 
 ### E2E (extends `tests/test_claude_e2e.sh`)
 
-Add a session 3 that runs `openeral memory refresh --query "<content from session 1 file>"`, then checks that the resulting `focus-*.md` mentions the file path written in session 1.
+Add a session 3 that runs `openrind-shell memory refresh --query "<content from session 1 file>"`, then checks that the resulting `focus-*.md` mentions the file path written in session 1.
 
 ---
 
@@ -281,23 +281,23 @@ Add a session 3 that runs `openeral memory refresh --query "<content from sessio
 export DATABASE_URL='postgresql://…'
 export VOYAGE_API_KEY='…'   # or OPENAI_API_KEY
 
-cd openeral-js
+cd openrind-shell-js
 pnpm install && pnpm build
 pnpm check                                    # new lints + new unit tests
 
 # 1. Fresh DB: V6 runs, reports pgvector status
-DATABASE_URL=… node dist/bin/openeral.js memory stats
+DATABASE_URL=… node dist/bin/openrind-shell.js memory stats
 
 # 2. Sync a workspace, observe embeddings populated
 #    (triggered automatically via watchAndSync)
 
 # 3. Query-driven refresh
 DATABASE_URL=… VOYAGE_API_KEY=… \
-  node dist/bin/openeral.js memory refresh --query "socket credential injection"
+  node dist/bin/openrind-shell.js memory refresh --query "socket credential injection"
 
 # 4. Fallback: without a provider, --query still works via lexical
 unset VOYAGE_API_KEY OPENAI_API_KEY
-DATABASE_URL=… node dist/bin/openeral.js memory refresh --query "socket credential injection"
+DATABASE_URL=… node dist/bin/openrind-shell.js memory refresh --query "socket credential injection"
 
 # 5. E2E
 bash tests/test_claude_e2e.sh

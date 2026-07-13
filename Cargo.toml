@@ -1,7 +1,7 @@
 [workspace]
 members = [
-    "crates/openeral",
-    "crates/openeral-core",
+    "crates/openrind-shell",
+    "crates/openrind-shell-core",
 ]
 resolver = "2"
 

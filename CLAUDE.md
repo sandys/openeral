@@ -2,8 +2,8 @@
 
 ## Documentation layout
 
-- `README.md` — **end-user** docs. Uses ONLY `openshell sandbox create ...` with the published GHCR image. No `npx`, no `pnpm`, no clone steps. This is the supported path for anyone who wants to run OpenEral.
-- `BUILD.md` — **contributor / developer** docs. All `npx openeral`, `pnpm`, `docker build`, and test-suite commands live here.
+- `README.md` — **end-user** docs. Uses ONLY `openshell sandbox create ...` with the published GHCR image. No `npx`, no `pnpm`, no clone steps. This is the supported path for anyone who wants to run Openrind Shell.
+- `BUILD.md` — **contributor / developer** docs. All `npx openrind-shell`, `pnpm`, `docker build`, and test-suite commands live here.
 - `CLAUDE.md` (this file) — conventions for modifying the codebase.
 
 When editing user docs, **never add `npx`/`pnpm`/`npm install` commands to `README.md`** — those belong in `BUILD.md`.
@@ -11,7 +11,7 @@ When editing user docs, **never add `npx`/`pnpm`/`npm install` commands to `READ
 ## Build & Test
 
 ```bash
-cd openeral-js
+cd openrind-shell-js
 pnpm install && pnpm build
 pnpm check                    # typecheck + 29 lints + 108 unit tests
 
@@ -30,20 +30,20 @@ DATABASE_URL='...' ANTHROPIC_API_KEY='...' bash ../tests/test_claude_e2e.sh
 
 ## Project Structure
 
-- `openeral-js/` — TypeScript package
-  - `src/bin/openeral.ts` — executable wrapper for npm/npx and scripts
+- `openrind-shell-js/` — TypeScript package
+  - `src/bin/openrind-shell.ts` — executable wrapper for npm/npx and scripts
   - `src/cli.ts` — CLI parsing and command dispatch
   - `src/sync.ts` — PostgreSQL ↔ real filesystem sync
   - `src/pg-fs/` — PgFs: read-only IFileSystem backed by SQL queries
   - `src/workspace-fs/` — WorkspaceFs: read-write IFileSystem backed by workspace_files
   - `src/db/` — SQL queries, migrations, pool, types
   - `src/safety.ts` — command safety analysis via just-bash parse() AST
-  - `src/shell.ts` — createOpeneralShell(), createToolHandler()
+  - `src/shell.ts` — createOpenrindShell(), createToolHandler()
   - `src/index.ts` — public API
   - `lint.mjs` — 29 structural lint rules
-- `sandboxes/openeral/` — OpenShell sandbox image (stock base, no FUSE)
-  - `Dockerfile` — Node.js + openeral-js on stock OpenShell base
-  - `openeral-bash.mjs` — daemon/client bridge for custom agents
+- `sandboxes/openrind-shell/` — OpenShell sandbox image (stock base, no FUSE)
+  - `Dockerfile` — Node.js + openrind-shell-js on stock OpenShell base
+  - `openrind-shell-bash.mjs` — daemon/client bridge for custom agents
   - `setup.sh` — sandbox entry point
   - `policy.yaml` — network policy
 - `crates/` — original Rust implementation (reference, not used)
@@ -61,37 +61,37 @@ DATABASE_URL='...' ANTHROPIC_API_KEY='...' bash ../tests/test_claude_e2e.sh
 
 ## Agent Selection (Claude Code vs OpenClaw)
 
-The sandbox supports two agents controlled by `OPENERAL_AGENT`:
+The sandbox supports two agents controlled by `OPENRIND_SHELL_AGENT`:
 
-- `claude` (default) — Claude Code. Seeds `/.claude` and `/.claude/projects`, writes StringCost proxy to `~/.claude/settings.json`, execs `claude`.
+- `claude` (default) — Claude Code. Seeds `/.claude` and `/.claude/projects`, writes Openrind Gateway proxy to `~/.claude/settings.json`, execs `claude`.
 - `openclaw` — OpenClaw. Seeds `/.config` only (no `/.claude`), reads `ANTHROPIC_API_KEY` from env (loaded from the uploaded `/sandbox/anthropic-api-key` file), execs `openclaw` directly. OpenClaw brings up its own embedded gateway.
 
-`OPENERAL_AGENT` is never set directly by users. It is injected into the sandbox by OpenShell's provider framework: the `openclaw` generic provider carries `--credential "OPENERAL_AGENT=openclaw"`.
+`OPENRIND_SHELL_AGENT` is never set directly by users. It is injected into the sandbox by OpenShell's provider framework: the `openclaw` generic provider carries `--credential "OPENRIND_SHELL_AGENT=openclaw"`.
 
-The workspace schema (`_openeral`) is shared — both agents read and write the same `workspace_files` table.
+The workspace schema (`_openrind`) is shared — both agents read and write the same `workspace_files` table.
 
-### StringCost integration
+### Openrind Gateway integration
 
-StringCost is supported for **both agents**. The presign is stored at `~/.openeral/presign.json` with `metadata.labels: ['openeral', '<agent>']` — `claude-code` or `openclaw` — and is created against `STRINGCOST_API_BASE` (defaults to `https://app.stringcost.com`; override for local stacks). The proxy URL regex accepts both `https://proxy.stringcost.com/...` and self-hosted shapes (`http(s)://<host>/stringcost-proxy/t/...`).
+Openrind Gateway is supported for **both agents**. The presign is stored at `~/.openrind-shell/presign.json` with `metadata.labels: ['openrind-shell', '<agent>']` — `claude-code` or `openclaw` — and is created against `OPENRIND_GATEWAY_API_BASE` (defaults to `https://app.openrind.com`; override for local stacks). The proxy URL regex accepts both `https://proxy.openrind.com/...` and self-hosted shapes (`http(s)://<host>/openrind-gateway-proxy/t/...`).
 
 How each agent consumes the proxy URL:
 
 - **Claude Code** — `setup.sh` writes `ANTHROPIC_BASE_URL` into `~/.claude/settings.json` and passes it explicitly in the `exec` env.
-- **OpenClaw** — `setup.sh` exports `ANTHROPIC_BASE_URL` so the background openclaw gateway inherits it, writes it into `~/.openclaw/openclaw.json`'s `env` block (re-applied after the gateway's own config rewrite), and passes it explicitly in the openclaw `exec` env. The real `ANTHROPIC_API_KEY` is retained in `auth-profiles.json` because `openclaw onboard` requires a key value; StringCost ignores the inbound `x-api-key` since auth is via the proxy URL token.
+- **OpenClaw** — `setup.sh` exports `ANTHROPIC_BASE_URL` so the background openclaw gateway inherits it, writes it into `~/.openclaw/openclaw.json`'s `env` block (re-applied after the gateway's own config rewrite), and passes it explicitly in the openclaw `exec` env. The real `ANTHROPIC_API_KEY` is retained in `auth-profiles.json` because `openclaw onboard` requires a key value; Openrind Gateway ignores the inbound `x-api-key` since auth is via the proxy URL token.
 
-Both flows also persist `ANTHROPIC_BASE_URL` to `/home/agent/.openeral/env.sh`, which the sandbox `.bashrc` sources on reconnect.
+Both flows also persist `ANTHROPIC_BASE_URL` to `/home/agent/.openrind-shell/env.sh`, which the sandbox `.bashrc` sources on reconnect.
 
-When adding features that differ by agent, gate on `OPENERAL_AGENT` in `setup.sh` (bash) and `process.env.OPENERAL_AGENT` in Node.js.
+When adding features that differ by agent, gate on `OPENRIND_SHELL_AGENT` in `setup.sh` (bash) and `process.env.OPENRIND_SHELL_AGENT` in Node.js.
 
 ## Build & test for OpenClaw
 
 ```bash
 # Verify setup.sh handles both agents (no Docker required)
-bash -n sandboxes/openeral/setup.sh
-grep -q 'OPENERAL_AGENT' sandboxes/openeral/setup.sh
+bash -n sandboxes/openrind-shell/setup.sh
+grep -q 'OPENRIND_SHELL_AGENT' sandboxes/openrind-shell/setup.sh
 
 # Full OpenClaw setup path (requires Docker + PostgreSQL)
-DATABASE_URL='...' OPENERAL_AGENT=openclaw bash tests/test_setup_e2e.sh
+DATABASE_URL='...' OPENRIND_SHELL_AGENT=openclaw bash tests/test_setup_e2e.sh
 ```
 
 ## Hard Rules

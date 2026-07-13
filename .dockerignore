@@ -7,10 +7,10 @@ target
 agent-task.txt
 sandboxes
 !sandboxes/
-!sandboxes/openeral/
-!sandboxes/openeral/**
+!sandboxes/openrind-shell/
+!sandboxes/openrind-shell/**
 vendor
-openeral-js/node_modules
-openeral-js/dist
-openeral-js/pnpm-lock.yaml
-openeral-js/package-lock.json
+openrind-shell-js/node_modules
+openrind-shell-js/dist
+openrind-shell-js/pnpm-lock.yaml
+openrind-shell-js/package-lock.json

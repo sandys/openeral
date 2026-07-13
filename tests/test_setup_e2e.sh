@@ -9,14 +9,14 @@ set -euo pipefail
 #
 # Requires: docker, reachable PostgreSQL
 # Usage: DATABASE_URL='postgresql://...' ./tests/test_setup_e2e.sh
-# OpenClaw path: DATABASE_URL='...' OPENERAL_AGENT=openclaw ./tests/test_setup_e2e.sh
+# OpenClaw path: DATABASE_URL='...' OPENRIND_SHELL_AGENT=openclaw ./tests/test_setup_e2e.sh
 
 repo_root="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$repo_root"
 
-IMAGE="${OPENERAL_E2E_IMAGE:-openeral-e2e:local}"
+IMAGE="${OPENRIND_SHELL_E2E_IMAGE:-openrind-shell-e2e:local}"
 DB_URL="${DATABASE_URL:?DATABASE_URL required}"
-AGENT="${OPENERAL_AGENT:-claude}"
+AGENT="${OPENRIND_SHELL_AGENT:-claude}"
 WORKSPACE="setup-e2e-$$"
 PASSED=0
 FAILED=0
@@ -26,7 +26,7 @@ fail() { echo "  ✗ $1"; FAILED=$((FAILED + 1)); }
 
 echo ""
 echo "=== Building image ==="
-docker build -f sandboxes/openeral/Dockerfile -t "$IMAGE" . 2>&1 | tail -2
+docker build -f sandboxes/openrind-shell/Dockerfile -t "$IMAGE" . 2>&1 | tail -2
 
 echo ""
 echo "=== Agent: $AGENT ==="
@@ -38,21 +38,21 @@ out=$(timeout 60 docker run --rm --network host \
   -e DATABASE_URL="$DB_URL" \
   -e WORKSPACE_ID="$WORKSPACE" \
   -e OPENSHELL_SANDBOX_ID="$WORKSPACE" \
-  -e OPENERAL_AGENT="$AGENT" \
+  -e OPENRIND_SHELL_AGENT="$AGENT" \
   -e SOCKET_TOKEN="test-placeholder-token" \
   --user sandbox \
   --entrypoint /bin/sh \
   "$IMAGE" -c '
     # Run setup.sh but replace the final exec claude with verification
-    OPENERAL_DIR=/opt/openeral
+    OPENRIND_SHELL_DIR=/opt/openrind-shell
 
-    export DATABASE_URL="${DATABASE_URL:-${OPENERAL_DATABASE_URL:-}}"
+    export DATABASE_URL="${DATABASE_URL:-${OPENRIND_SHELL_DATABASE_URL:-}}"
     export WORKSPACE_ID="${OPENSHELL_SANDBOX_ID:-default}"
 
     # --- Run migrations (from setup.sh) ---
     node -e "
-      import(\"/opt/openeral/dist/db/pool.js\").then(async({createPool})=>{
-        const{runMigrations}=await import(\"/opt/openeral/dist/db/migrations.js\");
+      import(\"/opt/openrind-shell/dist/db/pool.js\").then(async({createPool})=>{
+        const{runMigrations}=await import(\"/opt/openrind-shell/dist/db/migrations.js\");
         const p=createPool(process.env.DATABASE_URL);
         await runMigrations(p);await p.end();console.log(\"CHECK:migrations=ok\");
       }).catch(e=>{console.error(\"CHECK:migrations=FAIL:\"+e.message);process.exit(1)});
@@ -60,11 +60,11 @@ out=$(timeout 60 docker run --rm --network host \
 
     # --- Seed workspace (from setup.sh, agent-aware) ---
     node -e "
-      import(\"/opt/openeral/dist/db/pool.js\").then(async({createPool})=>{
-        const ws=await import(\"/opt/openeral/dist/db/workspace-queries.js\");
+      import(\"/opt/openrind-shell/dist/db/pool.js\").then(async({createPool})=>{
+        const ws=await import(\"/opt/openrind-shell/dist/db/workspace-queries.js\");
         const p=createPool(process.env.DATABASE_URL);
-        try{await p.query(\"INSERT INTO _openeral.workspace_config (id,display_name,config) VALUES(\\\$1,\\\$2,\\x27{}\\x27::jsonb) ON CONFLICT(id) DO NOTHING\",[process.env.WORKSPACE_ID,\"sandbox\"])}catch{}
-        const agentKind=process.env.OPENERAL_AGENT||\"claude\";
+        try{await p.query(\"INSERT INTO _openrind.workspace_config (id,display_name,config) VALUES(\\\$1,\\\$2,\\x27{}\\x27::jsonb) ON CONFLICT(id) DO NOTHING\",[process.env.WORKSPACE_ID,\"sandbox\"])}catch{}
+        const agentKind=process.env.OPENRIND_SHELL_AGENT||\"claude\";
         const autoDirs=agentKind===\"openclaw\"?[\"/\",\"/.config\"]:[\"\/\",\"/.claude\",\"/.claude/projects\"];
         await ws.seedFromConfig(p,process.env.WORKSPACE_ID,{autoDirs,seedFiles:{}});
         await p.end();console.log(\"CHECK:seed=ok:agent=\"+agentKind);
@@ -72,22 +72,22 @@ out=$(timeout 60 docker run --rm --network host \
     "
 
     # --- Socket.dev config (from setup.sh) ---
-    OPENERAL_NPMRC=/tmp/openeral-npmrc
-    rm -f "$OPENERAL_NPMRC"
+    OPENRIND_SHELL_NPMRC=/tmp/openrind-shell-npmrc
+    rm -f "$OPENRIND_SHELL_NPMRC"
     if [ -n "${SOCKET_TOKEN:-}" ]; then
-      cat > "$OPENERAL_NPMRC" <<NPMRC
+      cat > "$OPENRIND_SHELL_NPMRC" <<NPMRC
 registry=https://registry.socket.dev/npm/
 //registry.socket.dev/npm/:_authToken=${SOCKET_TOKEN}
 NPMRC
-      export NPM_CONFIG_USERCONFIG="$OPENERAL_NPMRC"
+      export NPM_CONFIG_USERCONFIG="$OPENRIND_SHELL_NPMRC"
       echo "CHECK:socket-config=ok"
     fi
 
     # --- Start daemon (from setup.sh) ---
-    node "$OPENERAL_DIR/openeral-bash.mjs" --daemon &
+    node "$OPENRIND_SHELL_DIR/openrind-shell-bash.mjs" --daemon &
     DPID=$!
-    for i in $(seq 1 30); do [ -S /tmp/openeral-bash.sock ] && break; sleep 0.1; done
-    if [ -S /tmp/openeral-bash.sock ]; then
+    for i in $(seq 1 30); do [ -S /tmp/openrind-shell-bash.sock ] && break; sleep 0.1; done
+    if [ -S /tmp/openrind-shell-bash.sock ]; then
       echo "CHECK:daemon=ok"
     else
       echo "CHECK:daemon=FAIL"
@@ -113,9 +113,9 @@ NPMRC
     # 4. SOCKET_TOKEN is in environment (would be placeholder in real OpenShell)
     echo "CHECK:socket-token-present=$([ -n "${SOCKET_TOKEN:-}" ] && echo yes || echo no)"
 
-    # 5. openeral-bash daemon responds
+    # 5. openrind-shell-bash daemon responds
     DAEMON_RESP=$(node -e "
-      const net=require(\"net\"),c=net.createConnection(\"/tmp/openeral-bash.sock\");
+      const net=require(\"net\"),c=net.createConnection(\"/tmp/openrind-shell-bash.sock\");
       let d=\"\";
       c.on(\"connect\",()=>c.write(JSON.stringify({command:\"echo daemon-works\"})+\"\n\"));
       c.on(\"data\",chunk=>d+=chunk);
@@ -127,7 +127,7 @@ NPMRC
     echo "CHECK:node-available=$(which node)"
 
     # 7. Agent-specific checks
-    AGENT="${OPENERAL_AGENT:-claude}"
+    AGENT="${OPENRIND_SHELL_AGENT:-claude}"
     if [ "$AGENT" = "openclaw" ]; then
       # openclaw path: /.config should exist, /.claude should NOT
       echo "CHECK:agent-dirs-openclaw=$([ -d /home/agent/.config ] && echo ok || echo FAIL)"
@@ -160,7 +160,7 @@ check "seed"                    "CHECK:seed=ok"
 check "socket config"           "CHECK:socket-config=ok"
 check "daemon"                  "CHECK:daemon=ok"
 check "home writable"           "CHECK:home-writable=ok"
-check "NPM_CONFIG_USERCONFIG"   "CHECK:npm-userconfig=/tmp/openeral-npmrc"
+check "NPM_CONFIG_USERCONFIG"   "CHECK:npm-userconfig=/tmp/openrind-shell-npmrc"
 check "npm reads socket.dev"    "CHECK:npm-registry=https://registry.socket.dev"
 check "user .npmrc untouched"   "CHECK:user-npmrc=absent-ok"
 check "SOCKET_TOKEN present"    "CHECK:socket-token-present=yes"
@@ -178,8 +178,8 @@ fi
 node -e "
   import('pg').then(async({default:pg})=>{
     const pool=new pg.Pool({connectionString:process.env.DATABASE_URL});
-    await pool.query('DELETE FROM _openeral.workspace_files WHERE workspace_id=\$1',['$WORKSPACE']);
-    await pool.query('DELETE FROM _openeral.workspace_config WHERE id=\$1',['$WORKSPACE']);
+    await pool.query('DELETE FROM _openrind.workspace_files WHERE workspace_id=\$1',['$WORKSPACE']);
+    await pool.query('DELETE FROM _openrind.workspace_config WHERE id=\$1',['$WORKSPACE']);
     await pool.end();
   }).catch(()=>{});
 " 2>/dev/null || true

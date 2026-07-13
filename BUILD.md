@@ -1,6 +1,6 @@
-# BUILD.md — Local development for OpenEral
+# BUILD.md — Local development for Openrind Shell
 
-This file is for **contributors and developers** who want to modify OpenEral, build the sandbox image locally, or run the test suite. End users should follow [README.md](./README.md) — the published GHCR image is the supported path.
+This file is for **contributors and developers** who want to modify Openrind Shell, build the sandbox image locally, or run the test suite. End users should follow [README.md](./README.md) — the published GHCR image is the supported path.
 
 ---
 
@@ -17,42 +17,42 @@ This file is for **contributors and developers** who want to modify OpenEral, bu
 
 ```bash
 git clone https://github.com/openrind/openrind-shell.git
-cd openrind-shell/openeral-js
+cd openrind-shell/openrind-shell-js
 pnpm install
 pnpm build
 ```
 
-This compiles TypeScript into `openeral-js/dist/`. The `dist/bin/openeral.js` script is what `npx openeral` resolves to when the package is published, and what the sandbox image runs internally.
+This compiles TypeScript into `openrind-shell-js/dist/`. The `dist/bin/openrind-shell.js` script is what `npx openrind-shell` resolves to when the package is published, and what the sandbox image runs internally.
 
 ---
 
 ## Run the CLI without a sandbox
 
-The `openeral-js` package exposes a CLI that launches Claude Code locally, starts the OpenShell gateway, and creates a sandbox — all wrapped into one command. For day-to-day development this is quicker than invoking `openshell` by hand each time.
+The `openrind-shell-js` package exposes a CLI that launches Claude Code locally, starts the OpenShell gateway, and creates a sandbox — all wrapped into one command. For day-to-day development this is quicker than invoking `openshell` by hand each time.
 
 ```bash
 export ANTHROPIC_API_KEY='sk-ant-...'
-npx openeral
+npx openrind-shell
 ```
 
-By default this **pulls the published GHCR image** `ghcr.io/openrind/openeral/sandbox:just-bash`. To use a locally-built image instead, add `--dev`:
+By default this **pulls the published GHCR image** `ghcr.io/openrind/openrind-shell/sandbox:just-bash`. To use a locally-built image instead, add `--dev`:
 
 ```bash
-npx openeral --dev        # uses openeral-sandbox:dev (you must build it first)
-npx openeral -d           # shorthand
+npx openrind-shell --dev        # uses openrind-shell-sandbox:dev (you must build it first)
+npx openrind-shell -d           # shorthand
 ```
 
 **Build the dev image locally:**
 
 ```bash
 # From the repo root
-docker build -f sandboxes/openeral/Dockerfile -t openeral-sandbox:dev .
+docker build -f sandboxes/openrind-shell/Dockerfile -t openrind-shell-sandbox:dev .
 ```
 
 Override the dev image name via env var (if you tagged it differently):
 
 ```bash
-OPENERAL_DEV_IMAGE=my-image:tag npx openeral --dev
+OPENRIND_SHELL_DEV_IMAGE=my-image:tag npx openrind-shell --dev
 ```
 
 ---
@@ -63,19 +63,19 @@ All subcommands accept `--dev`/`-d` to target the local dev image.
 
 | Command | Description |
 |---|---|
-| `npx openeral` | Launch Claude Code (published image) |
-| `npx openeral --dev` | Launch Claude Code (local dev image) |
-| `npx openeral --agent openclaw` | Launch OpenClaw instead of Claude Code |
-| `npx openeral presign` | Show the currently stored StringCost presign |
-| `npx openeral presign renew` | Create a new permanent StringCost presign and store it |
-| `npx openeral stats` | API usage statistics (cost, tokens, model distribution, cache hit rate) |
-| `npx openeral analyze` | Analyze session history and produce ranked optimization proposals |
-| `npx openeral apply` | Auto-apply proposals from `analyze` — patches `CLAUDE.md`, creates `CONTEXT.md`, compacts memory |
-| `npx openeral apply --dry-run` | Preview `apply` changes without writing |
-| `npx openeral apply --proposal <id>` | Apply a single proposal (`model-routing`, `context-file`, `lazy-reading`, `readme-updates`, `memory-compact`) |
-| `npx openeral memory refresh` | Rewrite Claude's native project memory files |
-| `npx openeral memory refresh --query "..."` | Focus memory refresh on a specific topic |
-| `npx openeral -- <args>` | Pass arguments straight to Claude (e.g. `npx openeral -- -p 'hello'`) |
+| `npx openrind-shell` | Launch Claude Code (published image) |
+| `npx openrind-shell --dev` | Launch Claude Code (local dev image) |
+| `npx openrind-shell --agent openclaw` | Launch OpenClaw instead of Claude Code |
+| `npx openrind-shell presign` | Show the currently stored Openrind Gateway presign |
+| `npx openrind-shell presign renew` | Create a new permanent Openrind Gateway presign and store it |
+| `npx openrind-shell stats` | API usage statistics (cost, tokens, model distribution, cache hit rate) |
+| `npx openrind-shell analyze` | Analyze session history and produce ranked optimization proposals |
+| `npx openrind-shell apply` | Auto-apply proposals from `analyze` — patches `CLAUDE.md`, creates `CONTEXT.md`, compacts memory |
+| `npx openrind-shell apply --dry-run` | Preview `apply` changes without writing |
+| `npx openrind-shell apply --proposal <id>` | Apply a single proposal (`model-routing`, `context-file`, `lazy-reading`, `readme-updates`, `memory-compact`) |
+| `npx openrind-shell memory refresh` | Rewrite Claude's native project memory files |
+| `npx openrind-shell memory refresh --query "..."` | Focus memory refresh on a specific topic |
+| `npx openrind-shell -- <args>` | Pass arguments straight to Claude (e.g. `npx openrind-shell -- -p 'hello'`) |
 
 **Options shared by `stats`, `analyze`, `apply`:**
 
@@ -93,20 +93,20 @@ All subcommands accept `--dev`/`-d` to target the local dev image.
 | Variable | Default | Description |
 |---|---|---|
 | `ANTHROPIC_API_KEY` | (required) | Anthropic API key |
-| `STRINGCOST_API_KEY` | (optional) | StringCost key — enables cost tracking (Claude Code only) |
+| `OPENRIND_GATEWAY_API_KEY` | (optional) | Openrind Gateway key — enables cost tracking (Claude Code only) |
 | `DATABASE_URL` | (optional) | PostgreSQL connection string — enables persistence and `pg` |
-| `OPENERAL_AGENT` | `claude` | Agent to launch: `claude` or `openclaw`. Injected via the `openclaw` provider; not set directly. |
-| `OPENERAL_WORKSPACE_ID` | hostname | Workspace identifier |
-| `OPENERAL_HOME` | `/tmp/openeral-<id>` | Local workspace directory |
-| `OPENERAL_SANDBOX_IMAGE` | `ghcr.io/openrind/openeral/sandbox:just-bash` | Override the production sandbox image |
-| `OPENERAL_DEV_IMAGE` | `openeral-sandbox:dev` | Override the dev sandbox image (used with `--dev`/`-d`) |
+| `OPENRIND_SHELL_AGENT` | `claude` | Agent to launch: `claude` or `openclaw`. Injected via the `openclaw` provider; not set directly. |
+| `OPENRIND_SHELL_WORKSPACE_ID` | hostname | Workspace identifier |
+| `OPENRIND_SHELL_HOME` | `/tmp/openrind-shell-<id>` | Local workspace directory |
+| `OPENRIND_SHELL_SANDBOX_IMAGE` | `ghcr.io/openrind/openrind-shell/sandbox:just-bash` | Override the production sandbox image |
+| `OPENRIND_SHELL_DEV_IMAGE` | `openrind-shell-sandbox:dev` | Override the dev sandbox image (used with `--dev`/`-d`) |
 
 ---
 
 ## Test suite
 
 ```bash
-cd openeral-js
+cd openrind-shell-js
 pnpm check                    # typecheck + lints + unit tests
 ```
 
@@ -145,11 +145,11 @@ Launches Claude Code through the built binary, has it write a file, deletes the 
 ### OpenClaw code path (requires Docker + PostgreSQL)
 
 ```bash
-# Exercise setup.sh with OPENERAL_AGENT=openclaw
-DATABASE_URL='...' OPENERAL_AGENT=openclaw bash ../tests/test_setup_e2e.sh
+# Exercise setup.sh with OPENRIND_SHELL_AGENT=openclaw
+DATABASE_URL='...' OPENRIND_SHELL_AGENT=openclaw bash ../tests/test_setup_e2e.sh
 ```
 
-Verifies that setup.sh correctly seeds `/.config` (not `/.claude`), skips StringCost, and detects the openclaw binary when `OPENERAL_AGENT=openclaw` is set.
+Verifies that setup.sh correctly seeds `/.config` (not `/.claude`), skips Openrind Gateway, and detects the openclaw binary when `OPENRIND_SHELL_AGENT=openclaw` is set.
 
 ---
 
@@ -158,9 +158,9 @@ Verifies that setup.sh correctly seeds `/.config` (not `/.claude`), skips String
 For agents with a single bash tool (not the Claude Code CLI), you can use the just-bash virtual filesystem directly:
 
 ```typescript
-import { createOpeneralShell, createToolHandler } from 'openeral-js'
+import { createOpenrindShell, createToolHandler } from 'openrind-shell-js'
 
-const shell = await createOpeneralShell({
+const shell = await createOpenrindShell({
   connectionString: process.env.DATABASE_URL,
   workspaceId: 'my-session',
 })
@@ -177,11 +177,11 @@ This path uses [just-bash](https://github.com/vercel-labs/just-bash) with Postgr
 ## Project structure
 
 ```
-openeral-js/                  # TypeScript package
-  src/bin/openeral.ts         # executable wrapper for npm/npx
+openrind-shell-js/                  # TypeScript package
+  src/bin/openrind-shell.ts         # executable wrapper for npm/npx
   src/cli.ts                  # CLI parsing and command dispatch
   src/sync.ts                 # PostgreSQL ↔ filesystem sync
-  src/shell.ts                # createOpeneralShell() for custom agents
+  src/shell.ts                # createOpenrindShell() for custom agents
   src/pg-fs/                  # Read-only /db filesystem
   src/workspace-fs/           # Read-write /home/agent filesystem
   src/memory/                 # Claude project-memory refresh
@@ -190,8 +190,8 @@ openeral-js/                  # TypeScript package
   src/safety.ts               # Command safety analysis
   lint.mjs                    # structural lint rules
 
-sandboxes/openeral/           # OpenShell sandbox image
-  Dockerfile                  # Stock base + Node.js + openeral-js
+sandboxes/openrind-shell/           # OpenShell sandbox image
+  Dockerfile                  # Stock base + Node.js + openrind-shell-js
   setup.sh                    # Sandbox entry point
   policy.yaml                 # Network policy
 
@@ -205,12 +205,12 @@ tests/                        # End-to-end test scripts
 
 ## Publishing a new image
 
-Images are built and pushed by GitHub Actions on push to the `just-bash` branch (see `.github/workflows/publish-images.yml`). The tag `ghcr.io/openrind/openeral/sandbox:just-bash` always tracks the latest successful build on that branch.
+Images are built and pushed by GitHub Actions on push to the `just-bash` branch (see `.github/workflows/publish-images.yml`). The tag `ghcr.io/openrind/openrind-shell/sandbox:just-bash` always tracks the latest successful build on that branch.
 
 To test before pushing:
 
 ```bash
-docker build -f sandboxes/openeral/Dockerfile -t openeral-sandbox:dev .
+docker build -f sandboxes/openrind-shell/Dockerfile -t openrind-shell-sandbox:dev .
 bash tests/test_sandbox_e2e.sh
 bash tests/test_setup_e2e.sh
 ANTHROPIC_API_KEY='...' DATABASE_URL='...' bash tests/test_claude_e2e.sh
@@ -227,7 +227,7 @@ ANTHROPIC_API_KEY='...' DATABASE_URL='...' bash tests/test_claude_e2e.sh
   │                      │                                     │
   │                 file watcher                               │
   │                      │                                     │
-  │  openeral-js sync ───▼──────────────────────────────────┐  │
+  │  openrind-shell-js sync ───▼──────────────────────────────────┐  │
   │  pg.Pool wrapped in a CONNECT-tunneled Duplex           │  │
   │  (DATABASE_URL → Supabase / Neon / external Postgres)   │  │
   │  ───────────────────────────────────────────────────────┘  │
@@ -235,7 +235,7 @@ ANTHROPIC_API_KEY='...' DATABASE_URL='...' bash tests/test_claude_e2e.sh
                            │  (all egress via OpenShell HTTP CONNECT proxy)
           ┌────────────────┼────────────────┐
           ▼                ▼                ▼
-   api.anthropic.com   StringCost      Supabase pg wire protocol
+   api.anthropic.com   Openrind Gateway      Supabase pg wire protocol
    (x-api-key          (cost tracking  (CONNECT tunnel; pg negotiates
     placeholder         proxy)          its own TLS end-to-end)
     resolved at proxy)
@@ -245,7 +245,7 @@ Every outbound connection from the sandbox goes through OpenShell's HTTP CONNECT
 
 ### How pg reaches Supabase
 
-pg doesn't speak HTTP CONNECT. `openeral-js/src/db/http-connect-socket.ts` wraps a raw `net.Socket` in a `Duplex`: when pg calls `.connect(port, host)`, the Duplex dials the proxy, writes `CONNECT host:port HTTP/1.1`, waits for `200 Connection Established`, and only then emits `'connect'` upward. pg's own TLS handshake runs end-to-end inside the tunnel, so Supabase credentials never reach the proxy.
+pg doesn't speak HTTP CONNECT. `openrind-shell-js/src/db/http-connect-socket.ts` wraps a raw `net.Socket` in a `Duplex`: when pg calls `.connect(port, host)`, the Duplex dials the proxy, writes `CONNECT host:port HTTP/1.1`, waits for `200 Connection Established`, and only then emits `'connect'` upward. pg's own TLS handshake runs end-to-end inside the tunnel, so Supabase credentials never reach the proxy.
 
 ### Why credentials come through `--upload`, not `--provider`
 
@@ -258,7 +258,7 @@ OpenShell's `SecretResolver` unconditionally wraps every provider credential as 
 The shipped `policy.yaml` allowlists common Supabase pooler regions under the `postgres` network policy. To add a host (different region, Neon, RDS, self-hosted), append its `host:port` entry and rebuild:
 
 ```yaml
-# sandboxes/openeral/policy.yaml
+# sandboxes/openrind-shell/policy.yaml
 network_policies:
   postgres:
     endpoints:
@@ -270,6 +270,6 @@ network_policies:
 
 Then rebuild and push the image (or use `--dev` with a locally-tagged image).
 
-### `_openeral` schema on Supabase
+### `_openrind` schema on Supabase
 
 Migration V6 grants `USAGE` on the schema to `service_role, dashboard_user, authenticated, anon` and `SELECT` on all tables to `service_role, dashboard_user`. Without these, the Supabase Table Editor shows the schema but none of its rows — the tables are owned by `postgres` and only readable there. The V6 grants wrap each role in a try/catch on `42704` (undefined role) so the migration still succeeds on non-Supabase databases where those roles don't exist.

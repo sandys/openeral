@@ -2,8 +2,8 @@
 set -euo pipefail
 
 : "${OPENSHELL_CLUSTER_IMAGE:?must be set}"
-: "${OPENERAL_GATEWAY_IMAGE:?must be set}"
-: "${OPENERAL_SANDBOX_IMAGE:?must be set}"
+: "${OPENRIND_SHELL_GATEWAY_IMAGE:?must be set}"
+: "${OPENRIND_SHELL_SANDBOX_IMAGE:?must be set}"
 
 command -v openshell >/dev/null 2>&1 || {
     echo "openshell CLI is not on PATH" >&2
@@ -11,12 +11,12 @@ command -v openshell >/dev/null 2>&1 || {
 }
 openshell --version
 
-GATEWAY_NAME="${OPENSHELL_GATEWAY_NAME:-openeral-smoke-${RANDOM}}"
+GATEWAY_NAME="${OPENSHELL_GATEWAY_NAME:-openrind-shell-smoke-${RANDOM}}"
 GATEWAY_PORT="${OPENSHELL_GATEWAY_PORT:-8080}"
-SANDBOX_NAME="${OPENERAL_SANDBOX_NAME:-openeral-smoke-${RANDOM}}"
-DB_PROVIDER="${OPENERAL_DB_PROVIDER:-openeral-db-${RANDOM}}"
-DB_CONTAINER="${OPENERAL_SMOKE_DB_CONTAINER:-openeral-smoke-postgres}"
-DB_PORT="${OPENERAL_SMOKE_DB_PORT:-15432}"
+SANDBOX_NAME="${OPENRIND_SHELL_SANDBOX_NAME:-openrind-shell-smoke-${RANDOM}}"
+DB_PROVIDER="${OPENRIND_SHELL_DB_PROVIDER:-openrind-shell-db-${RANDOM}}"
+DB_CONTAINER="${OPENRIND_SHELL_SMOKE_DB_CONTAINER:-openrind-shell-smoke-postgres}"
+DB_PORT="${OPENRIND_SHELL_SMOKE_DB_PORT:-15432}"
 DOWNLOAD_DIR=""
 
 cleanup() {
@@ -85,8 +85,8 @@ ACTUAL_GATEWAY_IMAGE="$(
         kubectl -n openshell get statefulset openshell \
         -o jsonpath='{.spec.template.spec.containers[0].image}'
 )"
-if [ "$ACTUAL_GATEWAY_IMAGE" != "$OPENERAL_GATEWAY_IMAGE" ]; then
-    echo "Expected gateway image ${OPENERAL_GATEWAY_IMAGE}, got ${ACTUAL_GATEWAY_IMAGE}" >&2
+if [ "$ACTUAL_GATEWAY_IMAGE" != "$OPENRIND_SHELL_GATEWAY_IMAGE" ]; then
+    echo "Expected gateway image ${OPENRIND_SHELL_GATEWAY_IMAGE}, got ${ACTUAL_GATEWAY_IMAGE}" >&2
     exit 1
 fi
 
@@ -100,7 +100,7 @@ SANDBOX_OUTPUT="$(
     openshell sandbox create \
         --gateway "$GATEWAY_NAME" \
         --name "$SANDBOX_NAME" \
-        --from "$OPENERAL_SANDBOX_IMAGE" \
+        --from "$OPENRIND_SHELL_SANDBOX_IMAGE" \
         --provider "$DB_PROVIDER" \
         --no-tty -- \
         sh -lc '
@@ -140,7 +140,7 @@ fi
 
 MANUAL_COUNT="$(
     PGPASSWORD=pgmount psql -h localhost -p "$DB_PORT" -U pgmount -d testdb -Atqc \
-        "SELECT count(*) FROM _openeral.workspace_files WHERE path = '/manual.txt' AND content = convert_to('persist-ok', 'UTF8')"
+        "SELECT count(*) FROM _openrind.workspace_files WHERE path = '/manual.txt' AND content = convert_to('persist-ok', 'UTF8')"
 )"
 if [ "$MANUAL_COUNT" != "1" ]; then
     echo "Expected one persisted /manual.txt row, got ${MANUAL_COUNT}" >&2

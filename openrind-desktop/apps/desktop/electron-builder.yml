@@ -1,0 +1,124 @@
+# IMPORTANT: appId intentionally matches the Tauri shell so both builds share
+# the same macOS bundle identifier, keychain entries, Launchpad slot, and TCC
+# permissions. In-place migration from Tauri to Electron depends on this.
+appId: com.differentai.openrind-desktop
+productName: Openrind Desktop
+protocols:
+  - name: Openrind Desktop
+    schemes:
+      - openrind-desktop
+directories:
+  output: dist-electron
+files:
+  - electron/**/*
+  - package.json
+extraResources:
+  - from: ../app/dist
+    to: app-dist
+  # OpenShell sandbox policy bundle (Phase 8). Mapped into
+  # process.resourcesPath/openshell-policies; the Electron main process
+  # serves them via the openshellListPolicies IPC handler.
+  - from: ../orchestrator/policies
+    to: openshell-policies
+asar: true
+npmRebuild: false
+afterPack: scripts/electron-after-pack.cjs
+afterSign: scripts/electron-after-sign.cjs
+# electron-updater feed. Matches the existing release workflow's GitHub target
+# so both Tauri (latest.json) and Electron (latest*.yml) can live on the same
+# release assets during the migration window.
+publish:
+  - provider: github
+    owner: ankurshashwat
+    repo: openrind-desktop
+    releaseType: release
+mac:
+  icon: resources/icons/icon.icns
+  category: public.app-category.developer-tools
+  hardenedRuntime: true
+  gatekeeperAssess: false
+  notarize: false
+  # Required for microphone access under the hardened runtime; the composer's
+  # voice dictation captures audio that is transcribed entirely on-device.
+  extendInfo:
+    NSMicrophoneUsageDescription: Openrind Desktop uses your microphone for on-device voice dictation in the prompt composer.
+  extraResources:
+    - from: resources/sidecars
+      to: sidecars
+      filter:
+        - opencode
+        - opencode-aarch64-apple-darwin
+        - opencode-x86_64-apple-darwin
+        - openrind-desktop-server
+        - openrind-desktop-server-aarch64-apple-darwin
+        - openrind-desktop-server-x86_64-apple-darwin
+        - openrind-desktop-orchestrator
+        - openrind-desktop-orchestrator-aarch64-apple-darwin
+        - openrind-desktop-orchestrator-x86_64-apple-darwin
+        - chrome-devtools-mcp
+        - chrome-devtools-mcp-aarch64-apple-darwin
+        - chrome-devtools-mcp-x86_64-apple-darwin
+        - versions.json
+        - versions.json-aarch64-apple-darwin
+        - versions.json-x86_64-apple-darwin
+  target:
+    - dmg
+    - zip
+linux:
+  icon: resources/icons/icon.png
+  extraResources:
+    - from: resources/sidecars
+      to: sidecars
+      filter:
+        - opencode
+        - opencode-aarch64-unknown-linux-gnu
+        - opencode-x86_64-unknown-linux-gnu
+        - openrind-desktop-server
+        - openrind-desktop-server-aarch64-unknown-linux-gnu
+        - openrind-desktop-server-x86_64-unknown-linux-gnu
+        - openrind-desktop-orchestrator
+        - openrind-desktop-orchestrator-aarch64-unknown-linux-gnu
+        - openrind-desktop-orchestrator-x86_64-unknown-linux-gnu
+        - chrome-devtools-mcp
+        - chrome-devtools-mcp-aarch64-unknown-linux-gnu
+        - chrome-devtools-mcp-x86_64-unknown-linux-gnu
+        - versions.json
+        - versions.json-aarch64-unknown-linux-gnu
+        - versions.json-x86_64-unknown-linux-gnu
+  target:
+    - AppImage
+    - tar.gz
+win:
+  icon: resources/icons/icon.ico
+  extraResources:
+    - from: resources/sidecars
+      to: sidecars
+      filter:
+        - opencode.exe
+        - opencode-aarch64-pc-windows-msvc.exe
+        - opencode-x86_64-pc-windows-msvc.exe
+        - openrind-desktop-server.exe
+        - openrind-desktop-server-aarch64-pc-windows-msvc.exe
+        - openrind-desktop-server-x86_64-pc-windows-msvc.exe
+        - openrind-desktop-orchestrator.exe
+        - openrind-desktop-orchestrator-aarch64-pc-windows-msvc.exe
+        - openrind-desktop-orchestrator-x86_64-pc-windows-msvc.exe
+        - chrome-devtools-mcp.exe
+        - chrome-devtools-mcp-aarch64-pc-windows-msvc.exe
+        - chrome-devtools-mcp-x86_64-pc-windows-msvc.exe
+        - versions.json
+        - versions.json-aarch64-pc-windows-msvc.exe
+        - versions.json-x86_64-pc-windows-msvc.exe
+    # Bundled Ubuntu 24.04 rootfs (~150 MB) used by installer.mjs's
+    # phaseDistro to `wsl --import` the openrind-desktop-openshell distro
+    # without depending on the Microsoft Store (GPO-blocked at most
+    # banks). Built separately by .github/workflows/build-windows-openshell.yml
+    # and dropped into apps/desktop/resources/openshell/ before
+    # electron-builder runs.
+    - from: resources/openshell
+      to: openshell
+      filter:
+        - "*.tar.gz"
+  target:
+    - nsis
+artifactName: openrind-desktop-${os}-${arch}-${version}.${ext}
