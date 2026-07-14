@@ -10,6 +10,8 @@ sandboxes
 !sandboxes/openrind-shell/
 !sandboxes/openrind-shell/**
 vendor
+openrind-desktop
+crates
 openrind-shell-js/node_modules
 openrind-shell-js/dist
 openrind-shell-js/pnpm-lock.yaml

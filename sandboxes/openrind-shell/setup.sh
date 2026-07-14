@@ -936,7 +936,7 @@ if (baseUrl) {
   // URL has no /v1 suffix so this is correct. apiKey is required by openclaw
   // but ignored by the OpenrindGateway proxy (auth is via the presign token
   // already embedded in baseUrl).
-  config.models.providers.openrind-gateway = {
+  config.models.providers['openrind-gateway'] = {
     baseUrl: baseUrl,
     api: 'anthropic-messages',
     apiKey: realKey || 'openrind-gateway-presign-auth',
@@ -964,7 +964,7 @@ if (baseUrl) {
 } else {
   // No OpenrindGateway — remove any openrind-gateway provider/mapping from prior runs.
   if (config.models && config.models.providers) {
-    delete config.models.providers.openrind-gateway;
+    delete config.models.providers['openrind-gateway'];
     if (config.models.providers.anthropic) {
       delete config.models.providers.anthropic.baseUrl;
       delete config.models.providers.anthropic.apiKey;
@@ -1151,7 +1151,7 @@ if (baseUrl) {
   if (!config.models) config.models = {};
   if (!config.models.mode) config.models.mode = 'merge';
   if (!config.models.providers) config.models.providers = {};
-  config.models.providers.openrind-gateway = {
+  config.models.providers['openrind-gateway'] = {
     baseUrl: baseUrl,
     api: 'anthropic-messages',
     apiKey: realKey || 'openrind-gateway-presign-auth',
@@ -1177,7 +1177,7 @@ if (baseUrl) {
   }
 } else {
   if (config.models && config.models.providers) {
-    delete config.models.providers.openrind-gateway;
+    delete config.models.providers['openrind-gateway'];
     if (config.models.providers.anthropic) {
       delete config.models.providers.anthropic.baseUrl;
       delete config.models.providers.anthropic.apiKey;
