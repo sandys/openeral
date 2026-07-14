@@ -59,6 +59,15 @@ function resolveSandboxImageOverride() {
 const DEFAULT_PULL_TIMEOUT_MS = 10 * 60_000;
 const DEFAULT_CREATE_TIMEOUT_MS = 3 * 60_000;
 const DEFAULT_PROBE_TIMEOUT_MS = 15_000;
+// On a fresh app start the WSL VM boots and the openshell gateway (systemd user
+// service / docker container) starts a few seconds LATER; until it is
+// listening, `openshell sandbox list` exits 1 with a transport "Connection
+// refused (os error 111)". listSandboxes() retries within this budget so the
+// sidebar/manager self-heal during warmup instead of surfacing that transient
+// error (which previously required a manual refresh). Override for slow hosts.
+const LIST_GATEWAY_WARMUP_MS = Number(
+  process.env.OPENRIND_DESKTOP_LIST_WARMUP_MS || 20_000,
+);
 
 // OpenrindGateway cost-tracking control plane. Defaults to the hosted service;
 // override with OPENRIND_GATEWAY_API_BASE=http://<host>:8080 to point at a
@@ -265,6 +274,20 @@ function parseListTextPhase(stdout, sandboxName) {
  *
  * @returns {Promise<Array<{ name: string, created: string, phase: string }>>}
  */
+/**
+ * True when an `openshell sandbox list` failure is the transient "gateway is
+ * still coming up" transport error (TCP connect refused) rather than a real
+ * CLI/usage error. On a cold app start this is expected for the first few
+ * seconds while the gateway service binds its socket.
+ *
+ * @param {string} text  Combined stderr/stdout of the failed command.
+ */
+function isGatewayWarmingError(text) {
+  return /connection refused|tcp connect error|transport error|os error 111/i.test(
+    text || "",
+  );
+}
+
 export async function listSandboxes() {
   // THROWS on spawn failure / non-zero exit instead of returning [] — the
   // callers (sidebar section, manager) must be able to tell "the gateway is
@@ -272,20 +295,38 @@ export async function listSandboxes() {
   // sandboxes" (show the empty state). At app boot the first list reliably
   // fails while the WSL VM + gateway start, and swallowing that error left
   // the sidebar claiming no sandboxes existed for up to a minute.
-  const r = await wslRun(
-    [
-      "-d",
-      DISTRO_NAME,
-      "--",
-      "bash",
-      "-c",
-      "timeout 15 openshell sandbox list",
-    ],
-    { timeout: 25_000 },
-  );
-  if (r.exitCode !== 0) {
+  //
+  // Cold-start resilience: while the gateway is still warming up, the list
+  // exits 1 with a transport "Connection refused (os error 111)". That is not
+  // a real failure and not "no sandboxes", so retry it within a bounded budget
+  // instead of surfacing the raw error (which previously stranded the
+  // Sandboxes manager until a manual refresh). A clean exit — even with zero
+  // rows — or any non-transport error resolves immediately.
+  let r;
+  const deadline = Date.now() + LIST_GATEWAY_WARMUP_MS;
+  for (let attempt = 0; ; attempt++) {
+    r = await wslRun(
+      [
+        "-d",
+        DISTRO_NAME,
+        "--",
+        "bash",
+        "-c",
+        "timeout 15 openshell sandbox list",
+      ],
+      { timeout: 25_000 },
+    );
+    if (r.exitCode === 0) break;
+    const errText = (r.stderr || r.stdout).trim();
+    if (isGatewayWarmingError(errText) && Date.now() < deadline) {
+      // Backoff 500ms → 1s → 2s (capped) while the gateway finishes binding.
+      await new Promise((resolve) =>
+        setTimeout(resolve, Math.min(500 * 2 ** attempt, 2_000)),
+      );
+      continue;
+    }
     throw new Error(
-      `openshell sandbox list failed (exit ${r.exitCode}): ${(r.stderr || r.stdout).trim().slice(0, 300) || "(no output)"}`,
+      `openshell sandbox list failed (exit ${r.exitCode}): ${errText.slice(0, 300) || "(no output)"}`,
     );
   }
   // Strip ANSI colour/style codes, then parse by the header's column offsets.
@@ -842,9 +883,11 @@ async function ensureOpensshClient(onProgress) {
  *   - auto-launch the agent. The guard (OPENRIND_DESKTOP_AGENT_LAUNCHED + a tty
  *     check) makes sure only the top-level interactive shell auto-launches —
  *     nested shells the agent itself spawns inherit OPENRIND_DESKTOP_AGENT_LAUNCHED=1
- *     and fall through to a normal shell. Claude Code is exec'd directly;
- *     OpenClaw is launched via `exec openrind-shell` (the image's setup.sh) so the
- *     full tested bootstrap runs — see buildLaunchBlock for the rationale.
+ *     and fall through to a normal shell. BOTH agents launch via
+ *     `exec openrind-shell` (the image's setup.sh) so the full tested bootstrap
+ *     runs — DB migrations, workspace restore from PostgreSQL, and the
+ *     openrind-shell-bash sync daemon (i.e. persistence). See buildLaunchBlock
+ *     for the rationale.
  * For Claude Code we also merge ANTHROPIC_BASE_URL into ~/.claude/settings.json
  * so it applies even if a launch isn't an interactive bash.
  *
@@ -893,45 +936,36 @@ function buildLaunchBlock(profile, proxyBase, apiKey = null) {
   const block = ["# >>> openrind-desktop launch >>>"];
 
   if (proxyBase) {
-    if (isClaude) {
-      block.push(
-        // shellQuote: proxyBase originates from sandbox-controlled input
-        // (uploaded presign.json) or an HTTP response body — never
-        // interpolate it into bash unquoted/double-quoted, where $(...)
-        // would execute when .bashrc is sourced.
-        `export ANTHROPIC_BASE_URL=${shellQuote(proxyBase)}`,
-        `export ANTHROPIC_AUTH_TOKEN=${shellQuote(OPENRIND_GATEWAY_PLACEHOLDER_AUTH_TOKEN)}`,
-        // Claude Code auths via the proxy URL token — the real key is not needed.
-        "unset ANTHROPIC_API_KEY",
-      );
-    } else {
-      // OpenClaw: setup.sh owns the OpenrindGateway wiring. OPENRIND_GATEWAY_PROXY_URL is
-      // its highest-priority source — it normalizes the URL, persists the
-      // presign to the workspace, and registers the openrind-gateway provider in
-      // openclaw.json itself. The presign uploaded to
-      // /sandbox/openrind-shell-input/presign.json by configureAgentLaunch remains
-      // as setup.sh's file-based fallback.
-      // shellQuote: same injection hardening as the claude branch above.
-      block.push(`export OPENRIND_GATEWAY_PROXY_URL=${shellQuote(proxyBase)}`);
-    }
+    // Both agents delegate to the image's setup.sh, which owns the full
+    // OpenrindGateway wiring. OPENRIND_GATEWAY_PROXY_URL is its highest-priority
+    // source — it normalizes the URL, persists the presign to the workspace,
+    // registers the openrind-gateway provider (openclaw), and writes
+    // ANTHROPIC_BASE_URL into ~/.claude/settings.json (claude).
+    // shellQuote: proxyBase originates from sandbox-controlled input (uploaded
+    // presign.json) or an HTTP response body — never interpolate it into bash
+    // unquoted/double-quoted, where $(...) would execute when .bashrc sources.
+    block.push(`export OPENRIND_GATEWAY_PROXY_URL=${shellQuote(proxyBase)}`);
   }
 
+  block.push(
+    // Real API key. Both agents delegate to setup.sh: openclaw's onboard always
+    // needs it; claude's path uses it for direct-auth when no OpenrindGateway
+    // proxy is active and unsets it when the proxy is. Embed as primary source
+    // so it's available even if the file upload timed out, then prefer the
+    // uploaded file (newer on key rotation). setup.sh reads
+    // /sandbox/anthropic-api-key itself only when the env var is empty or an
+    // openshell:resolve:env:* placeholder.
+    ...(apiKey ? [`export ANTHROPIC_API_KEY=${shellQuote(apiKey)}`] : []),
+    "if [ -f /sandbox/anthropic-api-key ]; then",
+    "  _fk=\"$(tr -d '[:space:]' < /sandbox/anthropic-api-key)\"",
+    '  [ -n "$_fk" ] && export ANTHROPIC_API_KEY="$_fk"',
+    "fi",
+  );
+
   if (!isClaude) {
-    block.push(
-      // Real API key for setup.sh's onboard step. Embed as primary source so
-      // the key is available even if the file upload timed out at launch time,
-      // then prefer the uploaded file (newer on key rotation). setup.sh reads
-      // /sandbox/anthropic-api-key itself only when the env var is empty or an
-      // openshell:resolve:env:* placeholder.
-      ...(apiKey ? [`export ANTHROPIC_API_KEY=${shellQuote(apiKey)}`] : []),
-      "if [ -f /sandbox/anthropic-api-key ]; then",
-      "  _fk=\"$(tr -d '[:space:]' < /sandbox/anthropic-api-key)\"",
-      '  [ -n "$_fk" ] && export ANTHROPIC_API_KEY="$_fk"',
-      "fi",
-      // Agent gate for setup.sh — the same value the openclaw generic provider
-      // injects in the canonical `openshell sandbox create ... -- openrind-shell` flow.
-      "export OPENRIND_SHELL_AGENT=openclaw",
-    );
+    // Agent gate for setup.sh — the same value the openclaw generic provider
+    // injects in the canonical `openshell sandbox create ... -- openrind-shell` flow.
+    block.push("export OPENRIND_SHELL_AGENT=openclaw");
   }
 
   // ── Auto-launch guard ───────────────────────────────────────────────────
@@ -945,42 +979,32 @@ function buildLaunchBlock(profile, proxyBase, apiKey = null) {
   if (isClaude) {
     block.push(
       // Native-install check hygiene: configureAgentLaunch symlinks the real
-      // binary into ~/.local/bin; this export puts that dir on PATH so the
-      // check is fully satisfied. Without BOTH, Claude Code prints a warning
-      // or an `echo 'export PATH=...' >> ~/.bashrc` hint before the banner,
-      // and ConPTY's resize reflow smears that stray line into gibberish
-      // pinned above the welcome box (Ink never repaints rows it doesn't
-      // own). With trust pre-seeded and this satisfied, the banner is the
-      // FIRST thing painted — nothing above it to garble.
+      // binary into ~/.local/bin; this export puts that dir on PATH so setup.sh's
+      // final `exec claude` (and Claude Code's own native-install check)
+      // resolve the binary — otherwise a PATH-hint line prints above the banner
+      // and ConPTY reflow smears it into gibberish.
       '  export PATH="$HOME/.local/bin:$PATH"',
-      // Bind Claude Code to the Openrind Desktop session the desktop app selected.
-      // writeCurrentSessionMarker drops a derived UUID here before each fresh
-      // connect; an empty/absent marker (CLI flow, or no session selected)
-      // falls through to a plain `claude`. The UUID charset is validated
-      // defensively before it is interpolated into the exec.
+      // Read the Openrind Desktop session id the desktop app selected and hand
+      // it to setup.sh (below). writeCurrentSessionMarker drops a derived UUID
+      // here before each fresh connect; empty/absent falls through to a plain
+      // launch. Consume-on-read: sessions are concurrent, so each marker binds
+      // exactly ONE launch — delete it the moment it is read so a later connect
+      // can never re-bind to a stale value. The charset is validated before it
+      // is exported.
       `  _ow_sid=""`,
-      // Consume-on-read: sessions are concurrent, so several connects can be
-      // in flight against this sandbox. Each marker is meant for exactly ONE
-      // launch — delete it the moment it is read so a later connect can
-      // never re-bind to a stale value (the app writes a fresh marker before
-      // every fresh connect and waits for the previous one to be consumed).
       `  if [ -f ${SESSION_MARKER_PATH} ]; then`,
       `    _ow_sid="$(cat ${SESSION_MARKER_PATH} 2>/dev/null | tr -d '\\r\\n ')"`,
       `    rm -f ${SESSION_MARKER_PATH} 2>/dev/null || true`,
       `  fi`,
       `  case "$_ow_sid" in *[!0-9a-fA-F-]*) _ow_sid="" ;; esac`,
-      `  if [ -n "$_ow_sid" ]; then`,
-      // --session-id refuses an id whose transcript already exists ("already
-      // in use"), and --resume refuses one that does NOT exist ("no
-      // conversation found"). Pick the right flag by probing Claude's own
-      // transcript store across every project dir so the choice is correct
-      // regardless of the launch cwd.
-      `    if ls "$HOME"/.claude/projects/*/"$_ow_sid".jsonl >/dev/null 2>&1; then`,
-      `      exec claude --resume "$_ow_sid"`,
-      `    fi`,
-      `    exec claude --session-id "$_ow_sid"`,
-      `  fi`,
-      "  exec claude",
+      `  export OPENRIND_DESKTOP_CLAUDE_SESSION="$_ow_sid"`,
+      // Delegate to the image's full tested bootstrap instead of launching
+      // Claude Code bare. A bare `exec claude` skips DB migrations, workspace
+      // restore from PostgreSQL, and the openrind-shell-bash sync daemon — i.e.
+      // no persistence. setup.sh's claude path does all of that, does the
+      // create-or-resume transcript probe AFTER restoring ~/.claude, and execs
+      // Claude Code as its final step. Mirrors the OpenClaw path.
+      "  exec openrind-shell",
     );
   } else {
     block.push(
@@ -1166,55 +1190,101 @@ async function configureAgentLaunch({
 }
 
 /**
- * Run the OpenClaw runtime setup headlessly while the app is still showing
- * the sandbox-creation loading screen, so the user's terminal never streams
- * setup.sh output. setup.sh in OPENRIND_SHELL_SETUP_ONLY mode brings up everything
- * (DB migrations, workspace seed, openrind-shell-bash daemon, openclaw onboard,
- * gateway + readiness, plugin/compile caches) and exits without launching the
- * TUI; the terminal's .bashrc fast path then sees a healthy gateway and execs
- * the TUI directly, painting only the agent UI.
+ * Run the selected agent's runtime setup headlessly while the app is still
+ * showing the sandbox-creation loading screen, so the user's terminal never
+ * streams setup.sh output. setup.sh in OPENRIND_SHELL_SETUP_ONLY mode brings up
+ * everything (DB migrations, workspace seed + restore, openrind-shell-bash sync
+ * daemon, and — for OpenClaw — onboard + gateway + plugin/compile caches) and
+ * exits without launching the agent.
  *
- * Idempotent + best-effort: skips instantly when the gateway is already
- * healthy (workspace reopen), and on failure the .bashrc block still falls
- * back to running `openrind-shell` interactively — the previous behavior — so the
- * worst case is setup output in the terminal, never a broken session.
+ * Runs for BOTH agents:
+ *   - OpenClaw: leaves a healthy gateway running; the terminal's .bashrc fast
+ *     path then sees it and execs the TUI directly, painting only the agent UI.
+ *   - Claude: has no long-lived gateway, so this is primarily a DRY RUN that
+ *     CONNECTS TO DATABASE_URL here, on the loading screen. A bad/unreachable
+ *     connection string surfaces as a visible error now (via onProgress),
+ *     instead of scrolling past above the TUI at connect where it went
+ *     unnoticed ("Claude never threw an error"). The terminal's .bashrc still
+ *     re-runs setup.sh (`exec openrind-shell`) to establish the live daemon,
+ *     but its output is redirected to a log so the TUI stays clean.
+ *
+ * Idempotent + best-effort: OpenClaw skips instantly when the gateway is
+ * already healthy (workspace reopen); every setup.sh step is idempotent, and on
+ * failure the .bashrc block still falls back to running `openrind-shell`
+ * interactively — so the worst case is setup output in the terminal, never a
+ * broken session.
  *
  * @param {{ name: string, profile: string, env: NodeJS.ProcessEnv,
  *           onProgress?: Function }} args
  */
 async function prewarmAgentRuntime({ name, profile, env, onProgress }) {
-  if (profile !== "openrind-shell-openclaw") return;
+  const isClaude = profile !== "openrind-shell-openclaw";
+  const agentLabel = isClaude ? "Openrind Shell" : "OpenClaw";
   onProgress?.({
     phase: "prewarm",
-    message: "Preparing OpenClaw runtime (first run can take a few minutes)…",
+    message: isClaude
+      ? "Preparing Openrind Shell runtime and connecting to the database…"
+      : "Preparing OpenClaw runtime (first run can take a few minutes)…",
   });
-  const script = [
-    // Already warm (reopen / repeated finalize): nothing to do.
-    "if curl -fsS http://127.0.0.1:18789/readyz >/dev/null 2>&1; then",
-    "  echo prewarm: gateway already healthy",
-    "  exit 0",
-    "fi",
-    // A dead gateway process may still hold the port after a container
-    // restart — clear it so setup.sh's own gateway start binds cleanly.
-    "pkill -f 'openclaw gateway' 2>/dev/null || true",
-    // setup.sh self-configures from the uploaded /sandbox files (db-url,
-    // anthropic-api-key, openrind-shell-input/presign.json) — written by create
-    // and configureAgentLaunch before this runs.
-    "export OPENRIND_SHELL_AGENT=openclaw OPENRIND_SHELL_SETUP_ONLY=1 HOME=/sandbox",
-    "openrind-shell > /tmp/openrind-shell-setup.log 2>&1",
-    "rc=$?",
-    "tail -5 /tmp/openrind-shell-setup.log",
-    'exit "$rc"',
-  ].join("\n");
+  const script = isClaude
+    ? [
+        // Claude has no gateway to reuse and every setup.sh step (migrations,
+        // workspace seed/restore, sync daemon) is idempotent, so just run the
+        // full setup-only bootstrap. This makes Claude connect to DATABASE_URL
+        // HERE (loading screen) so connection failures are visible — exactly
+        // like OpenClaw. setup.sh self-configures from the uploaded /sandbox
+        // files (db-url, anthropic-api-key, openrind-shell-input/presign.json)
+        // written by create + configureAgentLaunch before this runs.
+        "export OPENRIND_SHELL_SETUP_ONLY=1 HOME=/sandbox",
+        "openrind-shell > /tmp/openrind-shell-setup.log 2>&1",
+        "rc=$?",
+        // On success a short tail is plenty; on failure show more so the
+        // migration / DATABASE_URL diagnostic (not just trailing stack frames)
+        // reaches the loading screen via onProgress below.
+        'if [ "$rc" -eq 0 ]; then tail -5 /tmp/openrind-shell-setup.log; else tail -30 /tmp/openrind-shell-setup.log; fi',
+        'exit "$rc"',
+      ].join("\n")
+    : [
+        // Already warm (reopen / repeated finalize): nothing to do.
+        "if curl -fsS http://127.0.0.1:18789/readyz >/dev/null 2>&1; then",
+        "  echo prewarm: gateway already healthy",
+        "  exit 0",
+        "fi",
+        // A dead gateway process may still hold the port after a container
+        // restart — clear it so setup.sh's own gateway start binds cleanly.
+        "pkill -f 'openclaw gateway' 2>/dev/null || true",
+        // setup.sh self-configures from the uploaded /sandbox files (db-url,
+        // anthropic-api-key, openrind-shell-input/presign.json) — written by create
+        // and configureAgentLaunch before this runs.
+        "export OPENRIND_SHELL_AGENT=openclaw OPENRIND_SHELL_SETUP_ONLY=1 HOME=/sandbox",
+        "openrind-shell > /tmp/openrind-shell-setup.log 2>&1",
+        "rc=$?",
+        "tail -5 /tmp/openrind-shell-setup.log",
+        'exit "$rc"',
+      ].join("\n");
   await wslRun(
     ["-d", DISTRO_NAME, "--", "bash", "-c", sandboxRunScriptCmd(name, script)],
     { timeout: 600_000, env },
   )
     .then((r) => {
       if (r.exitCode === 0) {
-        onProgress?.({ phase: "prewarm", message: "OpenClaw runtime ready." });
+        onProgress?.({
+          phase: "prewarm",
+          message: `${agentLabel} runtime ready.`,
+        });
       } else {
-        // Non-fatal: .bashrc falls back to interactive setup in the terminal.
+        // Non-fatal: the .bashrc launch block still re-runs setup.sh in the
+        // terminal, so the session can recover. But SURFACE the failure on the
+        // loading screen too — the whole point of prewarming Claude is that an
+        // unreachable DATABASE_URL must be visible, not silent.
+        const tail = (r.stdout || r.stderr || "").trim().slice(-1200);
+        onProgress?.({
+          phase: "prewarm",
+          message:
+            `${agentLabel} setup did not complete (exit ${r.exitCode}). ` +
+            `Persistence may be unavailable — check DATABASE_URL.` +
+            (tail ? `\n${tail}` : ""),
+        });
         console.warn(
           "[prewarmAgentRuntime] setup-only run exited non-zero (non-fatal):",
           r.stdout?.slice(-500),
@@ -1849,4 +1919,5 @@ export const __testing = {
   buildLaunchBlock,
   configureAgentLaunch,
   prewarmAgentRuntime,
+  isGatewayWarmingError,
 };

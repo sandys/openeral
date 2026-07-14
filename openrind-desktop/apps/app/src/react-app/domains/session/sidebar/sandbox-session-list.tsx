@@ -299,13 +299,31 @@ export function SandboxSessionList(props: SandboxSessionListProps) {
                 {deleteError}
               </div>
             ) : null}
-            {rows.length === 0 ? (
+            {!loaded ? (
+              // Loading skeleton — mirrors the workspaces list skeleton so the
+              // Sandboxes section shows placeholder rows while the first fetch
+              // (and any gateway warmup) is in flight, instead of a bare
+              // "Loading…" line.
+              <div className="space-y-2">
+                {[0, 1, 2].map((idx) => (
+                  <div
+                    key={`sandbox:skeleton:${idx}`}
+                    className="w-full rounded-[15px] border border-dls-border/70 bg-dls-hover/30 px-3 py-2.5"
+                  >
+                    <div
+                      className="h-2.5 rounded-full bg-dls-hover/80 animate-pulse"
+                      style={{ width: idx === 0 ? "62%" : idx === 1 ? "78%" : "54%" }}
+                    />
+                  </div>
+                ))}
+              </div>
+            ) : rows.length === 0 ? (
               <button
                 type="button"
                 className="w-full rounded-[15px] border border-transparent px-3 py-2.5 text-left text-[11px] text-gray-10 transition-colors hover:bg-gray-2/60 hover:text-gray-11"
                 onClick={props.onOpenManager}
               >
-                {loaded ? "No sandboxes yet — create one" : "Loading sandboxes…"}
+                No sandboxes yet — create one
               </button>
             ) : (
               rows.map((row) => {

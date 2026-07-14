@@ -531,65 +531,69 @@ test("createOpenrindShellSandbox: requires name and profile", async () => {
   );
 });
 
+// ── isGatewayWarmingError ──────────────────────────────────────────────
+// Pure function — decides whether a failed `sandbox list` should be retried
+// (gateway still warming up at cold start) vs. surfaced immediately.
+
+test("isGatewayWarmingError: matches the cold-start transport error", () => {
+  const warming = openrindShell.__testing.isGatewayWarmingError;
+  // The exact multi-line shape the openshell CLI prints when the gateway
+  // socket isn't listening yet (the error the sidebar/manager hit on restart).
+  assert.equal(
+    warming(
+      "Error: × transport error ├─▶ tcp connect error ├─▶ tcp connect error ╰─▶ Connection refused (os error 111)",
+    ),
+    true,
+  );
+  assert.equal(warming("connection refused"), true);
+  assert.equal(warming("os error 111"), true);
+});
+
+test("isGatewayWarmingError: does NOT match real CLI/usage errors", () => {
+  const warming = openrindShell.__testing.isGatewayWarmingError;
+  // A genuine failure must fail fast, not spin in the warmup retry loop.
+  assert.equal(warming("error: unexpected argument '--json' found"), false);
+  assert.equal(warming("sandbox not found"), false);
+  assert.equal(warming(""), false);
+  assert.equal(warming(undefined), false);
+});
+
 // ── buildLaunchBlock ───────────────────────────────────────────────────
 // Pure function — no wslRun, no mock needed.
 
-test("buildLaunchBlock (claude + proxy): exports proxy vars and unsets the real key", () => {
+test("buildLaunchBlock (claude + proxy): delegates to setup.sh with gateway + session wiring", () => {
   const block = openrindShell.__testing.buildLaunchBlock(
     "openrind-shell-claude",
     "https://proxy.openrind.com/openrind-gateway-proxy/t/TOK",
   );
-  assert.match(block, /ANTHROPIC_BASE_URL=.*TOK/, "must export proxy base URL");
+  // Claude now delegates to the image's setup.sh (like openclaw) so it gets DB
+  // migrations, workspace restore from PostgreSQL, and the openrind-shell-bash
+  // sync daemon — i.e. persistence. setup.sh owns the OpenrindGateway wiring, so
+  // the proxy is handed to it via OPENRIND_GATEWAY_PROXY_URL (setup.sh writes
+  // ANTHROPIC_BASE_URL into ~/.claude/settings.json itself).
   assert.match(
     block,
-    /^export ANTHROPIC_AUTH_TOKEN=/m,
-    "claude must export a placeholder auth token for the proxy",
+    /export OPENRIND_GATEWAY_PROXY_URL=.*TOK/,
+    "must hand the proxy URL to setup.sh",
   );
-  // Compliance: the placeholder must never be a hardcoded token literal —
-  // it is env-sourced (OPENRIND_DESKTOP_GATEWAY_AUTH_TOKEN) or random per process.
-  assert.doesNotMatch(
-    block,
-    /openrind-desktop-openrind-gateway/,
-    "placeholder token must not be the old hardcoded literal",
-  );
-  const tokenLine = block.match(/^export ANTHROPIC_AUTH_TOKEN='([^']+)'$/m);
-  assert.ok(tokenLine, "token export must be single-quoted and non-empty");
-  assert.ok(
-    process.env.OPENRIND_DESKTOP_GATEWAY_AUTH_TOKEN ||
-      /^openrind-desktop-[0-9a-f-]{36}$/.test(tokenLine[1]),
-    "unset env must yield a random per-process placeholder (openrind-desktop-<uuid>)",
-  );
-  assert.match(
-    block,
-    /unset ANTHROPIC_API_KEY/,
-    "claude must unset real key when proxy active",
-  );
-  assert.doesNotMatch(
-    block,
-    /openclaw gateway/,
-    "claude must not start openclaw gateway",
-  );
-  assert.match(block, /exec claude/, "claude must exec claude");
-  // ~/.local/bin must be on PATH (with the binary symlinked there by
-  // configureAgentLaunch) or Claude Code prints a native-install warning /
-  // PATH hint before the banner — the stray line ConPTY reflow smears into
-  // gibberish pinned above the welcome box.
+  // The .bashrc block must not re-implement the gateway/auth wiring inline —
+  // that is setup.sh's job now.
+  assert.doesNotMatch(block, /ANTHROPIC_BASE_URL/, "claude must not set ANTHROPIC_BASE_URL inline");
+  assert.doesNotMatch(block, /openclaw gateway/, "claude must not start openclaw gateway");
+  assert.doesNotMatch(block, /OPENRIND_SHELL_AGENT=openclaw/, "claude must not set the openclaw agent gate");
+  // ~/.local/bin on PATH so setup.sh's `exec claude` resolves the native binary.
   assert.match(
     block,
     /export PATH="\$HOME\/\.local\/bin:\$PATH"/,
-    "claude must put ~/.local/bin on PATH before exec",
+    "claude must put ~/.local/bin on PATH",
   );
-  // Per-session binding: read the marker written before each connect and pick
-  // --resume (transcript exists) vs --session-id (new) so the flag is always
-  // valid, with a bare `exec claude` fallback when no session is selected.
+  // Per-session binding: read + consume the marker, then hand the id to setup.sh,
+  // which does the create-or-resume transcript probe AFTER restoring ~/.claude.
   assert.match(
     block,
     /\/sandbox\/openrind-desktop-current-session/,
     "claude must read the per-connect session marker",
   );
-  // Sessions are concurrent: each marker binds exactly one launch, so the
-  // block must consume (delete) it on read — a stale marker leaking into a
-  // later connect would bind that PTY to the wrong conversation.
   assert.match(
     block,
     /rm -f \/sandbox\/openrind-desktop-current-session/,
@@ -597,14 +601,13 @@ test("buildLaunchBlock (claude + proxy): exports proxy vars and unsets the real 
   );
   assert.match(
     block,
-    /exec claude --resume "\$_ow_sid"/,
-    "claude must resume an existing conversation",
+    /export OPENRIND_DESKTOP_CLAUDE_SESSION="\$_ow_sid"/,
+    "claude must hand the session id to setup.sh",
   );
-  assert.match(
-    block,
-    /exec claude --session-id "\$_ow_sid"/,
-    "claude must create a new conversation with the derived id",
-  );
+  // Delegates to setup.sh (full bootstrap) rather than launching Claude bare —
+  // a bare `exec claude` skips all PostgreSQL persistence.
+  assert.match(block, /exec openrind-shell/, "claude must delegate to setup.sh for persistence");
+  assert.doesNotMatch(block, /exec claude/, "claude must not bypass setup.sh with a bare exec claude");
 });
 
 test("deriveClaudeSessionUuid: deterministic, valid v5 UUID for opencode ids", () => {
@@ -830,14 +833,42 @@ test("buildLaunchBlock (openclaw): fast path precedes the setup.sh handoff", () 
 
 // ── prewarmAgentRuntime ──────────────────────────────────────────────
 
-test("prewarmAgentRuntime: no-op for the claude profile", async () => {
+test("prewarmAgentRuntime (claude): runs setup.sh headlessly in setup-only mode", async () => {
+  process.env.MOCK_WSL_STDOUT = "prewarm: ok";
+  const progress = [];
   await openrindShell.__testing.prewarmAgentRuntime({
     name: "openrind-shell-x",
     profile: "openrind-shell-claude",
     env: process.env,
+    onProgress: (evt) => progress.push(evt),
   });
-  // No wsl invocation at all — claude launches instantly, nothing to prewarm.
-  assert.equal(readArgsLog().length, 0);
+  // Claude now prewarms too: it connects to DATABASE_URL on the loading screen
+  // (like openclaw) so a bad connection string surfaces here instead of
+  // silently at connect. Exactly one sandbox exec runs setup.sh setup-only.
+  const lines = readArgsLog();
+  assert.equal(lines.length, 1, "exactly one sandbox exec");
+  assert.match(lines[0], /openshell sandbox exec --name 'openrind-shell-x'/);
+  const m = lines[0].match(/([A-Za-z0-9+/=]{40,})\S*\s*\|\s*base64 -d/);
+  assert.ok(m, "script must be base64-wrapped via sandboxRunScriptCmd");
+  const script = Buffer.from(m[1], "base64").toString("utf8");
+  assert.match(
+    script,
+    /OPENRIND_SHELL_SETUP_ONLY=1/,
+    "must run setup.sh in setup-only mode",
+  );
+  assert.match(script, /openrind-shell > \/tmp\/openrind-shell-setup\.log/);
+  // No gateway machinery — Claude has no long-lived gateway to reuse/clear.
+  assert.doesNotMatch(script, /readyz/, "claude has no gateway to probe");
+  assert.doesNotMatch(script, /pkill -f 'openclaw gateway'/);
+  assert.doesNotMatch(
+    script,
+    /OPENRIND_SHELL_AGENT=openclaw/,
+    "claude prewarm must not set the openclaw agent gate",
+  );
+  assert.ok(
+    progress.some((p) => p.phase === "prewarm"),
+    "must surface loading-screen progress",
+  );
 });
 
 test("prewarmAgentRuntime (openclaw): runs setup.sh headlessly in setup-only mode", async () => {
@@ -899,7 +930,7 @@ test("buildLaunchBlock: proxyBase is shell-quoted (no command substitution)", ()
   const evil = "https://x.example/openrind-gateway-proxy/t/$(touch /tmp/pwned)";
   const claude = openrindShell.__testing.buildLaunchBlock("openrind-shell-claude", evil);
   assert.ok(
-    claude.includes(`export ANTHROPIC_BASE_URL='${evil}'`),
+    claude.includes(`export OPENRIND_GATEWAY_PROXY_URL='${evil}'`),
     "claude proxy export must be single-quoted",
   );
   const claw = openrindShell.__testing.buildLaunchBlock("openrind-shell-openclaw", evil);
@@ -998,12 +1029,15 @@ test("buildLaunchBlock (openclaw + no proxy): no OpenrindGateway env, still dele
   assert.match(block, /HOME=\/home\/agent/, "exec must set HOME");
 });
 
-test("buildLaunchBlock (claude + no proxy): no proxy vars and no gateway", () => {
+test("buildLaunchBlock (claude + no proxy): no proxy vars, delegates to setup.sh", () => {
   const block = openrindShell.__testing.buildLaunchBlock("openrind-shell-claude", null);
   assert.doesNotMatch(block, /ANTHROPIC_BASE_URL/);
-  assert.doesNotMatch(block, /unset ANTHROPIC_API_KEY/);
+  assert.doesNotMatch(block, /^export OPENRIND_GATEWAY_PROXY_URL=/m);
   assert.doesNotMatch(block, /openclaw gateway/);
-  assert.match(block, /exec claude/);
+  assert.doesNotMatch(block, /OPENRIND_SHELL_AGENT=openclaw/);
+  // Claude delegates to setup.sh (full bootstrap) for PostgreSQL persistence.
+  assert.match(block, /exec openrind-shell/);
+  assert.doesNotMatch(block, /exec claude/);
 });
 
 // ── deleteOpenrindShellSandbox ──────────────────────────────────────────────

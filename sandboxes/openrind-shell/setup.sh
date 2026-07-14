@@ -18,6 +18,24 @@ set -euo pipefail
 # warning text out of shell-captured values such as the OpenrindGateway presign URL.
 export NODE_NO_WARNINGS="${NODE_NO_WARNINGS:-1}"
 
+# ── Clean-terminal log redirect ──────────────────────────────────────────────
+# The desktop app connects its interactive terminal via `exec openrind-shell`,
+# which runs THIS script. Its informational bootstrap chatter ("running
+# migrations", "restored N entries", "daemon ready", …) would otherwise scroll
+# ABOVE the agent TUI. Send stdout to a log file so the terminal only ever shows
+# the agent, and restore the real terminal (saved on fd 3) right before exec'ing
+# the agent (see the tty-restore lines just before each agent launch below).
+#   - stderr is deliberately LEFT on the terminal, so genuine failures (e.g. an
+#     unreachable DATABASE_URL) are still visible to the user.
+#   - Skipped in setup-only mode (OPENRIND_SHELL_SETUP_ONLY=1 — the desktop
+#     loading-screen prewarm), where the caller already redirects the whole run
+#     to a log and tails it for on-screen progress.
+SETUP_LOG="${OPENRIND_SHELL_SETUP_LOG:-/tmp/openrind-shell-setup.log}"
+if [ -z "${OPENRIND_SHELL_SETUP_ONLY:-}" ]; then
+  exec 3>&1
+  exec >>"$SETUP_LOG"
+fi
+
 # Use /opt/openrind-shell directly if accessible, otherwise copy to /home/agent
 if [ -r /opt/openrind-shell/dist/db/embedded.js ]; then
   OPENRIND_SHELL_DIR=/opt/openrind-shell
@@ -598,7 +616,14 @@ NPMRC
 fi
 
 echo "setup.sh: starting openrind-shell-bash daemon..."
-node "$OPENRIND_SHELL_DIR/openrind-shell-bash.mjs" --daemon &
+# The daemon is a long-lived background process that OUTLIVES this script (it
+# keeps syncing the workspace during the whole agent session). It inherits the
+# terminal on stderr at fork time, so without this redirect its diagnostics
+# would paint over the agent's TUI. Send its output to a dedicated log — the
+# clean-terminal redirect near the top only covers THIS shell's stdout, not a
+# child that already captured the tty on fd 2.
+node "$OPENRIND_SHELL_DIR/openrind-shell-bash.mjs" --daemon \
+  >>"${OPENRIND_SHELL_DAEMON_LOG:-/tmp/openrind-shell-bash.log}" 2>&1 &
 DAEMON_PID=$!
 
 # Wait for socket to appear
@@ -1315,6 +1340,12 @@ console.log('setup.sh: openclaw auth config applied');
   fi
   case "$_ow_sk" in *[!a-zA-Z0-9._-]*) _ow_sk="" ;; esac
 
+  # Restore the real terminal before handing over to the interactive TUI (see the
+  # clean-terminal log redirect near the top of this script). Only the
+  # interactive-connect path reaches here — setup-only mode exit 0's above — so
+  # fd 3 always exists here.
+  [ -n "${OPENRIND_SHELL_SETUP_ONLY:-}" ] || exec 1>&3 3>&-
+
   # When OpenrindGateway is active, pass ANTHROPIC_BASE_URL explicitly into the exec
   # env (mirroring the Claude Code launch below). The export earlier in setup.sh
   # already covers the gateway-inherit case; this line guarantees the TUI also
@@ -1367,7 +1398,32 @@ if [ -n "${OPENRIND_SHELL_SETUP_ONLY:-}" ]; then
   exit 0
 fi
 
+# Bind Claude Code to the desktop-selected session (create-or-resume), mirroring
+# the OpenClaw path. This runs AFTER the workspace restore above, so the
+# transcript probe sees conversations restored from PostgreSQL and picks the
+# correct flag: --session-id refuses an id whose transcript already exists, and
+# --resume refuses one that does not. OPENRIND_DESKTOP_CLAUDE_SESSION is exported by
+# the desktop app's .bashrc launch block; the marker file is the fallback for
+# other entry paths (consume-on-read — each marker binds exactly one launch).
+_cc_sid="${OPENRIND_DESKTOP_CLAUDE_SESSION:-}"
+if [ -z "$_cc_sid" ] && [ -f /sandbox/openrind-desktop-current-session ]; then
+  _cc_sid="$(cat /sandbox/openrind-desktop-current-session 2>/dev/null | tr -d '\r\n ')"
+  rm -f /sandbox/openrind-desktop-current-session 2>/dev/null || true
+fi
+case "$_cc_sid" in *[!0-9a-fA-F-]*) _cc_sid="" ;; esac
+if [ -n "$_cc_sid" ]; then
+  if ls /home/agent/.claude/projects/*/"$_cc_sid".jsonl >/dev/null 2>&1; then
+    set -- --resume "$_cc_sid" "$@"
+  else
+    set -- --session-id "$_cc_sid" "$@"
+  fi
+fi
+
 echo "setup.sh: launching Claude Code..."
+# Restore the real terminal for Claude Code's TUI (see the clean-terminal log
+# redirect near the top of this script). The claude setup-only exit is above, so
+# reaching here always means an interactive-connect run where fd 3 exists.
+[ -n "${OPENRIND_SHELL_SETUP_ONLY:-}" ] || exec 1>&3 3>&-
 if [ -n "${OPENRIND_GATEWAY_PROXY_URL:-}" ]; then
   exec env -u OPENRIND_GATEWAY_API_KEY -u ANTHROPIC_AUTH_TOKEN \
     HOME=/home/agent \

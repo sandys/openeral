@@ -202,6 +202,18 @@ export function useOpenShellState(options: { active: boolean } = { active: false
     return () => unsubscribe();
   }, []);
 
+  // Credential status backs the Sandbox credentials panel on the Environment
+  // tab, which renders even when the Sandbox tab is not `active`. Fetch it once
+  // on mount (a cheap, tab-independent read of the on-disk credential blob) so a
+  // fresh restart shows the persisted "set" state immediately. Previously this
+  // was gated behind `active` (sandbox tab only), so opening Settings on the
+  // Environment tab showed every credential as "unset" until the user changed
+  // one — whose set/clear IPC response then filled in the whole status.
+  useEffect(() => {
+    if (!isElectronRuntime()) return;
+    void refreshCredentialStatus();
+  }, [refreshCredentialStatus]);
+
   // Poll doctor + install status on a steady cadence while the user is
   // looking at the sandbox tab. Outside the tab we don't waste cycles.
   useEffect(() => {
