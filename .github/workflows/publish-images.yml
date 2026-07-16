@@ -13,7 +13,15 @@ on:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref_name }}
-  cancel-in-progress: true
+  # Do NOT cancel an in-progress publish. The first cold build must run the
+  # heavy OpenClaw prewarm to completion so that layer lands in the GHA layer
+  # cache; cancelling it (the old `cancel-in-progress: true`) meant a rapid
+  # series of pushes kept killing the build before the prewarm layer could be
+  # cached, so every run restarted the ~40-min prewarm from scratch and none
+  # ever finished ("The operation was canceled"). Letting builds queue and
+  # complete warms the cache once; after that, iterating on setup.sh /
+  # openrind-shell-js only rebuilds the fast layers above the cached prewarm.
+  cancel-in-progress: false
 
 env:
   REGISTRY: ghcr.io
@@ -24,6 +32,7 @@ env:
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
 
     services:
       postgres:
@@ -86,12 +95,28 @@ jobs:
   build-and-push:
     needs: [test]
     runs-on: ubuntu-latest
+    # The OpenClaw prewarm layer is heavy (stages npm deps + runs the TUI twice
+    # to bake the plugin + compile caches). Give the job a generous but bounded
+    # budget so a genuinely stuck build fails clearly instead of hanging for the
+    # 6-hour default (which would also block the no-cancel concurrency queue).
+    # A warm GHA layer cache makes subsequent builds far faster.
+    timeout-minutes: 120
     permissions:
       contents: read
       packages: write
 
     steps:
       - uses: actions/checkout@v4
+
+      # The prewarm stages dozens of npm packages and bakes a ~46 MB compile
+      # cache on top of a large base image; the default hosted-runner free disk
+      # (~14 GB) can get tight and a mid-build "no space left on device" can
+      # surface as an opaque cancellation. Reclaim ~20 GB of preinstalled
+      # tooling this job never uses.
+      - name: Free up runner disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3

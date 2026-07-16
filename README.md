@@ -252,12 +252,6 @@ Openrind Desktop provides sessions, live SSE streaming, permissions, templates, 
 
 To restore dependencies after cloning, see [openrind-desktop/README.md](./openrind-desktop/README.md).
 
-To sync openrind-desktop to a newer version:
-```bash
-git fetch https://github.com/Pavitra-programmers/openwork feat/openshell-integration
-git read-tree --prefix=openrind-desktop/ -u FETCH_HEAD
-```
-
 ## Contributing
 
 Architecture, image customization, source-development workflows, and tests are documented in [BUILD.md](./BUILD.md).
