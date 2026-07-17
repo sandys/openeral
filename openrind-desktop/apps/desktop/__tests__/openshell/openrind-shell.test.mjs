@@ -110,6 +110,34 @@ test("imageForProfile: throws on unknown profile", () => {
   );
 });
 
+// ── imageExistsLocally ─────────────────────────────────────────────────
+// Guards the create-path optimization that skips `docker pull` when the image
+// is already cached in the distro (a `docker image inspect`, no registry
+// round-trip). See createOpenrindShellSandbox.
+
+test("imageExistsLocally: true when `docker image inspect` exits 0", async () => {
+  process.env.MOCK_WSL_EXIT = "0";
+  const present = await openrindShell.imageExistsLocally(
+    "ghcr.io/openrind/openrind-shell/sandbox:just-bash",
+  );
+  assert.equal(present, true);
+  const lines = readArgsLog();
+  assert.equal(lines.length, 1, "exactly one wsl call (a local inspect)");
+  // Local metadata lookup only — must not shell out to `docker pull`.
+  assert.match(lines[0], /docker --config .* image inspect/);
+  assert.doesNotMatch(lines[0], /docker .*pull/);
+  assert.match(
+    lines[0],
+    /ghcr\.io\/openrind\/openrind-shell\/sandbox:just-bash/,
+  );
+});
+
+test("imageExistsLocally: false when `docker image inspect` exits non-zero", async () => {
+  process.env.MOCK_WSL_EXIT = "1";
+  const present = await openrindShell.imageExistsLocally("nope/missing:tag");
+  assert.equal(present, false);
+});
+
 // ── buildWslEnvForwarding ──────────────────────────────────────────────
 
 test("buildWslEnvForwarding: extends WSLENV with forwarded names", () => {
@@ -921,6 +949,39 @@ test("prewarmAgentRuntime (openclaw): failure is non-fatal", async () => {
     profile: "openrind-shell-openclaw",
     env: process.env,
   });
+});
+
+// ── prewarmIfNeeded ────────────────────────────────────────────────────
+// Only OpenClaw needs prewarming (embedded-gateway warmup so connect can exec
+// the TUI directly). Claude must NOT prewarm on the loading screen: its
+// connect-time setup.sh runs the full DB bootstrap (migrations + restore) once,
+// so prewarming would pay the remote-PostgreSQL connect a second time per
+// session — the "database connecting is slow" doubling this fixes.
+
+test("prewarmIfNeeded (claude): skips prewarm entirely (no sandbox exec)", async () => {
+  process.env.MOCK_WSL_STDOUT = "prewarm: ok";
+  await openrindShell.__testing.prewarmIfNeeded({
+    name: "openrind-shell-x",
+    profile: "openrind-shell-claude",
+    env: process.env,
+  });
+  assert.equal(
+    readArgsLog().length,
+    0,
+    "claude must not run setup.sh / connect to the DB on the loading screen",
+  );
+});
+
+test("prewarmIfNeeded (openclaw): runs the prewarm", async () => {
+  process.env.MOCK_WSL_STDOUT = "prewarm: ok";
+  await openrindShell.__testing.prewarmIfNeeded({
+    name: "openrind-shell-x",
+    profile: "openrind-shell-openclaw",
+    env: process.env,
+  });
+  const lines = readArgsLog();
+  assert.equal(lines.length, 1, "openclaw prewarm runs exactly one sandbox exec");
+  assert.match(lines[0], /openshell sandbox exec --name 'openrind-shell-x'/);
 });
 
 test("buildLaunchBlock: proxyBase is shell-quoted (no command substitution)", () => {

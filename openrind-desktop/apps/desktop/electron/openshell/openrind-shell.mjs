@@ -165,6 +165,37 @@ export async function pullImage(imageRef, options = {}) {
 }
 
 /**
+ * True when the image is already present in the distro's local Docker image
+ * store. `docker image inspect` is a purely local metadata lookup — no
+ * registry round-trip — so it returns in ~100 ms and lets
+ * createOpenrindShellSandbox skip the `docker pull` on every create after the
+ * first. Skipping matters because `docker pull` on an already-cached tag still
+ * contacts the registry (DNS + TLS + manifest fetch): a few seconds on a good
+ * network, and up to the multi-minute pull timeout on locked-down corporate
+ * networks where ghcr.io is slow or blocked. Best-effort: any failure returns
+ * false so we fall back to pulling.
+ *
+ * @param {string} imageRef
+ * @param {{ timeoutMs?: number }} [options]
+ * @returns {Promise<boolean>}
+ */
+export async function imageExistsLocally(imageRef, options = {}) {
+  const { timeoutMs = 15_000 } = options;
+  const r = await wslRun(
+    [
+      "-d",
+      DISTRO_NAME,
+      "--",
+      "bash",
+      "-c",
+      `docker --config ${DOCKER_CONFIG_DIR} image inspect ${shellQuote(imageRef)} >/dev/null 2>&1`,
+    ],
+    { timeout: timeoutMs },
+  ).catch(() => ({ exitCode: 1 }));
+  return r.exitCode === 0;
+}
+
+/**
  * Parse the raw openshell sandbox list output into a normalised array.
  * Returns null only when the raw text cannot yield any sandbox list at all.
  *
@@ -380,6 +411,8 @@ export async function listSandboxes() {
  *
  * @param {string} name
  * @param {{ timeoutMs?: number, pollMs?: number, onProgress?: Function }} [opts]
+ *   pollMs is the MAX (steady-state) interval between polls; the loop starts
+ *   polling faster and backs off toward pollMs.
  */
 async function waitForSandboxReady(name, opts = {}) {
   const { timeoutMs = 120_000, pollMs = 4_000, onProgress } = opts;
@@ -392,6 +425,18 @@ async function waitForSandboxReady(name, opts = {}) {
   // Track whether we've seen the sandbox in a "Deleting" phase so we can
   // detect when it disappears and signal the caller to create a fresh one.
   let sawDeleting = false;
+
+  // Poll fast at first, then back off. A freshly-created sandbox usually
+  // reports Ready within a second or two of `create` returning, so starting at
+  // a short interval (instead of a flat 4 s) shaves several seconds off the
+  // common path; the ×1.5 growth up to pollMs keeps a long provisioning wait
+  // from hammering the gateway.
+  const maxPollMs = pollMs;
+  let currentPollMs = Math.min(600, maxPollMs);
+  const waitNextPoll = async () => {
+    await new Promise((resolve) => setTimeout(resolve, currentPollMs));
+    currentPollMs = Math.min(Math.round(currentPollMs * 1.5), maxPollMs);
+  };
 
   while (Date.now() < deadline) {
     attempt += 1;
@@ -421,7 +466,7 @@ async function waitForSandboxReady(name, opts = {}) {
         phase: "waiting",
         message: `Gateway unresponsive (attempt ${attempt}), retrying…`,
       });
-      await new Promise((resolve) => setTimeout(resolve, pollMs));
+      await waitNextPoll();
       continue;
     }
     if (r.exitCode === 0) {
@@ -443,7 +488,7 @@ async function waitForSandboxReady(name, opts = {}) {
             phase: "waiting",
             message: `Sandbox is deleting; waiting for deletion to complete…`,
           });
-          await new Promise((resolve) => setTimeout(resolve, pollMs));
+          await waitNextPoll();
           continue;
         }
         // Detect sandboxes stuck in Provisioning. If the sandbox has been
@@ -482,7 +527,7 @@ async function waitForSandboxReady(name, opts = {}) {
       // the list (still provisioning). Keep polling.
     }
     if (Date.now() >= deadline) break;
-    await new Promise((resolve) => setTimeout(resolve, pollMs));
+    await waitNextPoll();
   }
   // Timed out without confirming Ready — if we last saw a provisioning phase
   // treat it as stuck rather than proceeding optimistically (the exec would
@@ -1301,6 +1346,27 @@ async function prewarmAgentRuntime({ name, profile, env, onProgress }) {
 }
 
 /**
+ * Prewarm the agent runtime only when it actually saves the user time.
+ *
+ * OpenClaw NEEDS it: its embedded gateway must be warm before connect so the
+ * .bashrc fast-path can exec the TUI directly instead of doing a ~3-minute cold
+ * plugin-staging pass in the terminal. Claude does NOT: it has no long-lived
+ * gateway, and its connect-time .bashrc runs the full setup.sh (DB migrations +
+ * workspace restore + sync daemon) exactly once regardless. Prewarming Claude
+ * would run that same slow bootstrap a SECOND time on the loading screen —
+ * paying the remote-PostgreSQL connect (HTTP-CONNECT tunnel + TLS + auth) twice
+ * per session. A bad DATABASE_URL still surfaces at connect (setup.sh keeps
+ * stderr on the terminal), so nothing is hidden by skipping it.
+ *
+ * @param {{ name: string, profile: string, env: NodeJS.ProcessEnv,
+ *           onProgress?: Function }} args
+ */
+async function prewarmIfNeeded({ name, profile, env, onProgress }) {
+  if (profile !== "openrind-shell-openclaw") return;
+  await prewarmAgentRuntime({ name, profile, env, onProgress });
+}
+
+/**
  * Read an already-uploaded OpenrindGateway presign URL back out of a sandbox, so a
  * reconnect reuses it instead of minting a fresh presign every launch. Returns
  * null when none is present.
@@ -1516,11 +1582,16 @@ export async function createOpenrindShellSandbox(opts) {
   // leaving sandboxes flapping (see ensureWslKeepalive in wsl.mjs).
   ensureWslKeepalive();
 
-  // openshell shells out to scp/ssh for create --upload AND for exec/connect.
-  // Make sure they exist before any sandbox op so we never dead-end at the
-  // opaque "No such file or directory (os error 2)" — this also covers the
-  // reconnect path below, which connects/execs into the existing sandbox.
-  await ensureOpensshClient(onProgress);
+  // openshell shells out to scp/ssh for create --upload AND for exec/connect,
+  // so they must exist before any sandbox op or we dead-end at the opaque
+  // "No such file or directory (os error 2)". The ssh check and the existence
+  // probe are independent, so run them concurrently to save a wsl.exe
+  // round-trip — Promise.all still awaits BOTH before we branch, so ssh is
+  // guaranteed present before the create-upload / connect / exec below.
+  const [, sandboxAlreadyExists] = await Promise.all([
+    ensureOpensshClient(onProgress),
+    sandboxExists(name),
+  ]);
 
   // Short-circuit if the sandbox already exists (workspace reopen).
   // Wait for it to reach Ready state before returning so the subsequent
@@ -1531,7 +1602,7 @@ export async function createOpenrindShellSandbox(opts) {
   // the user never has to manually click "Delete & start fresh" just to
   // recover from a broken container.  /home/agent data is in PostgreSQL
   // and survives the container deletion.
-  if (await sandboxExists(name)) {
+  if (sandboxAlreadyExists) {
     onProgress?.({
       phase: "exists",
       message: `Sandbox ${name} already exists; checking state…`,
@@ -1581,7 +1652,10 @@ export async function createOpenrindShellSandbox(opts) {
         env: process.env,
         onProgress,
       });
-      await prewarmAgentRuntime({
+      // Only OpenClaw needs prewarming here (see prewarmIfNeeded). For Claude
+      // this is a no-op, so reopening a Claude workspace no longer re-runs the
+      // full setup.sh / remote-DB bootstrap on the loading screen.
+      await prewarmIfNeeded({
         name,
         profile,
         env: process.env,
@@ -1609,12 +1683,29 @@ export async function createOpenrindShellSandbox(opts) {
   // Image pull (~1.5 GB on first run for :just-bash). Skipped for local
   // images (OPENRIND_DESKTOP_SANDBOX_SKIP_PULL=1) so a `docker build`-produced tag
   // isn't clobbered by a registry fetch that would fail or overwrite it.
+  //
+  // When the image is ALREADY cached in the distro's Docker store we skip the
+  // pull entirely: `docker pull` on a cached tag still does a registry
+  // round-trip (DNS + TLS + manifest fetch) that costs seconds on a good
+  // network and can stall for minutes on locked-down corporate networks — and
+  // it is paid on EVERY new workspace, not just the first. A local
+  // `docker image inspect` (no network) makes the common repeat-create case
+  // effectively free. Set OPENRIND_DESKTOP_SANDBOX_FORCE_PULL=1 to always pull
+  // (e.g. to refresh a moved :just-bash tag).
   if (!skipImagePull) {
-    onProgress?.({ phase: "pull", message: `Pulling ${imageRef}...` });
-    await pullImage(imageRef, {
-      onProgress: (text) =>
-        onProgress?.({ phase: "pull", message: text.trimEnd() }),
-    });
+    const forcePull = process.env.OPENRIND_DESKTOP_SANDBOX_FORCE_PULL === "1";
+    if (!forcePull && (await imageExistsLocally(imageRef))) {
+      onProgress?.({
+        phase: "pull",
+        message: `Image ${imageRef} already present; skipping pull.`,
+      });
+    } else {
+      onProgress?.({ phase: "pull", message: `Pulling ${imageRef}...` });
+      await pullImage(imageRef, {
+        onProgress: (text) =>
+          onProgress?.({ phase: "pull", message: text.trimEnd() }),
+      });
+    }
   }
 
   // Forward credentials into the Linux side of WSL via WSLENV.
@@ -1743,7 +1834,7 @@ export async function createOpenrindShellSandbox(opts) {
               onProgress?.({ phase: evt.phase, message: evt.message }),
           });
           await finalizeSandboxLaunch({ name, profile, env, onProgress });
-          await prewarmAgentRuntime({ name, profile, env, onProgress });
+          await prewarmIfNeeded({ name, profile, env, onProgress });
           return { name, profile, imageRef, existed: false };
         } catch (waitErr) {
           const waitMsg = waitErr?.message ?? "";
@@ -1820,7 +1911,7 @@ export async function createOpenrindShellSandbox(opts) {
   // essential — `openshell sandbox exec` refuses while the sandbox is still
   // Provisioning, which silently skipped these steps when they ran pre-Ready.
   await finalizeSandboxLaunch({ name, profile, env, onProgress });
-  await prewarmAgentRuntime({ name, profile, env, onProgress });
+  await prewarmIfNeeded({ name, profile, env, onProgress });
   onProgress?.({ phase: "ready", message: `Sandbox ${name} ready.` });
   return { name, profile, imageRef, existed: false };
 }
@@ -1919,5 +2010,6 @@ export const __testing = {
   buildLaunchBlock,
   configureAgentLaunch,
   prewarmAgentRuntime,
+  prewarmIfNeeded,
   isGatewayWarmingError,
 };

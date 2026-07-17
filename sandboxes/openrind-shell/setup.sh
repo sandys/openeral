@@ -409,113 +409,127 @@ console.log('setup.sh: OpenrindGateway proxy written to ~/.claude/settings.json'
 "
 fi
 
-echo "setup.sh: running migrations..."
-# Log which DB target we're pointing at (redact credentials from the URL)
-DB_HOST="$(node -e "try { const u = new URL(process.env.DATABASE_URL); console.log(u.hostname + ':' + (u.port || '5432')); } catch { console.log('(unparseable)'); }")"
-echo "setup.sh: using external PostgreSQL at $DB_HOST"
+echo "setup.sh: running migrations, seeding, and restoring workspace..."
 
-node -e "
-  import('$OPENRIND_SHELL_DIR/dist/db/embedded.js').then(async ({ getDatabaseConnection }) => {
-    const { runMigrations } = await import('$OPENRIND_SHELL_DIR/dist/db/migrations.js');
-    const { pool } = await getDatabaseConnection();
-    await runMigrations(pool);
-    await pool.end();
-    console.log('setup.sh: migrations complete');
-  }).catch(err => {
-    // Print EVERY piece of info we have — demo users need something to go on
-    const msg = err && (err.message || err.toString()) || '(no message)';
-    const code = err && err.code ? ' code=' + err.code : '';
-    const hint = err && err.code === 'ENOTFOUND' ? '  (DATABASE_URL host is not resolvable from the sandbox — ensure it is a public hostname like Supabase, not a loopback IP)' :
-                 err && err.code === 'ECONNREFUSED' ? '  (DATABASE_URL host refused the connection — check port and firewall)' :
-                 err && /password/i.test(msg) ? '  (credential rejected — re-check DATABASE_URL)' : '';
-    console.error('setup.sh: migration failed:', msg + code);
-    if (hint) console.error(hint);
-    if (err && err.stack) console.error(err.stack);
-    process.exit(1);
-  });
-"
+# Migrations, the workspace seed, and the /home/agent restore all share ONE
+# database connection in ONE Node process. Each previously ran in its own
+# `node -e`, and because the sandbox can only reach PostgreSQL through the HTTP
+# CONNECT tunnel, every one of those processes paid a full cold handshake
+# (proxy TCP + CONNECT + TLS + SCRAM auth) — three times over. That per-connection
+# handshake to a remote database is what made the "connecting to the database"
+# step slow. One shared pool means the handshake happens ONCE instead of three
+# times (and one Node startup instead of three). OPENRIND_SHELL_DIR, WORKSPACE_ID,
+# OPENRIND_SHELL_AGENT, and DATABASE_URL are read from the environment via a quoted
+# heredoc, so the SQL's $1/$2 placeholders survive verbatim (no shell interpolation).
+export OPENRIND_SHELL_DIR
+OPENRIND_SHELL_DB_BOOTSTRAP=/tmp/openrind-shell-db-bootstrap.mjs
+cat > "$OPENRIND_SHELL_DB_BOOTSTRAP" <<'OPENRIND_SHELL_DB_BOOTSTRAP_EOF'
+const dir = process.env.OPENRIND_SHELL_DIR;
+const workspaceId = process.env.WORKSPACE_ID;
 
-echo "setup.sh: seeding workspace $WORKSPACE_ID..."
-node -e "
-  import('$OPENRIND_SHELL_DIR/dist/db/embedded.js').then(async ({ getDatabaseConnection }) => {
-    const ws = await import('$OPENRIND_SHELL_DIR/dist/db/workspace-queries.js');
-    const { pool } = await getDatabaseConnection();
+// Log the DB target (redacted) before connecting so a slow/hung connect still
+// shows where it was pointed.
+try {
+  const u = new URL(process.env.DATABASE_URL);
+  console.log('setup.sh: using external PostgreSQL at ' + u.hostname + ':' + (u.port || '5432'));
+} catch {
+  console.log('setup.sh: using external PostgreSQL at (unparseable)');
+}
 
-    try {
-      await pool.query(
-        \"INSERT INTO _openrind.workspace_config (id, display_name, config) VALUES (\\\$1, \\\$2, '{}'::jsonb) ON CONFLICT (id) DO NOTHING\",
-        [process.env.WORKSPACE_ID, 'sandbox']
-      );
-    } catch {}
+const { getDatabaseConnection } = await import(dir + '/dist/db/embedded.js');
+const { runMigrations } = await import(dir + '/dist/db/migrations.js');
+const ws = await import(dir + '/dist/db/workspace-queries.js');
+const { syncToFs, createHomeSyncOptions } = await import(dir + '/dist/sync.js');
 
-    // Seed root, .claude dirs, and default security settings
-    const defaultSettings = JSON.stringify({
-      permissions: {
-        allow: [
-          \"Bash(npm run *)\",
-          \"Bash(npm test *)\",
-          \"Bash(git status)\",
-          \"Bash(git diff *)\",
-          \"Bash(git log *)\",
-          \"Bash(git commit *)\",
-          \"Bash(ls *)\",
-          \"Bash(cat *)\",
-          \"Bash(grep *)\"
-        ],
-        deny: [
-          \"Read(~/.ssh/**)\",
-          \"Read(~/.aws/**)\",
-          \"Read(~/.azure/**)\",
-          \"Read(~/.npmrc)\",
-          \"Read(~/.git-credentials)\",
-          \"Edit(~/.bashrc)\",
-          \"Edit(~/.zshrc)\",
-          \"Bash(curl *)\",
-          \"Bash(wget *)\",
-          \"Bash(nc *)\",
-          \"Bash(ssh *)\",
-          \"Bash(git push *)\",
-          \"Read(*.env)\",
-          \"Read(.env.*)\"
-        ]
-      },
-      enableAllProjectMcpServers: false
-    }, null, 2);
+let pool;
+try {
+  ({ pool } = await getDatabaseConnection());
+} catch (err) {
+  // A bad/unreachable DATABASE_URL is the #1 failure — print every hint we have.
+  const msg = (err && (err.message || err.toString())) || '(no message)';
+  const code = err && err.code ? ' code=' + err.code : '';
+  const hint = err && err.code === 'ENOTFOUND'
+      ? '  (DATABASE_URL host is not resolvable from the sandbox — ensure it is a public hostname like Supabase, not a loopback IP)'
+    : err && err.code === 'ECONNREFUSED'
+      ? '  (DATABASE_URL host refused the connection — check port and firewall)'
+    : err && /password/i.test(msg)
+      ? '  (credential rejected — re-check DATABASE_URL)'
+      : '';
+  console.error('setup.sh: database connection failed:', msg + code);
+  if (hint) console.error(hint);
+  if (err && err.stack) console.error(err.stack);
+  process.exit(1);
+}
 
-    const agentKind = process.env.OPENRIND_SHELL_AGENT || 'claude';
-    const autoDirs = agentKind === 'openclaw'
-      ? ['/', '/.config', '/.openclaw']
-      : ['/', '/.claude', '/.claude/projects'];
-    const seedFiles = agentKind === 'openclaw'
-      ? {}
-      : { '/.claude/settings.json': defaultSettings };
+try {
+  await runMigrations(pool);
+  console.log('setup.sh: migrations complete');
 
-    await ws.seedFromConfig(pool, process.env.WORKSPACE_ID, {
-      autoDirs,
-      seedFiles,
-    });
+  try {
+    await pool.query(
+      "INSERT INTO _openrind.workspace_config (id, display_name, config) VALUES ($1, $2, '{}'::jsonb) ON CONFLICT (id) DO NOTHING",
+      [workspaceId, 'sandbox'],
+    );
+  } catch {}
 
-    await pool.end();
-    console.log('setup.sh: workspace seeded');
-  }).catch(err => {
-    console.error('setup.sh: seed failed:', err.message);
-    process.exit(1);
-  });
-"
+  // Seed root, agent config dirs, and default security settings.
+  const defaultSettings = JSON.stringify({
+    permissions: {
+      allow: [
+        'Bash(npm run *)',
+        'Bash(npm test *)',
+        'Bash(git status)',
+        'Bash(git diff *)',
+        'Bash(git log *)',
+        'Bash(git commit *)',
+        'Bash(ls *)',
+        'Bash(cat *)',
+        'Bash(grep *)',
+      ],
+      deny: [
+        'Read(~/.ssh/**)',
+        'Read(~/.aws/**)',
+        'Read(~/.azure/**)',
+        'Read(~/.npmrc)',
+        'Read(~/.git-credentials)',
+        'Edit(~/.bashrc)',
+        'Edit(~/.zshrc)',
+        'Bash(curl *)',
+        'Bash(wget *)',
+        'Bash(nc *)',
+        'Bash(ssh *)',
+        'Bash(git push *)',
+        'Read(*.env)',
+        'Read(.env.*)',
+      ],
+    },
+    enableAllProjectMcpServers: false,
+  }, null, 2);
 
-echo "setup.sh: restoring /home/agent from workspace..."
-node -e "
-  import('$OPENRIND_SHELL_DIR/dist/db/embedded.js').then(async ({ getDatabaseConnection }) => {
-    const { syncToFs, createHomeSyncOptions } = await import('$OPENRIND_SHELL_DIR/dist/sync.js');
-    const { pool } = await getDatabaseConnection();
-    const count = await syncToFs(pool, process.env.WORKSPACE_ID, '/home/agent', createHomeSyncOptions({ prune: false }));
-    await pool.end();
-    console.log('setup.sh: restored ' + count + ' workspace entr' + (count === 1 ? 'y' : 'ies'));
-  }).catch(err => {
-    console.error('setup.sh: restore failed:', err.message);
-    process.exit(1);
-  });
-"
+  const agentKind = process.env.OPENRIND_SHELL_AGENT || 'claude';
+  const autoDirs = agentKind === 'openclaw'
+    ? ['/', '/.config', '/.openclaw']
+    : ['/', '/.claude', '/.claude/projects'];
+  const seedFiles = agentKind === 'openclaw'
+    ? {}
+    : { '/.claude/settings.json': defaultSettings };
+
+  await ws.seedFromConfig(pool, workspaceId, { autoDirs, seedFiles });
+  console.log('setup.sh: workspace seeded');
+
+  const count = await syncToFs(pool, workspaceId, '/home/agent', createHomeSyncOptions({ prune: false }));
+  console.log('setup.sh: restored ' + count + ' workspace entr' + (count === 1 ? 'y' : 'ies'));
+} catch (err) {
+  console.error('setup.sh: database bootstrap failed:', (err && err.message) || err);
+  if (err && err.stack) console.error(err.stack);
+  process.exit(1);
+} finally {
+  await pool.end().catch(() => {});
+}
+OPENRIND_SHELL_DB_BOOTSTRAP_EOF
+
+node "$OPENRIND_SHELL_DB_BOOTSTRAP" || { rm -f "$OPENRIND_SHELL_DB_BOOTSTRAP"; exit 1; }
+rm -f "$OPENRIND_SHELL_DB_BOOTSTRAP"
 
 # Re-apply git URL rewrites after the workspace restore. syncToFs is authoritative
 # and may overwrite /home/agent/.gitconfig with an older version that lacks the
