@@ -1298,7 +1298,12 @@ async function prewarmAgentRuntime({ name, profile, env, onProgress }) {
  *           onProgress?: Function }} args
  */
 async function prewarmIfNeeded({ name, profile, env, onProgress }) {
-  if (profile !== "openrind-shell-openclaw") return;
+  // Agent-specific behavior in Node.js is selected via the OPENRIND_SHELL_AGENT
+  // gate (the same canonical value setup.sh reads), never via `profile`.
+  // Callers normalize profile -> OPENRIND_SHELL_AGENT on the env they pass
+  // (see createOpenrindShellSandbox); here we only read that gate.
+  const agent = (env ?? process.env).OPENRIND_SHELL_AGENT;
+  if (agent !== "openclaw") return;
   await prewarmAgentRuntime({ name, profile, env, onProgress });
 }
 
@@ -1591,10 +1596,18 @@ export async function createOpenrindShellSandbox(opts) {
       // Only OpenClaw needs prewarming here (see prewarmIfNeeded). For Claude
       // this is a no-op, so reopening a Claude workspace no longer re-runs the
       // full setup.sh / remote-DB bootstrap on the loading screen.
+      // prewarmIfNeeded selects the agent from OPENRIND_SHELL_AGENT (not
+      // `profile`); the full WSLENV-forwarding env isn't built on this reopen
+      // path, so surface the canonical gate on the env we hand it (same
+      // profile -> agent normalization as the fresh-create path below).
+      const reopenEnv =
+        profile === "openrind-shell-openclaw"
+          ? { ...process.env, OPENRIND_SHELL_AGENT: "openclaw" }
+          : process.env;
       await prewarmIfNeeded({
         name,
         profile,
-        env: process.env,
+        env: reopenEnv,
         onProgress,
       });
       return { name, profile, imageRef, existed: true };

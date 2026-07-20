@@ -81,6 +81,18 @@ FRAME_RESIZE = 0x01
 
 READ_CHUNK = 65536
 
+# Hard ceiling on a single control frame's declared payload length. The 32-bit
+# frame header is attacker/mistake-controllable: a peer can claim a length of up
+# to 4 GiB, which would make parse_frames() retain the partial frame and keep
+# appending every subsequent read until the (possibly never-arriving) remainder
+# lands — an unbounded-memory / hung-session vector. Legitimate frames are tiny
+# (a RESIZE is 4 bytes; a DATA frame is one xterm `onData` burst — keystrokes,
+# or at most a paste). 8 MiB is far larger than any real terminal paste yet
+# bounds the worst-case `inbound` buffer to ~MAX_FRAME_LEN + READ_CHUNK, since
+# the check reads only the 5-byte header and fires before the huge frame is
+# ever buffered.
+MAX_FRAME_LEN = 8 * 1024 * 1024
+
 # Set once the mode is known. The SIGWINCH handler consults this so it never
 # fights the RESIZE frames in framed mode.
 _mode = None  # "framed" | "raw" | None
@@ -254,12 +266,40 @@ def write_all(fd, data):
     return True
 
 
+def kill_and_reap(pid):
+    """SIGHUP the agent and reap it, ignoring errors. Used to tear the session
+    down after a fatal transport violation."""
+    try:
+        os.kill(pid, signal.SIGHUP)
+    except Exception:
+        pass
+    try:
+        os.waitpid(pid, 0)
+    except (ChildProcessError, OSError):
+        pass
+
+
 def parse_frames(buffer, master_fd):
     """Consume complete control frames from `buffer` (a bytearray, mutated in
-    place). Partial trailing bytes are left for the next read."""
+    place). Partial trailing bytes are left for the next read.
+
+    Returns True normally, or False when a frame's declared length exceeds
+    MAX_FRAME_LEN — a corrupt or hostile stream. The caller MUST tear the
+    session down on False: continuing to feed such a stream would let the bogus
+    length grow `buffer` without bound. The check inspects only the 5-byte
+    header, so it fires before the oversize frame is buffered, and we clear
+    `buffer` so memory stays bounded even if the caller is slow to react."""
     while len(buffer) >= 5:
         frame_type = buffer[0]
         length = int.from_bytes(buffer[1:5], "big")
+        if length > MAX_FRAME_LEN:
+            log(
+                "fatal: framed peer declared frame length %d > MAX_FRAME_LEN %d "
+                "(type=%d) — aborting frame parse"
+                % (length, MAX_FRAME_LEN, frame_type)
+            )
+            del buffer[:]
+            return False
         if len(buffer) < 5 + length:
             break
         payload = bytes(buffer[5 : 5 + length])
@@ -272,6 +312,7 @@ def parse_frames(buffer, master_fd):
             set_winsize(master_fd, cols, rows)
         else:
             log("dropping unknown frame type=%d len=%d" % (frame_type, length))
+    return True
 
 
 def spawn_child(master_fd, slave_fd, argv):
@@ -396,7 +437,16 @@ def main():
 
     # If framed and we buffered the first frame bytes, apply them now.
     if _mode == "framed" and inbound:
-        parse_frames(inbound, master_fd)
+        if not parse_frames(inbound, master_fd):
+            # Oversize frame already in the startup buffer — tear down before
+            # entering the main loop (see parse_frames / MAX_FRAME_LEN).
+            kill_and_reap(pid)
+            restore_termios(0, original_termios)
+            try:
+                os.close(master_fd)
+            except OSError:
+                pass
+            return 1
     # If raw and we buffered keystrokes, forward them now.
     elif _mode == "raw" and inbound:
         write_all(master_fd, bytes(inbound))
@@ -480,7 +530,11 @@ def main():
                     _mode = "framed"
                     set_winsize(master_fd, result[1], result[2])
                     inbound = bytearray(result[3])
-                    parse_frames(inbound, master_fd)
+                    if not parse_frames(inbound, master_fd):
+                        kill_and_reap(pid)
+                        child_exited = True
+                        exit_code = 1
+                        break
                 elif result[0] == "raw":
                     _mode = "raw"
                     write_all(master_fd, bytes(inbound))
@@ -488,7 +542,13 @@ def main():
                 continue
             if _mode == "framed":
                 inbound.extend(chunk)
-                parse_frames(inbound, master_fd)
+                if not parse_frames(inbound, master_fd):
+                    # Fatal framing violation: drop the connection rather than
+                    # buffer a bogus multi-GB frame (see MAX_FRAME_LEN).
+                    kill_and_reap(pid)
+                    child_exited = True
+                    exit_code = 1
+                    break
             else:
                 write_all(master_fd, chunk)
             continue

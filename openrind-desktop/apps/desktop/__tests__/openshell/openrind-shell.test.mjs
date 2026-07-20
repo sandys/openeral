@@ -898,13 +898,19 @@ test("prewarmAgentRuntime (openclaw): failure is non-fatal", async () => {
 // connect-time setup.sh runs the full DB bootstrap (migrations + restore) once,
 // so prewarming would pay the remote-PostgreSQL connect a second time per
 // session — the "database connecting is slow" doubling this fixes.
+//
+// The agent is selected from the OPENRIND_SHELL_AGENT env gate (the canonical
+// value setup.sh reads), NOT from `profile` — callers normalize profile onto
+// the env they pass.
 
-test("prewarmIfNeeded (claude): skips prewarm entirely (no sandbox exec)", async () => {
+test("prewarmIfNeeded: skips prewarm when the agent gate isn't openclaw", async () => {
   process.env.MOCK_WSL_STDOUT = "prewarm: ok";
+  const env = { ...process.env };
+  delete env.OPENRIND_SHELL_AGENT;
   await openrindShell.__testing.prewarmIfNeeded({
     name: "openrind-shell-x",
     profile: "openrind-shell-claude",
-    env: process.env,
+    env,
   });
   assert.equal(
     readArgsLog().length,
@@ -913,16 +919,34 @@ test("prewarmIfNeeded (claude): skips prewarm entirely (no sandbox exec)", async
   );
 });
 
-test("prewarmIfNeeded (openclaw): runs the prewarm", async () => {
+test("prewarmIfNeeded: runs the prewarm when OPENRIND_SHELL_AGENT=openclaw", async () => {
   process.env.MOCK_WSL_STDOUT = "prewarm: ok";
   await openrindShell.__testing.prewarmIfNeeded({
     name: "openrind-shell-x",
     profile: "openrind-shell-openclaw",
-    env: process.env,
+    env: { ...process.env, OPENRIND_SHELL_AGENT: "openclaw" },
   });
   const lines = readArgsLog();
   assert.equal(lines.length, 1, "openclaw prewarm runs exactly one sandbox exec");
   assert.match(lines[0], /openshell sandbox exec --name 'openrind-shell-x'/);
+});
+
+test("prewarmIfNeeded: profile alone never triggers prewarm without the env gate", async () => {
+  // Guards the compliance rule: agent selection is the OPENRIND_SHELL_AGENT
+  // gate, not `profile`. An openclaw profile with no agent gate must NOT run.
+  process.env.MOCK_WSL_STDOUT = "prewarm: ok";
+  const env = { ...process.env };
+  delete env.OPENRIND_SHELL_AGENT;
+  await openrindShell.__testing.prewarmIfNeeded({
+    name: "openrind-shell-x",
+    profile: "openrind-shell-openclaw",
+    env,
+  });
+  assert.equal(
+    readArgsLog().length,
+    0,
+    "profile must not select the agent — only OPENRIND_SHELL_AGENT does",
+  );
 });
 
 test("buildLaunchBlock: proxyBase is shell-quoted (no command substitution)", () => {

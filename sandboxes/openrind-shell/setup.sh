@@ -741,7 +741,22 @@ if [ "$OPENRIND_SHELL_AGENT" = "openclaw" ]; then
   # The target is a symlink into /tmp, which is never synced to the DB (see
   # sync.ts HOME_SYNC_EXCLUDE_PATH_PREFIXES), so nothing under the persisted
   # /home/agent is ever a multi-GB npm cache.
-  ln -sfn /tmp/openclaw-plugin-runtime-deps /home/agent/.openclaw/plugin-runtime-deps
+  #
+  # Guard against a stale REAL directory at the destination: an older session
+  # (or an earlier openclaw build) may have written plugin-runtime-deps as a
+  # plain directory instead of this symlink. `ln -sfn` cannot replace a real
+  # directory — it nests the link inside it (leaving the multi-GB dir in place)
+  # or, once that nested path is itself occupied, fails outright, which under
+  # `set -euo pipefail` would abort setup and break OpenClaw startup. Removing
+  # it first is safe: the path is excluded from the workspace sync (never user
+  # data — only a regenerable npm staging cache) and its contents were just
+  # re-seeded into /tmp/openclaw-plugin-runtime-deps above.
+  _openclaw_prd=/home/agent/.openclaw/plugin-runtime-deps
+  if [ -d "$_openclaw_prd" ] && [ ! -L "$_openclaw_prd" ]; then
+    echo "setup.sh: replacing stale plugin-runtime-deps directory with a symlink into /tmp"
+    rm -rf "$_openclaw_prd"
+  fi
+  ln -sfn /tmp/openclaw-plugin-runtime-deps "$_openclaw_prd"
 
   # A small diagnostic the user can run if onboarding or the TUI misbehaves.
   mkdir -p /home/agent/.openrind-shell
@@ -789,7 +804,16 @@ DIAG_EOF
   # OPENCLAW_PLUGIN_STAGE_DIR is passed ONLY to the gateway (its bundled deps are
   # seeded into that dir); it must never reach the TUI/client process or OpenClaw
   # runs a staging loop that saturates the event loop and freezes the terminal.
-  openrind_pty_exec env \
+  #
+  # Scrub setup-only secrets before handing control to OpenClaw (defense in
+  # depth, mirroring the Claude launch below). OPENRIND_GATEWAY_API_KEY is only
+  # needed to MINT the presign earlier in this script — OpenClaw authenticates
+  # via the presign proxy URL (ANTHROPIC_BASE_URL), never the raw key. Dropping
+  # it (and any ANTHROPIC_AUTH_TOKEN) keeps the credential out of OpenClaw and
+  # every plugin / diagnostic / subprocess it spawns, so a stray env dump can't
+  # leak it. `env` without -i still passes the rest of the environment through,
+  # so ANTHROPIC_BASE_URL exported earlier is inherited by the gateway.
+  openrind_pty_exec env -u OPENRIND_GATEWAY_API_KEY -u ANTHROPIC_AUTH_TOKEN \
     HOME=/home/agent \
     SHELL=/usr/local/bin/openrind-shell-bash \
     NODE_COMPILE_CACHE=/tmp/openclaw-compile-cache \
