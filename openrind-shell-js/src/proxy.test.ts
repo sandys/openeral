@@ -6,9 +6,13 @@ import { dirname, join } from 'node:path';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot = join(__dirname, '../..');
-const policy = readFileSync(join(repoRoot, 'sandboxes/openrind-shell/policy.yaml'), 'utf8');
-const setup = readFileSync(join(repoRoot, 'sandboxes/openrind-shell/setup.sh'), 'utf8');
-const cli = readFileSync(join(__dirname, 'cli.ts'), 'utf8');
+// Normalize CRLF -> LF so content assertions (and the `\nelse\n` / `\nfi`
+// block scanners below) behave identically on Windows checkouts, where the
+// repo's LF-stored sources are materialized with CRLF.
+const readText = (p: string): string => readFileSync(p, 'utf8').replace(/\r\n/g, '\n');
+const policy = readText(join(repoRoot, 'sandboxes/openrind-shell/policy.yaml'));
+const setup = readText(join(repoRoot, 'sandboxes/openrind-shell/setup.sh'));
+const cli = readText(join(__dirname, 'cli.ts'));
 
 function launchBlock(source: string, marker: string): string {
   const start = source.indexOf(marker);
@@ -155,14 +159,16 @@ describe('setup.sh Socket.dev integration', () => {
 });
 
 describe('sandbox workspace persistence wiring', () => {
-  const bashBridge = readFileSync(join(repoRoot, 'sandboxes/openrind-shell/openrind-shell-bash.mjs'), 'utf8');
+  const bashBridge = readText(join(repoRoot, 'sandboxes/openrind-shell/openrind-shell-bash.mjs'));
 
   it('setup.sh restores and flushes the real Claude home', () => {
     expect(setup).toContain("import('$OPENRIND_SHELL_DIR/dist/sync.js')");
-    expect(setup).toContain('syncToFs(pool, process.env.WORKSPACE_ID');
+    // Restore runs inside the shared-pool DB bootstrap, which binds the
+    // workspace id to a local `workspaceId` (= process.env.WORKSPACE_ID) once.
+    expect(setup).toContain('syncToFs(pool, workspaceId,');
     expect(setup).toContain('syncFromFs(pool, process.env.WORKSPACE_ID');
     expect(setup).toContain('createHomeSyncOptions({ prune: false })');
-    expect(setup.indexOf('restoring /home/agent from workspace')).toBeLessThan(
+    expect(setup.indexOf('restoring workspace')).toBeLessThan(
       setup.indexOf('starting openrind-shell-bash daemon'),
     );
   });
