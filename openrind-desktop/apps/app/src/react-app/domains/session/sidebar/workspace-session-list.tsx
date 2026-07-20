@@ -1,6 +1,6 @@
 /** @jsxImportSource react */
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { ChevronDown, ChevronRight, Loader2, MoreHorizontal, Plus } from "lucide-react";
+import { ChevronDown, ChevronRight, Folder, Loader2, MoreHorizontal, Plus } from "lucide-react";
 
 import { getDisplaySessionTitle } from "../../../../app/lib/session-title";
 import type { WorkspaceInfo } from "../../../../app/lib/desktop";
@@ -155,18 +155,6 @@ const workspaceKindLabel = (workspace: WorkspaceInfo) =>
       ? t("workspace.sandbox_badge")
       : t("workspace.remote_badge")
     : t("workspace.local_badge");
-
-const WORKSPACE_SWATCHES = ["#2563eb", "#5a67d8", "#f97316", "#10b981"];
-
-const workspaceSwatchColor = (seed: string) => {
-  const value = seed.trim() || "workspace";
-  let hash = 0;
-  for (let index = 0; index < value.length; index += 1) {
-    hash = (hash << 5) - hash + value.charCodeAt(index);
-    hash |= 0;
-  }
-  return WORKSPACE_SWATCHES[Math.abs(hash) % WORKSPACE_SWATCHES.length];
-};
 
 export function WorkspaceSessionList(props: Props) {
   const [expandedWorkspaceIds, setExpandedWorkspaceIds] = useState<Set<string>>(
@@ -513,12 +501,7 @@ export function WorkspaceSessionList(props: Props) {
                     }}
                   >
                     <div className="flex min-w-0 items-center gap-3.5">
-                      <div
-                        className="flex h-5.5 w-5.5 shrink-0 items-center justify-center rounded-full"
-                        style={{
-                          backgroundColor: workspaceSwatchColor(workspace.id || workspaceLabel(workspace)),
-                        }}
-                      />
+                      <Folder size={18} className="shrink-0 text-dls-secondary" />
                       <div className="min-w-0 flex-1">
                         <div className="min-w-0 truncate text-[14px] font-normal text-dls-text">
                           {workspaceLabel(workspace)}

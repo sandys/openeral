@@ -2,15 +2,23 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
+  Boxes,
   ChevronDown,
   ChevronRight,
   Loader2,
   MoreHorizontal,
   Plus,
+  X,
 } from "lucide-react";
 
 import type { SandboxProfile } from "../../../../app/lib/desktop";
 import { ConfirmModal } from "../../../design-system/modals/confirm-modal";
+import {
+  inputClass,
+  pillGhostClass,
+  pillPrimaryClass,
+  pillSecondaryClass,
+} from "../../workspace/modal-styles";
 import {
   readSandboxProfile,
   sandboxDisplayName,
@@ -25,8 +33,6 @@ function getBridge(): ElectronBridge | null {
   if (typeof window === "undefined") return null;
   return window.__OPENRIND_DESKTOP_ELECTRON__ ?? null;
 }
-
-const SANDBOX_SWATCH_BLUE = "#3E63DD";
 
 const COLLAPSED_KEY = "openrind-shell-sandboxes-collapsed";
 
@@ -211,7 +217,7 @@ export function SandboxSessionList(props: SandboxSessionListProps) {
         <div
           role="button"
           tabIndex={0}
-          className="w-full flex items-center justify-between rounded-xl px-3.5 py-2.5 text-left text-[13px] text-gray-10 transition-colors hover:bg-gray-1/70 hover:text-gray-12"
+          className="w-full flex items-center justify-between rounded-xl px-3.5 py-2.5 text-left text-[13px] text-gray-10"
           onClick={toggleCollapsed}
           onKeyDown={(event) => {
             if (event.key !== "Enter" && event.key !== " ") return;
@@ -221,17 +227,14 @@ export function SandboxSessionList(props: SandboxSessionListProps) {
           }}
         >
           <div className="flex min-w-0 items-center gap-3.5">
-            <div
-              className="flex h-5.5 w-5.5 shrink-0 items-center justify-center rounded-full"
-              style={{ backgroundColor: SANDBOX_SWATCH_BLUE }}
-            />
+            <Boxes size={18} className="shrink-0 text-dls-secondary" />
             <div className="min-w-0 whitespace-nowrap text-[13px] font-normal text-dls-text">
               Sandboxes
             </div>
           </div>
 
           <div className="ml-4 flex shrink-0 items-center gap-1.5">
-            <div className="items-center gap-0.5 hidden group-hover:flex group-focus-within:flex">
+            <div className="flex items-center gap-0.5">
               <button
                 type="button"
                 className="rounded-md p-1 text-gray-9 hover:bg-gray-3/80 hover:text-gray-11"
@@ -335,7 +338,7 @@ export function SandboxSessionList(props: SandboxSessionListProps) {
                     <div
                       role="button"
                       tabIndex={0}
-                      className={`group/sbx flex min-h-9 w-full items-center justify-between rounded-xl px-3 py-1.5 text-left text-[13px] transition-colors ${
+                      className={`group flex min-h-9 w-full items-center justify-between rounded-xl px-3 py-1.5 text-left text-[13px] transition-colors ${
                         selected
                           ? "bg-gray-3 text-gray-12"
                           : "text-gray-10 hover:bg-gray-1/70 hover:text-gray-11"
@@ -363,34 +366,16 @@ export function SandboxSessionList(props: SandboxSessionListProps) {
                         );
                       }}
                     >
-                      <div className="mr-2 flex min-w-0 flex-1 items-center gap-2">
-                        {isRenaming ? (
-                          <input
-                            autoFocus
-                            className="w-full min-w-0 rounded-md border border-dls-border bg-dls-surface px-2 py-0.5 text-[13px] text-dls-text focus:outline-none focus:ring-2 focus:ring-[rgba(var(--dls-accent-rgb),0.2)]"
-                            value={renameValue}
-                            onChange={(event) =>
-                              setRenameValue(event.target.value)
-                            }
-                            onClick={(event) => event.stopPropagation()}
-                            onKeyDown={(event) => {
-                              event.stopPropagation();
-                              if (event.key === "Enter") commitRename(row.name);
-                              if (event.key === "Escape") cancelRename();
-                            }}
-                            onBlur={() => commitRename(row.name)}
-                          />
-                        ) : (
-                          <span
-                            className={`block min-w-0 break-all text-[12px] leading-4 ${
-                              selected
-                                ? "font-medium text-gray-12"
-                                : "font-normal text-current"
-                            }`}
-                          >
-                            {sandboxDisplayName(row.name)}
-                          </span>
-                        )}
+                      <div className="mr-2.5 flex min-w-0 flex-1 items-center gap-2">
+                        <span
+                          className={`block min-w-0 truncate ${
+                            selected
+                              ? "font-medium text-gray-12"
+                              : "font-normal text-current"
+                          }`}
+                        >
+                          {sandboxDisplayName(row.name)}
+                        </span>
                       </div>
 
                       <div className="ml-auto flex shrink-0 items-center gap-1">
@@ -400,14 +385,10 @@ export function SandboxSessionList(props: SandboxSessionListProps) {
                             className="animate-spin text-gray-9"
                           />
                         ) : null}
-                        {!isRenaming ? (
+                        {!isRenaming && (selected || rowMenuFor === row.name) ? (
                           <button
                             type="button"
-                            className={`h-7 w-7 items-center justify-center rounded-md text-gray-9 transition-colors hover:bg-gray-3/80 hover:text-gray-11 ${
-                              rowMenuFor === row.name
-                                ? "flex"
-                                : "hidden group-hover/sbx:flex group-focus-within/sbx:flex"
-                            }`}
+                            className="flex h-7 w-7 items-center justify-center rounded-md text-gray-9 transition-colors hover:bg-gray-3/80 hover:text-gray-11"
                             aria-label="Sandbox actions"
                             onClick={(event) => {
                               event.preventDefault();
@@ -457,6 +438,82 @@ export function SandboxSessionList(props: SandboxSessionListProps) {
                 );
               })
             )}
+          </div>
+        </div>
+      ) : null}
+
+      {renamingFor ? (
+        <div className="fixed inset-0 z-50 bg-gray-1/60 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-gray-2 border border-gray-6/70 w-full max-w-lg rounded-2xl shadow-2xl overflow-hidden">
+            <div className="p-6">
+              <div className="flex items-start justify-between gap-4">
+                <div>
+                  <h3 className="text-lg font-semibold text-gray-12">
+                    Rename sandbox
+                  </h3>
+                  <p className="mt-1 text-sm text-gray-11">
+                    Choose a display name for this sandbox in the sidebar.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  className={`${pillGhostClass} !p-2 rounded-full`}
+                  onClick={cancelRename}
+                  aria-label="Close"
+                >
+                  <X size={16} />
+                </button>
+              </div>
+
+              <div className="mt-6">
+                <label className="mb-1.5 block text-[13px] font-medium text-dls-text">
+                  Name
+                </label>
+                <input
+                  autoFocus
+                  type="text"
+                  value={renameValue}
+                  onChange={(event) => setRenameValue(event.currentTarget.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Escape") {
+                      cancelRename();
+                      return;
+                    }
+                    if (
+                      event.key !== "Enter" ||
+                      event.nativeEvent.isComposing ||
+                      event.keyCode === 229
+                    )
+                      return;
+                    event.preventDefault();
+                    if (renamingFor && renameValue.trim())
+                      commitRename(renamingFor);
+                  }}
+                  placeholder="Sandbox name"
+                  className={`${inputClass} bg-gray-3`}
+                />
+              </div>
+
+              <div className="mt-6 flex justify-end gap-2">
+                <button
+                  type="button"
+                  className={pillSecondaryClass}
+                  onClick={cancelRename}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  className={pillPrimaryClass}
+                  onClick={() => {
+                    if (renamingFor) commitRename(renamingFor);
+                  }}
+                  disabled={!renameValue.trim()}
+                >
+                  Save
+                </button>
+              </div>
+            </div>
           </div>
         </div>
       ) : null}

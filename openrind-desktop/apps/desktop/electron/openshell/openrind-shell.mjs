@@ -1052,78 +1052,14 @@ function buildLaunchBlock(profile, proxyBase, apiKey = null) {
       "  exec openrind-shell",
     );
   } else {
-    block.push(
-      // Reconnect fast path: the gateway from a previous session survives PTY
-      // disconnects (setup.sh starts it with setsid). When it is still healthy,
-      // exec the TUI directly instead of re-running setup.sh. This mirrors
-      // setup.sh's own final exec:
-      //   - ~/.openrind-shell/env.sh carries ANTHROPIC_BASE_URL when OpenrindGateway is
-      //     active (written by setup.sh for reconnect sessions). It also
-      //     contains `unset ANTHROPIC_API_KEY` — meant for Claude Code,
-      //     which auths via the proxy URL token. OpenClaw needs the literal
-      //     key (setup.sh: OpenShell placeholders are unusable by openclaw's
-      //     Node gateway) and setup.sh's own final exec keeps it in the env,
-      //     so save the key loaded above and re-export it after sourcing;
-      //   - -u OPENCLAW_PLUGIN_STAGE_DIR: must NOT reach the TUI process —
-      //     forwarding it causes openclaw to run its own concurrent staging
-      //     loop that saturates the event loop and freezes the terminal;
-      //   - -u ANTHROPIC_AUTH_TOKEN: env.sh exports a dummy token for Claude
-      //     Code's benefit; the canonical openclaw env never has it;
-      //   - SHELL=/usr/local/bin/openrind-shell-bash: agent tool shell invocations
-      //     go through openrind-shell's PostgreSQL-backed workspace layer.
-      // `openclaw tui`, NOT bare `openclaw`: as of 2026.4.x the bare command
-      // opens the "crestodian" setup concierge instead of the coding agent
-      // (setup.sh's final exec uses `openclaw tui` for the same reason).
-      // 600 s handshake timeout matches setup.sh — the TUI blocks its own
-      // event loop during plugin loading (a single pass can exceed 2 min in
-      // the sandbox), and a shorter timeout aborts the connect and re-runs
-      // the whole plugin pass in a 100%-CPU retry loop that ends with the
-      // TUI stranded in a permanent "disconnected" state.
-      // NODE_NO_WARNINGS: hide the UNDICI-EHPA experimental warnings that
-      // otherwise print above the TUI banner in the user's terminal.
-      //
-      // OpenClaw session binding: `openclaw tui --session <key>` selects the
-      // conversation thread (create-or-resume). writeCurrentSessionMarker
-      // drops the sanitized key here before each fresh connect; both the fast
-      // path (direct exec) and the cold path (setup.sh, via the exported
-      // OPENRIND_DESKTOP_OPENCLAW_SESSION var) honor it. Empty marker keeps OpenClaw's
-      // default "main" session.
-      `  _ow_sk=""`,
-      // Consume-on-read — same one-marker-per-launch contract as the claude
-      // branch (sessions are concurrent; see that comment).
-      `  if [ -f ${SESSION_MARKER_PATH} ]; then`,
-      `    _ow_sk="$(cat ${SESSION_MARKER_PATH} 2>/dev/null | tr -d '\\r\\n ')"`,
-      `    rm -f ${SESSION_MARKER_PATH} 2>/dev/null || true`,
-      `  fi`,
-      `  case "$_ow_sk" in *[!a-zA-Z0-9._-]*) _ow_sk="" ;; esac`,
-      "  if curl -fsS http://127.0.0.1:18789/readyz >/dev/null 2>&1; then",
-      '    _saved_key="${ANTHROPIC_API_KEY:-}"',
-      "    [ -f /home/agent/.openrind-shell/env.sh ] && . /home/agent/.openrind-shell/env.sh",
-      '    [ -n "$_saved_key" ] && export ANTHROPIC_API_KEY="$_saved_key"',
-      "    exec env -u OPENRIND_GATEWAY_API_KEY -u OPENCLAW_PLUGIN_STAGE_DIR -u ANTHROPIC_AUTH_TOKEN \\",
-      "      HOME=/home/agent \\",
-      "      SHELL=/usr/local/bin/openrind-shell-bash \\",
-      "      OPENCLAW_NO_RESPAWN=1 \\",
-      "      NODE_COMPILE_CACHE=/tmp/openclaw-compile-cache \\",
-      "      GIT_SSL_NO_VERIFY=true npm_config_strict_ssl=false \\",
-      "      OPENCLAW_HANDSHAKE_TIMEOUT_MS=600000 \\",
-      "      NODE_NO_WARNINGS=1 \\",
-      "      openclaw tui ${_ow_sk:+--session $_ow_sk}",
-      "  fi",
-      // Cold start (or crashed gateway): clear any zombie process that may
-      // still hold port 18789 — setup.sh starts its gateway without a pkill,
-      // because in the canonical fresh-container flow none can exist — then
-      // hand over to the image's tested entry point. setup.sh does everything
-      // this block used to hand-roll: DB migrations, workspace seed,
-      // openrind-shell-bash daemon, OpenrindGateway presign resolution, `openclaw
-      // onboard` (schema-correct auth profile + foreground plugin staging),
-      // gateway start + readiness wait, TUI plugin pre-stage, doctor --fix,
-      // and finally execs the OpenClaw TUI.
-      "  pkill -f 'openclaw gateway' 2>/dev/null || true",
-      // Hand the session key to setup.sh's own final `openclaw tui` exec.
-      '  export OPENRIND_DESKTOP_OPENCLAW_SESSION="$_ow_sk"',
-      "  exec openrind-shell",
-    );
+    // OpenClaw is now onboarded and launched INTERACTIVELY by the user (see the
+    // openclaw branch of setup.sh): there is no pre-warmed gateway to fast-path
+    // into and no hardcoded session binding. Always run the image bootstrap so
+    // persistence (DB migrations + workspace restore + the openrind-shell-bash
+    // sync daemon) comes up first; setup.sh then hands the user an interactive
+    // shell to run "openclaw onboard" / "openclaw" themselves, exactly like a
+    // normal local install.
+    block.push("  exec openrind-shell");
   }
   block.push("fi", "# <<< openrind-desktop launch <<<");
   return block.join("\n");

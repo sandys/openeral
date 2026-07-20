@@ -44,7 +44,11 @@ DATABASE_URL='...' ANTHROPIC_API_KEY='...' bash ../tests/test_claude_e2e.sh
 - `sandboxes/openrind-shell/` — OpenShell sandbox image (stock base, no FUSE)
   - `Dockerfile` — Node.js + openrind-shell-js on stock OpenShell base
   - `openrind-shell-bash.mjs` — daemon/client bridge for custom agents
-  - `setup.sh` — sandbox entry point
+  - `openrind-pty-bridge.py` — PTY host: runs the agent on a real Linux PTY and
+    streams raw bytes to Openrind Desktop (keeps Windows ConPTY out of the byte
+    path, which was corrupting the Claude/OpenClaw TUI). Auto-detects framed
+    (desktop, via an in-band handshake) vs. raw passthrough (external terminal).
+  - `setup.sh` — sandbox entry point (execs the agent through openrind-pty-bridge.py)
   - `policy.yaml` — network policy
 - `crates/` — original Rust implementation (reference, not used)
 

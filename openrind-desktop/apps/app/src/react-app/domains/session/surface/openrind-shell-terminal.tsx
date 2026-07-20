@@ -24,6 +24,18 @@ import { VoiceEngineMenu } from "./composer/voice/voice-engine-menu";
 const TOOLBAR_BTN =
   "flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-[13px] font-medium text-gray-10 transition-colors hover:bg-gray-2/70 hover:text-dls-text disabled:cursor-not-allowed disabled:opacity-60";
 
+// The PTY connects (phase "connected") well before the agent's TUI actually
+// paints — setup.sh runs its DB restore/flush silently, then Claude/OpenClaw
+// initialize, which can take tens of seconds. Rather than flash a blank
+// terminal in that gap, we keep the bootstrap overlay up until the agent has
+// emitted a real render: a burst of output (≥ MIN bytes) that then goes quiet
+// (SETTLE) — or a hard cap so we never hang the overlay forever. A tiny early
+// paint (e.g. just the empty composer box) stays under MIN, so the overlay
+// waits for the full UI.
+const AGENT_PAINT_MIN_BYTES = 2048;
+const AGENT_PAINT_SETTLE_MS = 700;
+const AGENT_PAINT_CAP_MS = 75_000;
+
 // xterm.js is loaded dynamically so it doesn't bloat the workspace
 // dashboard bundle for users who never open an Openrind Shell session.
 type TerminalType = import("@xterm/xterm").Terminal;
@@ -117,6 +129,13 @@ export function OpenrindShellTerminal(props: OpenrindShellTerminalProps) {
   // returning replays the buffer). cleanup() reads this to choose between
   // openrindPtyDetach and openrindPtyClose.
   const explicitEndRef = useRef(false);
+  // Paint tracking for the "keep the overlay up until the agent renders" gate.
+  // trackPaintRef is armed only on a fresh open; bytes accumulate until the
+  // settle timer (or the cap timer) marks the agent ready.
+  const trackPaintRef = useRef(false);
+  const paintBytesRef = useRef(0);
+  const paintSettleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const paintCapTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const [sandboxName, setSandboxName] = useState<string | null>(null);
   const [phase, setPhase] = useState<Phase>("starting");
@@ -124,6 +143,11 @@ export function OpenrindShellTerminal(props: OpenrindShellTerminalProps) {
   // create / fresh connect). A lossless re-attach to an already-running PTY
   // leaves this false so the 3-step bootstrap overlay never flashes.
   const [isFreshBootstrap, setIsFreshBootstrap] = useState(false);
+  // On a fresh bootstrap, gates the overlay: stays true until the agent's TUI
+  // has actually painted (see AGENT_PAINT_* + the paint tracking in the run
+  // effect). Prevents the ~30s blank-terminal gap between PTY-connect and the
+  // agent rendering.
+  const [agentReady, setAgentReady] = useState(false);
   const [bootstrapMessage, setBootstrapMessage] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [popoutBusy, setPopoutBusy] = useState(false);
@@ -273,11 +297,43 @@ export function OpenrindShellTerminal(props: OpenrindShellTerminalProps) {
     let unsubExit: (() => void) | undefined;
     let unsubProgress: (() => void) | undefined;
 
+    // Mark the agent's UI as painted: tear down paint tracking + reveal the
+    // terminal by hiding the bootstrap overlay. Idempotent.
+    const markAgentReady = () => {
+      if (!trackPaintRef.current) return;
+      trackPaintRef.current = false;
+      if (paintSettleTimerRef.current) {
+        clearTimeout(paintSettleTimerRef.current);
+        paintSettleTimerRef.current = null;
+      }
+      if (paintCapTimerRef.current) {
+        clearTimeout(paintCapTimerRef.current);
+        paintCapTimerRef.current = null;
+      }
+      setAgentReady(true);
+    };
+
     const writeToTerm = (data: string) => {
       if (termRef.current) {
         termRef.current.write(data);
       } else {
         earlyBufferRef.current.push(data);
+      }
+      // While waiting for the agent to paint (fresh open only), accumulate
+      // output bytes; once a real render burst (≥ MIN) settles, reveal the
+      // terminal. A tiny early paint stays under MIN so the overlay waits for
+      // the full UI instead of flashing a half-drawn screen.
+      if (trackPaintRef.current) {
+        paintBytesRef.current += data.length;
+        if (paintBytesRef.current >= AGENT_PAINT_MIN_BYTES) {
+          if (paintSettleTimerRef.current) {
+            clearTimeout(paintSettleTimerRef.current);
+          }
+          paintSettleTimerRef.current = setTimeout(
+            markAgentReady,
+            AGENT_PAINT_SETTLE_MS,
+          );
+        }
       }
     };
 
@@ -286,6 +342,15 @@ export function OpenrindShellTerminal(props: OpenrindShellTerminalProps) {
       unsubData?.();
       unsubExit?.();
       unsubProgress?.();
+      trackPaintRef.current = false;
+      if (paintSettleTimerRef.current) {
+        clearTimeout(paintSettleTimerRef.current);
+        paintSettleTimerRef.current = null;
+      }
+      if (paintCapTimerRef.current) {
+        clearTimeout(paintCapTimerRef.current);
+        paintCapTimerRef.current = null;
+      }
       resizeObserverRef.current?.disconnect();
       resizeObserverRef.current = null;
       if (sessionIdRef.current) {
@@ -349,6 +414,18 @@ export function OpenrindShellTerminal(props: OpenrindShellTerminalProps) {
         // workspace's bootstrap flag into a lossless re-attach. The fresh
         // branch sets it true again only when there is no live session.
         setIsFreshBootstrap(false);
+        // Reset the agent-paint gate per run (see AGENT_PAINT_*).
+        setAgentReady(false);
+        trackPaintRef.current = false;
+        paintBytesRef.current = 0;
+        if (paintSettleTimerRef.current) {
+          clearTimeout(paintSettleTimerRef.current);
+          paintSettleTimerRef.current = null;
+        }
+        if (paintCapTimerRef.current) {
+          clearTimeout(paintCapTimerRef.current);
+          paintCapTimerRef.current = null;
+        }
         unsubProgress = bridge?.openrindShell?.onSessionProgress?.((evt) => {
           if (cancelled) return;
           if (evt.message) setBootstrapMessage(evt.message);
@@ -419,16 +496,12 @@ export function OpenrindShellTerminal(props: OpenrindShellTerminalProps) {
         }
         if (cancelled || !containerRef.current) return;
 
-        // The PTY runs `wsl.exe` through a Windows ConPTY (node-pty). xterm.js
-        // needs to know that, or it mis-renders ConPTY's reflowed/padded
-        // full-width lines — which showed up as a gibberish first line (Claude
-        // Code's welcome-box border). buildNumber comes from the host; 0 on
-        // non-Windows so we omit the option there.
-        const hostBuild = await invoke<number>("openrindHostBuild").catch(
-          () => 0,
-        );
-        if (cancelled || !containerRef.current) return;
-
+        // NOTE: no `windowsPty`/ConPTY hint here. The PTY bytes now come raw
+        // from a real Linux PTY inside the sandbox (openrind-pty-bridge.py),
+        // piped through wsl.exe WITHOUT node-pty/ConPTY. Telling xterm the
+        // backend is ConPTY would make it apply ConPTY-specific input/reflow
+        // handling to a stream that isn't ConPTY, re-introducing corruption.
+        // Standard handling is correct for the raw Linux-PTY stream.
         const term = new Terminal({
           fontFamily:
             "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace",
@@ -436,14 +509,6 @@ export function OpenrindShellTerminal(props: OpenrindShellTerminalProps) {
           cursorBlink: true,
           scrollback: 5_000,
           allowProposedApi: true,
-          ...(hostBuild > 0
-            ? {
-                windowsPty: {
-                  backend: "conpty" as const,
-                  buildNumber: hostBuild,
-                },
-              }
-            : {}),
           theme: {
             background: "#0a0a0a",
             foreground: "#e6e6e6",
@@ -590,14 +655,13 @@ export function OpenrindShellTerminal(props: OpenrindShellTerminalProps) {
           // events the moment the main process starts streaming.
           sessionIdRef.current = attached.id;
           // Replay the buffered bytes at the geometry they were RECORDED at.
-          // The buffer is a ConPTY frame: absolute cursor moves plus hard
-          // wraps at the pty's width. Replaying a 120-col frame into a
-          // differently-sized xterm mis-wraps every full-width row and
-          // strands garbled fragments above the agent's next repaint — the
-          // gibberish line pinned over the banner (reproduced byte-for-byte
-          // with a headless-xterm replay harness). So: temporarily match the
-          // recorded size, replay, and only then fit to the real pane — the
-          // resulting resize makes ConPTY re-emit a clean full frame.
+          // The buffer is the agent's raw PTY output: absolute cursor moves
+          // plus hard wraps at the pty's width. Replaying a 120-col recording
+          // into a differently-sized xterm mis-wraps every full-width row and
+          // strands fragments above the agent's next repaint. So: temporarily
+          // match the recorded size, replay, and only then fit to the real
+          // pane — the resulting resize frame makes the agent repaint a clean
+          // full frame at the new geometry.
           const recordedCols = attached.cols ?? term.cols;
           const recordedRows = attached.rows ?? term.rows;
           if (attached.buffered) {
@@ -627,9 +691,9 @@ export function OpenrindShellTerminal(props: OpenrindShellTerminalProps) {
           if (cancelled) return;
           wireTerminalIO();
           // Now fit to the actual container. For a live session the resize
-          // reaches the PTY (wireTerminalIO is up) and ConPTY repaints the
-          // whole frame at the new size. A dead session stays at its
-          // recorded geometry so the corpse replay stays legible.
+          // frame reaches the agent's PTY (wireTerminalIO is up) and the agent
+          // repaints the whole frame at the new size. A dead session stays at
+          // its recorded geometry so the corpse replay stays legible.
           if (!attached.exited) {
             try {
               fitRef.current?.fit();
@@ -677,6 +741,16 @@ export function OpenrindShellTerminal(props: OpenrindShellTerminalProps) {
           earlyBufferRef.current = [];
         }
         wireTerminalIO();
+        // Keep the bootstrap overlay up until the agent actually paints its UI.
+        // setup.sh's DB restore/flush runs silently and the agent then
+        // initializes, so the PTY is "connected" well before anything is on
+        // screen — without this the terminal would show blank for tens of
+        // seconds. markAgentReady fires on the first settled render burst; the
+        // cap guarantees the overlay never hangs even if that never comes.
+        paintBytesRef.current = 0;
+        trackPaintRef.current = true;
+        if (paintCapTimerRef.current) clearTimeout(paintCapTimerRef.current);
+        paintCapTimerRef.current = setTimeout(markAgentReady, AGENT_PAINT_CAP_MS);
         setPhase("connected");
       } catch (err) {
         if (cancelled) return;
@@ -1014,12 +1088,14 @@ export function OpenrindShellTerminal(props: OpenrindShellTerminalProps) {
             />
           </div>
         ) : isFreshBootstrap &&
-          phase !== "connected" &&
+          !agentReady &&
           phase !== "exited" &&
           phase !== "error" ? (
-          // Only show the 3-step bootstrap overlay during a FIRST-TIME launch.
-          // A lossless re-attach (isFreshBootstrap === false) skips it so
-          // returning to a workspace is instant with no spinner flash.
+          // Show the bootstrap overlay during a FIRST-TIME launch and KEEP it up
+          // until the agent's TUI has actually painted (!agentReady), not just
+          // until the PTY connects — otherwise the terminal flashes blank for
+          // the ~30s the agent spends initializing. A lossless re-attach
+          // (isFreshBootstrap === false) skips it so returning is instant.
           // "error" without an errorMessage (cleared by commitRename) falls
           // through here — don't show the spinner, just show the terminal.
           <div className="absolute inset-0 z-10 flex items-center justify-center bg-dls-surface p-6">
@@ -1123,6 +1199,9 @@ function BootstrapProgress(props: BootstrapProgressProps) {
     { id: "ensuring-sandbox", label: "Pulling image + creating sandbox" },
     { id: "mounting-terminal", label: "Mounting terminal" },
     { id: "connecting-pty", label: "Opening PTY" },
+    // Stays "active" from PTY-connect until the agent's UI paints — the overlay
+    // is held on this step so the user never sees a blank terminal mid-startup.
+    { id: "connected", label: "Starting agent" },
   ];
   const phaseOrder: Phase[] = [
     "starting",

@@ -21,6 +21,14 @@ filesystem_policy:
     - /sandbox/project
     - /tmp
     - /dev/null
+    # PTY devices: openrind-pty-bridge.py allocates a real Linux PTY for the
+    # agent (Claude Code / OpenClaw). The agent's inherited connect PTY works
+    # because it's opened before Landlock applies, but opening a NEW master +
+    # slave needs the devpts dir allow-listed or Landlock denies with EACCES.
+    # NB: list only /dev/pts (a real dir) — NOT the /dev/ptmx symlink, which
+    # OpenShell refuses to chown ("potential privilege escalation"), crashing
+    # provisioning. The bridge opens the multiplexer at /dev/pts/ptmx directly.
+    - /dev/pts
     - /home/agent
     - /home/**
     - /mnt/**

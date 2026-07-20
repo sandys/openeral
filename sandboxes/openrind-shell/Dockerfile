@@ -7,7 +7,9 @@ FROM ghcr.io/nvidia/openshell-community/sandboxes/base:latest
 
 USER root
 
-# Node.js 22 LTS via NodeSource (apt nodejs conflicts with npm on Ubuntu Noble)
+# Node.js 22 LTS via NodeSource (apt nodejs conflicts with npm on Ubuntu Noble).
+# (python3 for openrind-pty-bridge.py is installed in a LATER layer so this
+# expensive base + the OpenClaw prewarm below stay cache-stable on rebuilds.)
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl gnupg \
     && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
@@ -282,6 +284,18 @@ RUN cd /opt/openrind-shell && npm install && npm run build && npm prune --omit=d
 COPY --chown=sandbox:sandbox sandboxes/openrind-shell/openrind-shell-bash.mjs /opt/openrind-shell/openrind-shell-bash.mjs
 RUN chmod a+rx /opt/openrind-shell/openrind-shell-bash.mjs \
     && ln -sf /opt/openrind-shell/openrind-shell-bash.mjs /usr/local/bin/openrind-shell-bash
+
+# openrind-pty-bridge: PTY host that runs the agent on a real Linux PTY and
+# streams raw bytes to the desktop app (no Windows ConPTY in the byte path).
+# setup.sh execs this as the connect entry command for both Claude and OpenClaw.
+# python3 (stdlib only) is all it needs; installed here — late — so the base
+# image + OpenClaw prewarm layers above stay cache-stable across rebuilds.
+# apt-only package (no GitHub release fetch), so it's reliable in locked-down builds.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends python3 \
+    && rm -rf /var/lib/apt/lists/*
+COPY --chown=sandbox:sandbox sandboxes/openrind-shell/openrind-pty-bridge.py /opt/openrind-shell/openrind-pty-bridge.py
+RUN chmod a+rx /opt/openrind-shell/openrind-pty-bridge.py
 
 # Rename real bash so openrind-shell-bash can fall back to it for interactive use
 RUN cp /bin/bash /bin/bash.real

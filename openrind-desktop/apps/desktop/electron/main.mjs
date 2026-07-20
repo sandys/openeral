@@ -2364,19 +2364,18 @@ async function handleDesktopInvoke(event, command, ...args) {
       return deriveOpenrindShellSandboxName(workspaceId);
     }
     case "openrindHostBuild": {
-      // Windows build number for xterm.js's `windowsPty` option. The Openrind Shell
-      // PTY runs `wsl.exe` through a Windows ConPTY (node-pty), so xterm must be
-      // told the backend/build or it mis-renders ConPTY's reflowed full-width
-      // lines (e.g. Claude Code's welcome-box border shows as a gibberish first
-      // line). 0 on non-Windows → renderer skips the option.
+      // LEGACY: previously fed xterm.js's `windowsPty` (ConPTY) option. The PTY
+      // transport no longer uses ConPTY (see openrind-shell-pty.mjs), so the
+      // renderer no longer calls this. Kept as a harmless no-op probe.
       if (process.platform !== "win32") return 0;
       return Number(os.release().split(".")[2]) || 0;
     }
     case "openrindPtyOpen": {
-      // Renderer xterm.js requests a PTY to an existing sandbox. We
-      // spawn `wsl -d openrind-desktop-openshell -- openshell sandbox exec <name>
-      // --tty -- openrind-shell` inside a real PTY (node-pty) and forward stdout
-      // bytes via the openrind-shell:pty-data event channel.
+      // Renderer xterm.js requests a PTY to an existing sandbox. We spawn
+      // `wsl -d openrind-desktop-openshell -- bash -c 'exec openshell sandbox
+      // connect <name>'` over PLAIN PIPES (no ConPTY); the container-side
+      // openrind-pty-bridge.py owns the real PTY the agent renders to, and we
+      // forward its raw bytes via the openrind-shell:pty-data event channel.
       const input = args[0] ?? {};
       const sandboxName = String(input.sandboxName ?? "").trim();
       if (!sandboxName) throw new Error("sandboxName is required");
@@ -2441,15 +2440,14 @@ async function handleDesktopInvoke(event, command, ...args) {
         // dropped. The renderer will call openrindPtyAttach (phase 2) after
         // setting sessionIdRef and replaying buffered scrollback.
         //
-        // Do NOT resize here either: the buffered bytes are a ConPTY frame
-        // recorded at the CURRENT pty size, positioned via absolute moves +
-        // hard wraps at that width. The renderer must replay them into an
-        // xterm of exactly this geometry (cols/rows below) — replaying a
-        // 120-col frame into, say, 118 cols mis-wraps every full-width row
-        // and strands mangled fragments that the agent never repaints
-        // (verified with a headless-xterm replay harness). After phase 2 the
-        // renderer fits to the real pane size; that resize is what makes
-        // ConPTY re-emit a full clean frame at the new geometry.
+        // Do NOT resize here either: the buffered bytes are the agent's raw
+        // PTY output recorded at the CURRENT pty size, positioned via absolute
+        // moves + hard wraps at that width. The renderer must replay them into
+        // an xterm of exactly this geometry (cols/rows below) — replaying a
+        // 120-col recording into, say, 118 cols mis-wraps every full-width row
+        // and strands mangled fragments. After phase 2 the renderer fits to
+        // the real pane size; that resize frame is what makes the agent
+        // repaint a full clean frame at the new geometry.
         return {
           id: existing.id,
           buffered: openrindPty.getBuffer(existing.id),
