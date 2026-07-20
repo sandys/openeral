@@ -775,14 +775,20 @@ DIAG_EOF
   # log) so OpenClaw's own interactive UI is what the user sees.
   exec 1>&3 3>&-
 
-  # Launch OpenClaw and let the user drive onboarding through OpenClaw's OWN
-  # interactive flow — no shell prompt, no printed to-do list. Everything runs on
-  # the clean, ConPTY-free PTY via openrind_pty_exec. On a fresh /home/agent the
-  # first run automatically starts `openclaw onboard` so the user signs in the
-  # normal way; once an auth profile exists (persisted in PostgreSQL) later
-  # sessions skip straight into OpenClaw. OPENCLAW_PLUGIN_STAGE_DIR is
-  # deliberately NOT set — its deps are staged at the default location via the
-  # symlink above, and exporting it into the TUI freezes the event loop.
+  # Launch OpenClaw's CODING AGENT on the clean, ConPTY-free PTY (openrind_pty_exec):
+  #   1. First run walks the user through `openclaw onboard` (user-driven auth).
+  #   2. Bring the gateway up ourselves — the container has no systemd, so nothing
+  #      else starts it — reusing a healthy one from a previous session (setsid
+  #      keeps it alive across PTY disconnects) and waiting for /readyz.
+  #   3. exec `openclaw tui`, the thin client that renders the coding agent.
+  #
+  # We must NOT exec bare `openclaw`: as of 2026.4.x that opens the "Crestodian"
+  # ring-zero setup/repair concierge, NOT the coding agent. `openclaw tui`
+  # connects to the gateway started above and shows the agent.
+  #
+  # OPENCLAW_PLUGIN_STAGE_DIR is passed ONLY to the gateway (its bundled deps are
+  # seeded into that dir); it must never reach the TUI/client process or OpenClaw
+  # runs a staging loop that saturates the event loop and freezes the terminal.
   openrind_pty_exec env \
     HOME=/home/agent \
     SHELL=/usr/local/bin/openrind-shell-bash \
@@ -791,7 +797,21 @@ DIAG_EOF
     OPENCLAW_HANDSHAKE_TIMEOUT_MS=600000 \
     GIT_SSL_NO_VERIFY=true \
     npm_config_strict_ssl=false \
-    bash -c 'if [ ! -s /home/agent/.openclaw/agents/main/agent/auth-profiles.json ]; then openclaw onboard || true; fi; exec openclaw'
+    bash -c '
+      if [ ! -s /home/agent/.openclaw/agents/main/agent/auth-profiles.json ]; then
+        openclaw onboard || true
+      fi
+      if ! curl -fsS http://127.0.0.1:18789/readyz >/dev/null 2>&1; then
+        echo "Starting OpenClaw (first run can take a minute)..."
+        setsid env OPENCLAW_SKIP_ONBOARDING=1 OPENCLAW_HANDSHAKE_TIMEOUT_MS=600000 OPENCLAW_NO_RESPAWN=1 NODE_COMPILE_CACHE=/tmp/openclaw-compile-cache GIT_SSL_NO_VERIFY=true npm_config_strict_ssl=false OPENCLAW_PLUGIN_STAGE_DIR=/tmp/openclaw-plugin-runtime-deps openclaw gateway --port 18789 --allow-unconfigured </dev/null >/tmp/openclaw-gateway.log 2>&1 &
+        _gd=0
+        while [ $_gd -lt 300 ]; do
+          curl -fsS http://127.0.0.1:18789/readyz >/dev/null 2>&1 && break
+          sleep 1
+          _gd=$((_gd+1))
+        done
+      fi
+      exec openclaw tui'
 fi
 
 # Claude Code launch (reached only when OPENRIND_SHELL_AGENT != openclaw, since openclaw execs above).

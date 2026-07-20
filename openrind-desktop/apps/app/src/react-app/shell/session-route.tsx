@@ -73,6 +73,7 @@ import { useRemoteAccessRestart } from "../domains/workspace/remote-access-resta
 import { RenameWorkspaceModal } from "../domains/workspace/rename-workspace-modal";
 import { useShareWorkspaceState } from "../domains/workspace/share-workspace-state";
 import { ModelPickerModal } from "../domains/session/modals/model-picker-modal";
+import { ConfirmModal } from "../design-system/modals/confirm-modal";
 import { CommandPalette, type SessionOption as PaletteSessionOption } from "./command-palette";
 import { getDisplaySessionTitle } from "../../app/lib/session-title";
 import { useBootState } from "./boot-state";
@@ -385,6 +386,7 @@ export function SessionRoute() {
   const [renameWorkspaceId, setRenameWorkspaceId] = useState<string | null>(null);
   const [renameWorkspaceTitle, setRenameWorkspaceTitle] = useState("");
   const [renameWorkspaceBusy, setRenameWorkspaceBusy] = useState(false);
+  const [forgetWorkspaceId, setForgetWorkspaceId] = useState<string | null>(null);
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
   // Model picker modal state (ported from settings-route; previously the
   // session "Pick a model" button navigated to /settings/general, which is a
@@ -1521,32 +1523,30 @@ export function SessionRoute() {
     [workspaces],
   );
 
-  const handleForgetWorkspace = useCallback(
-    async (workspaceId: string) => {
-      if (typeof window !== "undefined") {
-        const message =
-          t("workspace_list.remove_confirm") ||
-          "Remove this workspace from the sidebar?";
-        if (!window.confirm(message)) return;
-      }
-      // Remove from both stores so the next refresh can't resurrect the row
-      // from whichever list wins the merge.
-      if (isDesktopRuntime()) {
-        await workspaceForget(workspaceId).catch(() => undefined);
-      }
-      if (client) {
-        await client.deleteWorkspace(workspaceId).catch(() => undefined);
-      }
-      if (selectedWorkspaceId === workspaceId) {
-        setSelectedWorkspaceId("");
-        writeActiveWorkspaceId(null);
-        navigate("/session");
-      }
-      forgetWorkspaceMemory(workspaceId);
-      await refreshRouteState();
-    },
-    [client, navigate, refreshRouteState, selectedWorkspaceId],
-  );
+  const handleForgetWorkspace = useCallback((workspaceId: string) => {
+    setForgetWorkspaceId(workspaceId);
+  }, []);
+
+  const confirmForgetWorkspace = useCallback(async () => {
+    const workspaceId = forgetWorkspaceId;
+    if (!workspaceId) return;
+    setForgetWorkspaceId(null);
+    // Remove from both stores so the next refresh can't resurrect the row
+    // from whichever list wins the merge.
+    if (isDesktopRuntime()) {
+      await workspaceForget(workspaceId).catch(() => undefined);
+    }
+    if (client) {
+      await client.deleteWorkspace(workspaceId).catch(() => undefined);
+    }
+    if (selectedWorkspaceId === workspaceId) {
+      setSelectedWorkspaceId("");
+      writeActiveWorkspaceId(null);
+      navigate("/session");
+    }
+    forgetWorkspaceMemory(workspaceId);
+    await refreshRouteState();
+  }, [client, forgetWorkspaceId, navigate, refreshRouteState, selectedWorkspaceId]);
 
   const handleCreateTaskInWorkspace = useCallback(async (workspaceId: string) => {
     const workspace = workspaces.find((item) => item.id === workspaceId);
@@ -2018,6 +2018,19 @@ export function SessionRoute() {
       }}
       onSave={() => void handleSaveRenameWorkspace()}
       onTitleChange={setRenameWorkspaceTitle}
+    />
+    <ConfirmModal
+      open={forgetWorkspaceId !== null}
+      title={t("workspace_list.remove_title") || "Remove workspace?"}
+      message={
+        t("workspace_list.remove_confirm") ||
+        "Remove this workspace from the sidebar? Sessions and files on disk are preserved."
+      }
+      confirmLabel={t("workspace_list.remove_workspace") || "Remove workspace"}
+      cancelLabel={t("common.cancel")}
+      variant="danger"
+      onConfirm={() => void confirmForgetWorkspace()}
+      onCancel={() => setForgetWorkspaceId(null)}
     />
     <CommandPalette
       open={commandPaletteOpen}
