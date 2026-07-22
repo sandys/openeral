@@ -245,17 +245,23 @@ RUN set -e \
         tail -100 /tmp/openclaw-bootstrap.log >&2 || true; \
         exit 1; \
     fi \
- # 5c. Hard gate: the TUI prewarm must have ADDED bytecode to the cache
- #     (~19 MB observed for openclaw 2026.4.29; the prewarmed cache converges
- #     at ~46 MB total — a second longer TUI pass adds nothing further). A
- #     near-zero delta means the prewarm silently did nothing (this happened
- #     twice: once for a missing TERM, once for a compile-cache key mismatch)
- #     and the first in-sandbox TUI launch would freeze for minutes
- #     recompiling the TUI module set.
+ # 5c. Hard gate: the prewarm must have populated the V8 bytecode compile
+ #     cache. It converges at ~46 MB total for openclaw 2026.4.29 — the
+ #     status --deep + agent --local + gateway passes compile most of it and
+ #     the TUI pass only tops up the remainder. Gate on the TOTAL cache size,
+ #     NOT the TUI-step delta: which pass compiles the bulk shifts between
+ #     openclaw / base-image versions (a delta check then flakes even though
+ #     the cache is fully warm — the TUI pass legitimately adds ~0 when the
+ #     earlier passes already compiled its modules). A near-empty cache still
+ #     reliably means the prewarm silently did nothing (this happened twice:
+ #     a missing TERM and a compile-cache key mismatch), and the first
+ #     in-sandbox TUI launch would then freeze for minutes recompiling.
  && _ccb=$(cat /tmp/cc-before-tui) && _cca=$(cat /tmp/cc-after-tui) \
- && if [ $((_cca - _ccb)) -lt 10000 ]; then \
-        echo "ERROR: TUI prewarm grew the compile cache by only $((_cca - _ccb)) KB (${_ccb} -> ${_cca})." >&2; \
-        echo "Expected >= 10 MB of TUI bytecode — the prewarm silently did nothing." >&2; \
+ && echo "compile cache: ${_ccb} KB before TUI pass -> ${_cca} KB after (delta $((_cca - _ccb)) KB)" \
+ && if [ "${_cca}" -lt 30000 ]; then \
+        echo "ERROR: compile cache is only ${_cca} KB after prewarm (expected >= 30 MB)." >&2; \
+        echo "The OpenClaw bytecode prewarm did not populate the cache — the first" >&2; \
+        echo "in-sandbox TUI launch would freeze for minutes recompiling modules." >&2; \
         echo "--- tail of /tmp/openclaw-bootstrap.log ---" >&2; \
         tail -60 /tmp/openclaw-bootstrap.log >&2 || true; \
         exit 1; \
