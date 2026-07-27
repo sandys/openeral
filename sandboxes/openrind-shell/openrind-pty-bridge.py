@@ -97,6 +97,202 @@ MAX_FRAME_LEN = 8 * 1024 * 1024
 # fights the RESIZE frames in framed mode.
 _mode = None  # "framed" | "raw" | None
 _agent_master_fd = -1
+# The ScrollbackKeeper for this session (framed mode only), so set_winsize()
+# can keep its idea of the screen height in sync from every resize path.
+_keeper = None
+
+# Terminal hygiene sent to the desktop (framed mode only) so the agent always
+# paints onto a pristine screen and a crashed agent never leaves xterm wedged.
+# Order matters: leave any leftover alternate-screen buffer FIRST so the clear
+# lands on the main screen, then knock down modes a prior session may have left
+# enabled (mouse reporting in every encoding, bracketed paste), show the cursor,
+# and reset SGR. The agent re-enables whatever it needs on startup.
+_TERM_RESET_MODES = (
+    b"\x1b[?1049l"  # leave alternate screen buffer
+    b"\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1015l"  # disable mouse reporting
+    b"\x1b[?2004l"  # disable bracketed paste
+    b"\x1b[?25h"  # show cursor
+    b"\x1b[0m"  # reset colors / attributes
+)
+# RESET also wipes scrollback + screen so the first paint is on a blank canvas.
+TERMINAL_RESET = _TERM_RESET_MODES + b"\x1b[3J\x1b[H\x1b[2J"
+# RESTORE (on agent exit) deliberately omits the clear so the user keeps their
+# scrollback after the agent quits.
+TERMINAL_RESTORE = _TERM_RESET_MODES
+
+# ── Scrollback preservation (framed mode) ──────────────────────────────────
+# The agent's own full-screen clear is rewritten on its way out so that it can
+# never DESTROY what is already on the desktop terminal.
+#
+# Why this is needed: `openclaw tui` prints OpenClaw's banner (version, commit
+# and the coloured tagline) on stdout, openclaw-launch.sh prints the whole
+# progress log above it — and then the TUI initialises its session display.
+# That last step goes through pi-tui's requestRender(force=true), whose full
+# redraw begins with
+#
+#     ESC[2J  ESC[H  ESC[3J        erase display, home, erase SCROLLBACK
+#
+# so that one burst takes the banner and every launch line off the screen AND
+# out of the scrollback, leaving nothing to scroll back to. It is unconditional
+# inside OpenClaw — pi-tui deliberately sets previousWidth/-Height to -1 to
+# force the clearing variant of its full redraw — and there is no flag, config
+# key or env var that turns it off. Verified on 2026.7.1-2 with PI_DEBUG_REDRAW=1:
+#
+#     fullRender: first render (prev=0, new=7, height=30)
+#     fullRender: terminal width changed (-1 -> 120) (prev=0, new=8, height=30)
+#
+# The rewrite: ESC[2J ESC[H becomes "park on the last row, then linefeed a whole
+# screenful". A linefeed on the bottom row is the one sequence every emulator
+# (xterm, xterm.js, VTE) turns into a scrollback push, whereas both ESC[2J and
+# CSI S discard the lines instead. The state the agent then renders onto is
+# identical — blank viewport, cursor at home — the only difference is that the
+# old screen is now sitting above it instead of being gone. ESC[3J is dropped
+# outright: erasing the user's scrollback is never required for the agent's own
+# rendering to come out right.
+#
+# Only the exact ESC[2J ESC[H pair is rewritten. A bare ESC[2J is passed through
+# untouched, because ED does not move the cursor and rewriting it would.
+CLEAR_AND_HOME = b"\x1b[2J\x1b[H"
+ERASE_SCROLLBACK = b"\x1b[3J"
+_REWRITE_WINDOW = max(len(CLEAR_AND_HOME), len(ERASE_SCROLLBACK))
+# Either sequence can straddle two os.read() boundaries, so up to
+# _REWRITE_WINDOW - 1 bytes are held back waiting for the rest. They are flushed
+# anyway after this long, so an agent that goes idle mid-sequence can never
+# leave bytes stranded inside the bridge. A complete ESC[2J counts as partial
+# (it may still become ESC[2J ESC[H), so this is also the worst-case latency of
+# a bare screen clear that ends a write — keep it well under a frame.
+HOLDBACK_FLUSH_S = 0.01
+# Env kill switch: set to 0 to stream the agent's bytes through verbatim.
+KEEP_SCROLLBACK_ENV = "OPENRIND_SHELL_PTY_KEEP_SCROLLBACK"
+
+
+class ScrollbackKeeper:
+    """Stream filter over the agent's PTY output. See the comment above."""
+
+    def __init__(self, rows, enabled=True):
+        self.enabled = enabled
+        self.scrolls = 0
+        self.drops = 0
+        self._rows = max(1, int(rows))
+        self._held = b""
+        self._held_at = 0.0
+        # How far down the screen the agent has drawn since the last clear. Only
+        # this many rows are worth pushing into the scrollback; scrolling the
+        # full screen also pushes the blank tail, which is what buried OpenClaw's
+        # banner 29 lines above the viewport instead of ~8.
+        self._used_rows = 0
+
+    def set_rows(self, rows):
+        """Track the live screen height; the scroll can never exceed one screen."""
+        self._rows = max(1, int(rows))
+
+    def _note_output(self, data, start, end):
+        """Count linefeeds in a run of plain output to approximate how far down
+        the screen the agent has drawn."""
+        if self._used_rows < self._rows:
+            self._used_rows += data.count(0x0A, start, end)
+
+    def _note_cursor_row(self, params):
+        """An absolute CUP (ESC[<row>;<col>H) also tells us how far down the
+        agent is drawing — pi-tui addresses rows directly rather than only
+        appending."""
+        head = params.split(b";")[0]
+        if not head.isdigit():
+            return
+        try:
+            self._used_rows = max(self._used_rows, int(head))
+        except ValueError:
+            pass
+
+    def _scroll_out(self):
+        """Push the drawn region into the scrollback, then guarantee a blank
+        screen for the agent to paint on.
+
+        The trailing ESC[2J is what makes the row estimate safe: if it is short,
+        the erase removes whatever is left; if it is long, we only pushed a few
+        blank lines. Either way the agent gets exactly the clean screen it asked
+        for, and only the rows it actually used reach the scrollback.
+        """
+        used = max(1, min(self._used_rows + 1, self._rows))
+        self._used_rows = 0
+        return (
+            b"\x1b[%d;1H" % self._rows  # park on the last row
+            + b"\n" * used  # push the drawn rows into scrollback
+            + b"\x1b[2J"  # erase whatever remains (in place; ED never moves the cursor)
+            + b"\x1b[H"  # ...then home, as the agent asked
+        )
+
+    def feed(self, chunk):
+        """Return the bytes to forward for this read. May buffer a partial
+        sequence; see expired() / flush()."""
+        if not self.enabled:
+            return chunk
+        data = self._held + chunk if self._held else chunk
+        self._held = b""
+        out = bytearray()
+        index = 0
+        size = len(data)
+        while index < size:
+            esc = data.find(0x1B, index)
+            if esc == -1:
+                # Plain output to the end of the chunk. Count it too: a burst
+                # with no escape at all is the common case for a log-style
+                # screen, and missing it left the row estimate at zero.
+                self._note_output(data, index, size)
+                out += data[index:]
+                break
+            self._note_output(data, index, esc)
+            out += data[index:esc]
+            window = data[esc : esc + _REWRITE_WINDOW]
+            if window.startswith(CLEAR_AND_HOME):
+                used = self._used_rows
+                out += self._scroll_out()
+                self.scrolls += 1
+                if self.scrolls == 1:
+                    log(
+                        "scrollback: rewrote agent full-screen clear "
+                        "(rows=%d, pushed=%d) — banner/launch log preserved"
+                        % (self._rows, min(used + 1, self._rows))
+                    )
+                index = esc + len(CLEAR_AND_HOME)
+                continue
+            # Absolute cursor positioning tells us how far down the agent draws.
+            if window.startswith(b"\x1b["):
+                final = data.find(b"H", esc + 2, esc + 12)
+                if final != -1:
+                    self._note_cursor_row(data[esc + 2 : final])
+            if window.startswith(ERASE_SCROLLBACK):
+                self.drops += 1
+                index = esc + len(ERASE_SCROLLBACK)
+                continue
+            if len(window) < _REWRITE_WINDOW and (
+                CLEAR_AND_HOME.startswith(window) or ERASE_SCROLLBACK.startswith(window)
+            ):
+                # Truncated at the read boundary and still a possible match.
+                self._held = bytes(window)
+                self._held_at = time.monotonic()
+                break
+            out += data[esc : esc + 1]
+            index = esc + 1
+        return bytes(out)
+
+    @property
+    def holding(self):
+        """True while a partial sequence is buffered (the select() loop polls
+        faster so the holdback is never user-visible)."""
+        return bool(self._held)
+
+    def expired(self):
+        """Held-back bytes once they have waited longer than HOLDBACK_FLUSH_S."""
+        if not self._held or time.monotonic() - self._held_at < HOLDBACK_FLUSH_S:
+            return b""
+        return self.flush()
+
+    def flush(self):
+        """Held-back bytes, unconditionally (session teardown)."""
+        held = self._held
+        self._held = b""
+        return held
 
 
 def log(message):
@@ -211,6 +407,10 @@ def set_winsize(fd, cols, rows):
         fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
     except Exception as exc:  # pragma: no cover - depends on kernel/pty state
         log("set_winsize(%d,%d) failed: %r" % (cols, rows, exc))
+    # Every resize path in this file targets the agent PTY, so this is the one
+    # place the ScrollbackKeeper's screen height has to be kept current.
+    if _keeper is not None:
+        _keeper.set_rows(rows)
 
 
 def classify(buf):
@@ -359,7 +559,7 @@ def spawn_child(master_fd, slave_fd, argv):
 
 
 def main():
-    global _mode, _agent_master_fd
+    global _mode, _agent_master_fd, _keeper
 
     argv = sys.argv[1:]
     if not argv:
@@ -422,6 +622,16 @@ def main():
     else:
         cols, rows = 80, 24
 
+    # Keep the agent from erasing the banner / launch log out of the desktop's
+    # scrollback (see ScrollbackKeeper). It is only ever applied in framed mode
+    # — decided at use time, since the mode can still be settled late — because
+    # raw passthrough must stay byte-transparent for the user's own terminal.
+    _keeper = ScrollbackKeeper(
+        rows,
+        enabled=os.environ.get(KEEP_SCROLLBACK_ENV, "1").strip().lower()
+        not in ("0", "false", "no"),
+    )
+
     # os.openpty() opens /dev/ptmx (a symlink to /dev/pts/ptmx). The sandbox's
     # Landlock policy must grant /dev/pts for this to succeed — see policy.yaml.
     master_fd, slave_fd = os.openpty()
@@ -431,6 +641,12 @@ def main():
     # events the desktop sends back during startup aren't echoed as gibberish
     # above the agent's UI (see disable_input_echo).
     disable_input_echo(slave_fd)
+
+    # Hand the agent a pristine terminal (framed/desktop only — a pop-out
+    # external terminal is the user's to manage). Written straight to stdout so
+    # it reaches xterm BEFORE the agent's first byte of output.
+    if _mode == "framed":
+        write_all(1, TERMINAL_RESET)
 
     pid = spawn_child(master_fd, slave_fd, argv)
     os.close(slave_fd)
@@ -494,8 +710,12 @@ def main():
                 elif os.WIFSIGNALED(status):
                     exit_code = 128 + os.WTERMSIG(status)
 
+        # Poll fast while a partial escape sequence is held back, so releasing it
+        # costs milliseconds instead of a full idle tick.
         try:
-            readable, _, _ = select.select([0, master_fd], [], [], 0.25)
+            readable, _, _ = select.select(
+                [0, master_fd], [], [], 0.005 if _keeper.holding else 0.25
+            )
         except InterruptedError:
             continue
         except OSError:
@@ -508,8 +728,15 @@ def main():
                 chunk = b""
             if not chunk:
                 break  # agent closed the PTY — session over
-            write_all(1, chunk)
+            if _mode == "framed":
+                write_all(1, _keeper.feed(chunk))
+            else:
+                write_all(1, chunk)
             continue
+
+        # Nothing to read: release any bytes the keeper is holding for a sequence
+        # that never completed, so an idle agent's last output is never stuck.
+        write_all(1, _keeper.expired())
 
         if 0 in readable:
             try:
@@ -565,6 +792,14 @@ def main():
                 exit_code = 128 + os.WTERMSIG(status)
         except Exception:
             pass
+
+    # Restore the desktop terminal so a crashed or abruptly-exited TUI never
+    # leaves xterm stuck in alt-screen, mouse-reporting, hidden-cursor, or a
+    # non-default color state. Release any partial sequence the keeper is still
+    # holding first, so the agent's very last bytes are not swallowed.
+    if _mode == "framed":
+        write_all(1, _keeper.flush())
+        write_all(1, TERMINAL_RESTORE)
 
     restore_termios(0, original_termios)
     try:
