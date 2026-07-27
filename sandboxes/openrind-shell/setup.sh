@@ -412,10 +412,16 @@ fi
 # ~/.claude/settings.json — it picks up ANTHROPIC_BASE_URL from the env at
 # launch (see the OpenClaw exec block further down).
 #
-# ANTHROPIC_AUTH_TOKEN is set to a dummy value so Claude Code does not prompt
-# for re-authentication when ANTHROPIC_API_KEY is absent (e.g. on reconnect).
-# OpenrindGateway authenticates via the presign token embedded in ANTHROPIC_BASE_URL,
-# not via the Bearer token Claude sends, so any non-empty value works here.
+# ANTHROPIC_AUTH_TOKEN is a dummy that exists for ONE reason: so Claude Code does
+# not prompt for re-authentication when there is no ANTHROPIC_API_KEY. It must
+# therefore be mutually exclusive with the key — Claude Code treats "a token AND
+# an API key are set" as an auth conflict and opens with a warning banner
+# instead of picking a mode.
+#
+# The env at exec time is NOT sufficient to enforce that: Claude Code applies
+# settings.env ON TOP of the process environment, so a token written here
+# re-appears even though the exec scrubs it with `env -u ANTHROPIC_AUTH_TOKEN`.
+# The decision has to be made HERE, where the file is written.
 if [ -n "${OPENRIND_GATEWAY_PROXY_URL:-}" ] && [ "$OPENRIND_SHELL_AGENT" != "openclaw" ]; then
   echo "setup.sh: writing OpenrindGateway proxy to ~/.claude/settings.json..."
   node -e "
@@ -425,13 +431,56 @@ let s = {};
 try { s = JSON.parse(fs.readFileSync(file, 'utf8')); } catch(e) {}
 if (!s.env) s.env = {};
 s.env.ANTHROPIC_BASE_URL = process.env.OPENRIND_GATEWAY_PROXY_URL;
-s.env.ANTHROPIC_AUTH_TOKEN = 'dummy';
+// Key present -> the key is the auth mode; the placeholder token would only
+// create a conflict. Key absent -> the token is what keeps Claude from
+// prompting for login. Never both.
+if (process.env.ANTHROPIC_API_KEY) delete s.env.ANTHROPIC_AUTH_TOKEN;
+else s.env.ANTHROPIC_AUTH_TOKEN = 'dummy';
 delete s.env.ANTHROPIC_API_KEY;
+if (Object.keys(s.env).length === 0) delete s.env;
 fs.mkdirSync('/home/agent/.claude', {recursive: true});
 fs.writeFileSync(file, JSON.stringify(s, null, 2));
 console.log('setup.sh: OpenrindGateway proxy written to ~/.claude/settings.json');
 "
 fi
+
+# ── Skip the database bootstrap when THIS container already did it ───────────
+# setup.sh runs twice per OpenClaw session: once as the desktop's loading-screen
+# prewarm (OPENRIND_SHELL_SETUP_ONLY=1, which brings the gateway up) and again
+# when the terminal connects and .bashrc runs `exec openrind-shell`. The second
+# run repeated the entire database bootstrap — migrations, workspace seed,
+# restore, flush — for no benefit: the first run already materialised
+# /home/agent in THIS container, and nothing has touched it in the seconds
+# since. Measured against a remote (ap-southeast-2) PostgreSQL with ~770
+# workspace entries, that duplicate cost 28s of a ~75s provisioning.
+#
+# The marker records WORKSPACE_ID *and* the container's current run, so the skip
+# applies ONLY to a repeat run inside one container life. Both halves matter:
+#
+#   - WORKSPACE_ID, because sandboxes share a workspace (a brand-new sandbox
+#     restores the same ~770 entries), so one workspace must never reuse
+#     another's bootstrap.
+#   - the container run, because /tmp SURVIVES `docker restart` (verified: only
+#     /dev/shm is recreated). Keying on the file alone would skip the restore
+#     after a restart, and while /home/agent survives a restart too, another
+#     sandbox on the same workspace may have changed PostgreSQL in the meantime
+#     — that run has to re-sync. PID 1's starttime changes on every restart,
+#     which makes "same container run" exact rather than inferred.
+BOOTSTRAP_MARKER=/tmp/openrind-shell-bootstrap-done
+# starttime is field 22 of /proc/1/stat. comm (field 2) can contain spaces and
+# parentheses, so slice past the last ')' before splitting.
+CONTAINER_RUN="$(awk '{ s=$0; sub(/^.*\) /, "", s); split(s, f, " "); print f[20] }' /proc/1/stat 2>/dev/null || echo 0)"
+BOOTSTRAP_TOKEN="$WORKSPACE_ID:$CONTAINER_RUN"
+SKIP_DB_BOOTSTRAP=0
+if [ -f "$BOOTSTRAP_MARKER" ] &&
+   [ "$(cat "$BOOTSTRAP_MARKER" 2>/dev/null)" = "$BOOTSTRAP_TOKEN" ] &&
+   [ -n "$(ls -A /home/agent 2>/dev/null)" ]; then
+  SKIP_DB_BOOTSTRAP=1
+fi
+
+if [ "$SKIP_DB_BOOTSTRAP" -eq 1 ]; then
+  echo "setup.sh: workspace already restored in this container — skipping migrations, restore and flush"
+else
 
 echo "setup.sh: running migrations, seeding, and restoring workspace..."
 
@@ -555,6 +604,8 @@ OPENRIND_SHELL_DB_BOOTSTRAP_EOF
 node "$OPENRIND_SHELL_DB_BOOTSTRAP" || { rm -f "$OPENRIND_SHELL_DB_BOOTSTRAP"; exit 1; }
 rm -f "$OPENRIND_SHELL_DB_BOOTSTRAP"
 
+fi  # end: skip-when-already-bootstrapped
+
 # Re-apply git URL rewrites after the workspace restore. syncToFs is authoritative
 # and may overwrite /home/agent/.gitconfig with an older version that lacks the
 # ssh-to-https rewrites. Writing them again here guarantees the pre-stage
@@ -570,6 +621,7 @@ fi
 
 # Re-apply runtime settings after the restore step. syncToFs intentionally makes
 # PostgreSQL authoritative, so freshly generated settings must be written after it.
+# Same token/key exclusivity rule as the pre-restore writer above.
 if [ -n "${OPENRIND_GATEWAY_PROXY_URL:-}" ] && [ "$OPENRIND_SHELL_AGENT" != "openclaw" ]; then
   echo "setup.sh: writing OpenrindGateway proxy to ~/.claude/settings.json..."
   node -e "
@@ -579,8 +631,10 @@ let s = {};
 try { s = JSON.parse(fs.readFileSync(file, 'utf8')); } catch(e) {}
 if (!s.env) s.env = {};
 s.env.ANTHROPIC_BASE_URL = process.env.OPENRIND_GATEWAY_PROXY_URL;
-s.env.ANTHROPIC_AUTH_TOKEN = 'dummy';
+if (process.env.ANTHROPIC_API_KEY) delete s.env.ANTHROPIC_AUTH_TOKEN;
+else s.env.ANTHROPIC_AUTH_TOKEN = 'dummy';
 delete s.env.ANTHROPIC_API_KEY;
+if (Object.keys(s.env).length === 0) delete s.env;
 fs.mkdirSync('/home/agent/.claude', {recursive: true});
 fs.writeFileSync(file, JSON.stringify(s, null, 2));
 console.log('setup.sh: OpenrindGateway proxy written to ~/.claude/settings.json');
@@ -590,6 +644,17 @@ fi
 # Persist ANTHROPIC_BASE_URL to the shell environment so reconnect sessions
 # (openshell sandbox connect) also route through OpenrindGateway even if
 # ~/.claude/settings.json is reset by `claude init` or similar.
+#
+# This state MUST be symmetric. env.sh lives in /home/agent, which is persisted
+# to PostgreSQL, so it outlives the presign that justified it: once written it
+# survives every later run, including runs with no proxy at all. A stale env.sh
+# then exports a dead ANTHROPIC_BASE_URL plus ANTHROPIC_AUTH_TOKEN=dummy, the
+# launch block re-exports the real ANTHROPIC_API_KEY *after* sourcing it (so the
+# `unset` below is defeated), and Claude Code opens with
+# "Auth conflict: Both a token (ANTHROPIC_AUTH_TOKEN) and an API key
+# (ANTHROPIC_API_KEY) are set" while silently pointing at a presign that no
+# longer exists. Writing this file is therefore only half the contract — the
+# no-proxy branch has to take it back down.
 if [ -n "${OPENRIND_GATEWAY_PROXY_URL:-}" ]; then
   mkdir -p /home/agent/.openrind-shell
   printf 'export ANTHROPIC_BASE_URL="%s"\nexport ANTHROPIC_AUTH_TOKEN="dummy"\nunset ANTHROPIC_API_KEY\n' \
@@ -597,6 +662,41 @@ if [ -n "${OPENRIND_GATEWAY_PROXY_URL:-}" ]; then
   BASHRC=/home/agent/.bashrc
   if ! grep -q 'openrind-shell/env.sh' "$BASHRC" 2>/dev/null; then
     printf '\n[ -f ~/.openrind-shell/env.sh ] && . ~/.openrind-shell/env.sh\n' >> "$BASHRC"
+  fi
+else
+  # No proxy this run — neutralize any proxy-era env.sh.
+  #
+  # It is REWRITTEN, never deleted: nothing under /home/agent may be removed by
+  # this script (that tree is the user's persisted home, and proxy.test.ts pins
+  # the invariant). Rewriting is also strictly better than deleting here — the
+  # .bashrc hooks source this file, so turning it into explicit `unset`s undoes a
+  # stale export that a hook higher up the file already made, which removing the
+  # file cannot do.
+  if [ -f /home/agent/.openrind-shell/env.sh ]; then
+    echo "setup.sh: neutralizing stale OpenrindGateway env.sh (no presign this run)"
+    printf '# OpenrindGateway inactive — written by setup.sh. Undo any proxy-era exports.\nunset ANTHROPIC_BASE_URL\nunset ANTHROPIC_AUTH_TOKEN\n' \
+      > /home/agent/.openrind-shell/env.sh
+  fi
+  # Same asymmetry in ~/.claude/settings.json: the proxy branch writes
+  # env.ANTHROPIC_BASE_URL / env.ANTHROPIC_AUTH_TOKEN into a file that is also
+  # PostgreSQL-persisted. Claude Code applies settings.env on top of the process
+  # env, so a leftover token there produces the same auth conflict.
+  if [ "$OPENRIND_SHELL_AGENT" != "openclaw" ] && [ -f /home/agent/.claude/settings.json ]; then
+    node -e "
+const fs = require('fs');
+const file = '/home/agent/.claude/settings.json';
+let s = {};
+try { s = JSON.parse(fs.readFileSync(file, 'utf8')); } catch(e) { process.exit(0); }
+if (!s.env) process.exit(0);
+const had = ('ANTHROPIC_BASE_URL' in s.env) || ('ANTHROPIC_AUTH_TOKEN' in s.env);
+delete s.env.ANTHROPIC_BASE_URL;
+delete s.env.ANTHROPIC_AUTH_TOKEN;
+if (Object.keys(s.env).length === 0) delete s.env;
+if (had) {
+  fs.writeFileSync(file, JSON.stringify(s, null, 2));
+  console.log('setup.sh: removed stale OpenrindGateway keys from ~/.claude/settings.json');
+}
+" 2>/dev/null || true
   fi
 fi
 
@@ -613,15 +713,24 @@ if [ "$SANDBOX_USER_HOME" != "/home/agent" ] && [ -n "$SANDBOX_USER_HOME" ] && [
     printf '\n# openrind-shell-connect: set agent HOME for sandbox connect sessions\nexport HOME=/home/agent\n[ -f /home/agent/.openrind-shell/env.sh ] && . /home/agent/.openrind-shell/env.sh\n' \
       >> "$CONNECT_BASHRC" || true
   fi
-  # Apply the same openclaw runtime env to reconnect sessions so manual
-  # `openclaw` invocations don't re-pay startup overhead or hit TLS-verify
-  # failures during plugin staging.
+  # Give reconnect sessions the SAME OpenClaw runtime env the launch used, so a
+  # manual `openclaw` behaves identically to the one setup.sh started. The values
+  # are not duplicated here: openclaw-launch.sh writes openclaw-env.sh as the
+  # single source of truth, and this only sources it. Duplicating them is how the
+  # two paths drifted apart before.
   if ! grep -q 'openrind-shell-openclaw-env' "$CONNECT_BASHRC" 2>/dev/null; then
-    printf '\n# openrind-shell-openclaw-env: runtime env for manual openclaw invocations\nexport OPENCLAW_NO_RESPAWN=1\nexport NODE_COMPILE_CACHE=/tmp/openclaw-compile-cache\nexport GIT_SSL_NO_VERIFY=true\nexport npm_config_strict_ssl=false\n' \
+    printf '\n# openrind-shell-openclaw-env: runtime env for manual openclaw invocations\n[ -f /home/agent/.openrind-shell/openclaw-env.sh ] && . /home/agent/.openrind-shell/openclaw-env.sh\n' \
       >> "$CONNECT_BASHRC" || true
   fi
 fi
 
+# The flush is skipped on a repeat run for the same reason as the restore: the
+# first run in this container already pushed /home/agent, and the sync daemon
+# owns everything that changes afterwards. It is NEVER skipped on the first run
+# — that is what persists files the image ships but the workspace has not seen.
+if [ "$SKIP_DB_BOOTSTRAP" -eq 1 ]; then
+  echo "setup.sh: workspace already flushed in this container — skipping"
+else
 echo "setup.sh: flushing /home/agent to workspace..."
 node -e "
   import('$OPENRIND_SHELL_DIR/dist/db/embedded.js').then(async ({ getDatabaseConnection }) => {
@@ -635,6 +744,10 @@ node -e "
     process.exit(1);
   });
 "
+# Record success ONLY after both halves completed, so a bootstrap that died
+# midway is retried in full rather than skipped.
+printf '%s' "$BOOTSTRAP_TOKEN" > "$BOOTSTRAP_MARKER" 2>/dev/null || true
+fi
 
 # Configure Socket.dev registry if SOCKET_TOKEN provider is available.
 # The token value is a placeholder (openshell:resolve:env:SOCKET_TOKEN) —
@@ -684,171 +797,147 @@ else
 fi
 
 if [ "$OPENRIND_SHELL_AGENT" = "openclaw" ]; then
-  # ── OpenClaw: user-driven, interactive onboarding ────────────────────────
-  # setup.sh used to onboard OpenClaw NON-interactively here: it wrote a
-  # hardcoded auth-profiles.json (plus a fallback profile), pre-filled
-  # openclaw.json with credentials + a custom provider, auto-started the
-  # gateway, waited on /readyz, ran doctor --fix, and finally exec'd the TUI.
-  # That machinery kept freezing. This path throws all of it out and instead
-  # reproduces a NORMAL local install: setup.sh only prepares the sandbox so
-  # onboarding can work offline-restricted, then hands the terminal to the
-  # user. They run `openclaw onboard`, choose how to sign in, watch it report
-  # everything OK, then run `openclaw` — exactly like on their own machine.
-  # No credentials, auth profiles, gateway, or model config are written here.
-
-  # OpenClaw is baked into the image (see Dockerfile). Fallback install handles
-  # stale images.
-  if ! command -v openclaw >/dev/null 2>&1; then
-    echo "setup.sh: OpenClaw not found in image — falling back to runtime install (slow)..." >&2
-    SHARP_IGNORE_GLOBAL_LIBVIPS=1 npm install -g --loglevel=error openclaw@latest 2>&1 | tail -40
-    if ! command -v openclaw >/dev/null 2>&1; then
-      echo "setup.sh: ERROR: OpenClaw install failed" >&2
-      exit 1
-    fi
-  fi
-
-  # Runtime environment that lets the NORMAL onboarding actually succeed inside
-  # the network-restricted sandbox. This is infrastructure only — it carries no
-  # credentials and makes no auth decisions:
-  #   - seed OpenClaw's bundled runtime deps + V8 compile cache from the
-  #     image-baked copies so first-run staging doesn't hang trying to
-  #     npm-install from hosts the sandbox network blocks;
-  #   - route git over https (port 22 is blocked) and relax TLS for the
-  #     TLS-terminating proxy so any git-based plugin fetch during onboarding
-  #     works;
-  #   - keep HOME=/home/agent (persisted to PostgreSQL) so the user's onboarding
-  #     survives across sessions.
-  export GIT_SSL_NO_VERIFY=true
-  export npm_config_strict_ssl=false
-  export OPENCLAW_NO_RESPAWN=1
-  export NODE_COMPILE_CACHE=/tmp/openclaw-compile-cache
-  # Long WS handshake so a slow first connect does not drop the user's
-  # gateway/TUI into the plugin-reload retry loop (see openclaw-hang-diagnosis.md).
-  export OPENCLAW_HANDSHAKE_TIMEOUT_MS=600000
-  mkdir -p /tmp/openclaw-compile-cache /tmp/openclaw-plugin-runtime-deps /home/agent/.openclaw
-
-  if [ -d /opt/openclaw-compile-cache ] && [ -n "$(ls -A /opt/openclaw-compile-cache 2>/dev/null)" ]; then
-    echo "setup.sh: seeding OpenClaw V8 compile cache from image..."
-    cp -rn /opt/openclaw-compile-cache/. /tmp/openclaw-compile-cache/ 2>/dev/null || true
-  fi
-  if [ -d /opt/openclaw-plugin-cache ] && [ -n "$(ls -A /opt/openclaw-plugin-cache 2>/dev/null)" ]; then
-    echo "setup.sh: seeding OpenClaw plugin runtime deps from image..."
-    cp -rn /opt/openclaw-plugin-cache/. /tmp/openclaw-plugin-runtime-deps/ 2>/dev/null || true
-  fi
-  # Expose the seeded deps at OpenClaw's DEFAULT location so onboarding and the
-  # TUI find them without OPENCLAW_PLUGIN_STAGE_DIR being exported (exporting it
-  # into the TUI process triggers an event-loop-saturating re-staging loop).
-  # The target is a symlink into /tmp, which is never synced to the DB (see
-  # sync.ts HOME_SYNC_EXCLUDE_PATH_PREFIXES), so nothing under the persisted
-  # /home/agent is ever a multi-GB npm cache.
+  # ── OpenClaw ────────────────────────────────────────────────────────────────
+  # The whole OpenClaw lifecycle lives in openclaw-launch.sh: config seeding,
+  # gateway start, device pairing, the TUI, and a local-mode fallback. Keeping it
+  # in one script means the user can re-run the exact same flow by hand with
+  # `openclaw-launch` after a failure, instead of reverse-engineering it out of
+  # setup.sh.
   #
-  # Guard against a stale REAL directory at the destination: an older session
-  # (or an earlier openclaw build) may have written plugin-runtime-deps as a
-  # plain directory instead of this symlink. `ln -sfn` cannot replace a real
-  # directory — it nests the link inside it (leaving the multi-GB dir in place)
-  # or, once that nested path is itself occupied, fails outright, which under
-  # `set -euo pipefail` would abort setup and break OpenClaw startup. Removing
-  # it first is safe: the path is excluded from the workspace sync (never user
-  # data — only a regenerable npm staging cache) and its contents were just
-  # re-seeded into /tmp/openclaw-plugin-runtime-deps above.
-  _openclaw_prd=/home/agent/.openclaw/plugin-runtime-deps
-  if [ -d "$_openclaw_prd" ] && [ ! -L "$_openclaw_prd" ]; then
-    echo "setup.sh: replacing stale plugin-runtime-deps directory with a symlink into /tmp"
-    rm -rf "$_openclaw_prd"
+  # This replaces two earlier approaches that both stranded the TUI on
+  # "connecting" (see openclaw-launch.sh's header for the full reasoning):
+  #   1. Non-interactive onboarding that wrote credentials + a custom provider,
+  #      auto-started the gateway, and raced its own config rewrites.
+  #   2. "Prepare the sandbox, then let the user run `openclaw onboard`" — but
+  #      headless onboarding waits on a browser that never opens, refuses to
+  #      persist anything until a live model call succeeds, and the gate that
+  #      decided whether to run it (`auth-profiles.json` existing) is a file
+  #      OpenClaw no longer writes, so onboarding re-ran on every single launch.
+  #
+  # setup.sh's job is now only to hand over a prepared sandbox: the workspace is
+  # restored, the git-over-https rewrites are in place (see the blocks near the
+  # top of this file and after the restore), and OPENRIND_GATEWAY_PROXY_URL is
+  # resolved. openclaw-launch.sh does the rest.
+  export OPENRIND_SHELL_DIR
+  OPENCLAW_LAUNCHER="$OPENRIND_SHELL_DIR/openclaw-launch.sh"
+  if [ ! -r "$OPENCLAW_LAUNCHER" ]; then
+    echo "setup.sh: ERROR: $OPENCLAW_LAUNCHER is missing — the sandbox image is stale." >&2
+    echo "setup.sh:   Rebuild the image so openclaw-launch.sh is present." >&2
+    exit 1
   fi
-  ln -sfn /tmp/openclaw-plugin-runtime-deps "$_openclaw_prd"
 
-  # A small diagnostic the user can run if onboarding or the TUI misbehaves.
-  mkdir -p /home/agent/.openrind-shell
-  cat > /home/agent/.openrind-shell/diagnose-openclaw.sh <<'DIAG_EOF'
-#!/bin/bash
-echo "=== openclaw version ==="; openclaw --version 2>&1 || true
-echo; echo "=== env (relevant) ==="
-env | grep -E '^(HOME|ANTHROPIC_|OPENCLAW_|NODE_COMPILE_CACHE|GIT_SSL_NO_VERIFY|npm_config_)' | sed 's/\(ANTHROPIC_API_KEY=\).*/\1***REDACTED***/'
-echo; echo "=== ~/.openclaw/openclaw.json ==="
-if [ -f /home/agent/.openclaw/openclaw.json ]; then
-  sed 's/\("ANTHROPIC_API_KEY":[[:space:]]*"\)[^"]*/\1***REDACTED***/' /home/agent/.openclaw/openclaw.json
-else
-  echo "(missing — run: openclaw onboard)"
-fi
-echo; echo "=== auth profile ==="
-ls -la /home/agent/.openclaw/agents/main/agent/auth-profiles.json 2>&1 || echo "(missing — run: openclaw onboard)"
-echo; echo "=== gateway /readyz ==="
-curl -fsS -o /dev/null -w "HTTP %{http_code}\n" http://127.0.0.1:18789/readyz 2>&1 || echo "(unreachable — start it with: openclaw)"
-DIAG_EOF
-  chmod +x /home/agent/.openrind-shell/diagnose-openclaw.sh
-
-  # Setup-only mode (desktop loading-screen prewarm): the runtime is prepared;
-  # the user onboards interactively once their terminal connects. No gateway is
-  # started here anymore.
+  # Setup-only mode is the desktop's loading-screen prewarm. Run the launcher
+  # here too: it seeds the config and brings the gateway to /readyz while the
+  # loading screen is still up, so the user's terminal later attaches to a
+  # gateway that is ALREADY ready rather than watching it boot.
   if [ -n "${OPENRIND_SHELL_SETUP_ONLY:-}" ]; then
-    echo "setup.sh: setup-only mode — OpenClaw runtime prepared; onboarding is user-driven on connect"
+    echo "setup.sh: setup-only mode — prewarming OpenClaw via openclaw-launch.sh"
+    # Deliberately NOT exec: `exit 0` lets this script's EXIT trap reap the
+    # openrind-shell-bash daemon, exactly as the pre-launcher code did. Leaving it
+    # orphaned would strand /tmp/openrind-shell-bash.sock for the next run. The
+    # gateway the launcher starts is unaffected — setsid already detached it, and
+    # surviving the prewarm is the entire point.
+    bash "$OPENCLAW_LAUNCHER"
     exit 0
   fi
 
-  # Restore the real terminal (the top of this script redirected stdout to a
-  # log) so OpenClaw's own interactive UI is what the user sees.
+  # Restore the real terminal (the top of this script redirected stdout to a log)
+  # so OpenClaw's own UI is what the user sees.
   exec 1>&3 3>&-
 
-  # Launch OpenClaw's CODING AGENT on the clean, ConPTY-free PTY (openrind_pty_exec):
-  #   1. First run walks the user through `openclaw onboard` (user-driven auth).
-  #   2. Bring the gateway up ourselves — the container has no systemd, so nothing
-  #      else starts it — reusing a healthy one from a previous session (setsid
-  #      keeps it alive across PTY disconnects) and waiting for /readyz.
-  #   3. exec `openclaw tui`, the thin client that renders the coding agent.
+  # Launch on the clean, ConPTY-free Linux PTY (openrind_pty_exec).
   #
-  # We must NOT exec bare `openclaw`: as of 2026.4.x that opens the "Crestodian"
-  # ring-zero setup/repair concierge, NOT the coding agent. `openclaw tui`
-  # connects to the gateway started above and shows the agent.
+  # Scrubbed from the environment before handover:
+  #   OPENRIND_GATEWAY_API_KEY  only needed to MINT the presign earlier in this
+  #                             script; OpenClaw authenticates via the presign
+  #                             token embedded in the proxy URL, never the raw
+  #                             key. Dropping it keeps the credential out of
+  #                             OpenClaw and every plugin/subprocess it spawns.
+  #   ANTHROPIC_AUTH_TOKEN      Claude-Code-only; meaningless to OpenClaw.
+  #   OPENCLAW_PLUGIN_STAGE_DIR must never reach a client process — OpenClaw then
+  #                             runs its own staging pass and saturates the event
+  #                             loop. openclaw-launch.sh passes it to the gateway
+  #                             process only.
   #
-  # OPENCLAW_PLUGIN_STAGE_DIR is passed ONLY to the gateway (its bundled deps are
-  # seeded into that dir); it must never reach the TUI/client process or OpenClaw
-  # runs a staging loop that saturates the event loop and freezes the terminal.
-  #
-  # Scrub setup-only secrets before handing control to OpenClaw (defense in
-  # depth, mirroring the Claude launch below). OPENRIND_GATEWAY_API_KEY is only
-  # needed to MINT the presign earlier in this script — OpenClaw authenticates
-  # via the presign proxy URL (ANTHROPIC_BASE_URL), never the raw key. Dropping
-  # it (and any ANTHROPIC_AUTH_TOKEN) keeps the credential out of OpenClaw and
-  # every plugin / diagnostic / subprocess it spawns, so a stray env dump can't
-  # leak it. `env` without -i still passes the rest of the environment through,
-  # so ANTHROPIC_BASE_URL exported earlier is inherited by the gateway.
+  # ANTHROPIC_API_KEY stays in the environment on purpose: it is OpenClaw's
+  # documented provider-auth source, which is why openclaw-config.mjs never has
+  # to write the key into a file that the workspace sync would persist.
   openrind_pty_exec env -u OPENRIND_GATEWAY_API_KEY -u ANTHROPIC_AUTH_TOKEN \
+    -u OPENCLAW_PLUGIN_STAGE_DIR \
     HOME=/home/agent \
-    SHELL=/usr/local/bin/openrind-shell-bash \
-    NODE_COMPILE_CACHE=/tmp/openclaw-compile-cache \
-    OPENCLAW_NO_RESPAWN=1 \
-    OPENCLAW_HANDSHAKE_TIMEOUT_MS=600000 \
-    GIT_SSL_NO_VERIFY=true \
-    npm_config_strict_ssl=false \
-    bash -c '
-      if [ ! -s /home/agent/.openclaw/agents/main/agent/auth-profiles.json ]; then
-        openclaw onboard || true
-      fi
-      if ! curl -fsS http://127.0.0.1:18789/readyz >/dev/null 2>&1; then
-        echo "Starting OpenClaw (first run can take a minute)..."
-        setsid env OPENCLAW_SKIP_ONBOARDING=1 OPENCLAW_HANDSHAKE_TIMEOUT_MS=600000 OPENCLAW_NO_RESPAWN=1 NODE_COMPILE_CACHE=/tmp/openclaw-compile-cache GIT_SSL_NO_VERIFY=true npm_config_strict_ssl=false OPENCLAW_PLUGIN_STAGE_DIR=/tmp/openclaw-plugin-runtime-deps openclaw gateway --port 18789 --allow-unconfigured </dev/null >/tmp/openclaw-gateway.log 2>&1 &
-        _gd=0
-        while [ $_gd -lt 300 ]; do
-          curl -fsS http://127.0.0.1:18789/readyz >/dev/null 2>&1 && break
-          sleep 1
-          _gd=$((_gd+1))
-        done
-      fi
-      exec openclaw tui'
+    OPENRIND_SHELL_DIR="$OPENRIND_SHELL_DIR" \
+    bash "$OPENCLAW_LAUNCHER"
 fi
 
 # Claude Code launch (reached only when OPENRIND_SHELL_AGENT != openclaw, since openclaw execs above).
-# Install Claude Code if not already present in the image
+#
+# Version policy: ALWAYS latest, never pinned. (Unlike OpenClaw, which is pinned
+# on purpose — see CLAUDE.md.)
+#
+# The OpenShell base image bakes a NATIVE Claude Code binary at
+# /usr/local/bin/claude (root-owned, ~240 MB). Two consequences:
+#
+#   1. `command -v claude` therefore always succeeds, so the old
+#      install-only-if-missing check never ran and the sandbox silently froze on
+#      whatever version the base image happened to ship. A pin by omission.
+#   2. That binary is root-owned while the agent runs unprivileged, so Claude
+#      Code's own updater cannot replace it. It fails every launch and prints
+#      "Auto-update failed · Run /doctor" into the TUI.
+#
+# So own the version explicitly: upgrade to @latest into a prefix the agent can
+# write, put it ahead of the baked binary on PATH, and disable Claude's
+# in-session updater at exec time (DISABLE_AUTOUPDATER=1) so there is one
+# updater rather than two racing — and it is the one that can actually succeed.
+#
+# The prefix is deliberately OUTSIDE /home/agent: that tree syncs to PostgreSQL
+# and this package is far too large to persist there.
+CLAUDE_PREFIX=/opt/openrind-shell-claude
+CLAUDE_UPGRADE_TIMEOUT="${OPENRIND_SHELL_CLAUDE_UPGRADE_TIMEOUT:-240}"
+mkdir -p "$CLAUDE_PREFIX" 2>/dev/null || true
+if [ -w "$CLAUDE_PREFIX" ] && [ -z "${OPENRIND_SHELL_SKIP_CLAUDE_UPGRADE:-}" ]; then
+  echo "setup.sh: updating Claude Code to latest..."
+  # Bounded and non-fatal by design: a slow registry or a blocked egress hop
+  # must never stop the agent from launching. Worst case we fall through to the
+  # version already on disk (ours from a previous run, or the image's).
+  if timeout "$CLAUDE_UPGRADE_TIMEOUT" npm install -g --prefix "$CLAUDE_PREFIX" \
+      --loglevel=error @anthropic-ai/claude-code@latest >/tmp/claude-upgrade.log 2>&1; then
+    echo "setup.sh: Claude Code updated"
+  else
+    echo "setup.sh: WARN: Claude Code update failed; keeping the installed version (see /tmp/claude-upgrade.log)" >&2
+  fi
+fi
+# Prefer our managed install over the image's baked binary whenever it exists.
+if [ -x "$CLAUDE_PREFIX/bin/claude" ]; then
+  PATH="$CLAUDE_PREFIX/bin:$PATH"
+  export PATH
+fi
+
+# Last resort: neither the image nor the upgrade above produced a usable binary.
 if ! command -v claude >/dev/null 2>&1; then
   echo "setup.sh: Claude CLI not found, installing..."
-  npm install -g @anthropic-ai/claude-code 2>&1 | tail -10
+  npm install -g @anthropic-ai/claude-code@latest 2>&1 | tail -10
   if ! command -v claude >/dev/null 2>&1; then
     echo "setup.sh: ERROR: Claude CLI install failed" >&2
     exit 1
   fi
   echo "setup.sh: Claude CLI installed"
 fi
+echo "setup.sh: Claude Code $(claude --version 2>/dev/null | head -1 || echo 'version unknown')"
+
+# Claude Code's native-installer check looks for $HOME/.local/bin and prints
+#   "installMethod is native, but directory /home/agent/.local/bin does not exist"
+# above the TUI when it is missing. The desktop's configureAgentLaunch creates
+# that directory for the CONNECT shell, whose HOME is /sandbox — but this script
+# execs Claude with HOME=/home/agent, so the check looks somewhere that was never
+# created. Provide it on the home we actually launch with.
+mkdir -p /home/agent/.local/bin 2>/dev/null || true
+if [ ! -e /home/agent/.local/bin/claude ]; then
+  ln -sfn "$(command -v claude || echo /usr/local/bin/claude)" /home/agent/.local/bin/claude 2>/dev/null || true
+fi
+case ":$PATH:" in
+  *":/home/agent/.local/bin:"*) ;;
+  *) PATH="/home/agent/.local/bin:$PATH"; export PATH ;;
+esac
 
 # Claude Code reads ANTHROPIC_BASE_URL from process.env at startup for
 # auth-mode selection. Export the proxy here so it's picked up before
@@ -886,15 +975,36 @@ echo "setup.sh: launching Claude Code..."
 # redirect near the top of this script). The claude setup-only exit is above, so
 # reaching here always means an interactive-connect run where fd 3 exists.
 [ -n "${OPENRIND_SHELL_SETUP_ONLY:-}" ] || exec 1>&3 3>&-
+# Wipe the screen + scrollback (home the cursor) so Claude Code opens on a fresh
+# screen with nothing above its TUI: no setup remnants or terminal-init
+# artifacts (mirrors the OpenClaw launch).
+[ -n "${OPENRIND_SHELL_SETUP_ONLY:-}" ] || printf '\033[3J\033[H\033[2J'
+# Exactly ONE auth mode must reach Claude Code, and this exec is the single
+# choke point every launch path funnels through — so decide it here rather than
+# trusting the inherited environment. Claude Code refuses to pick a mode when
+# both ANTHROPIC_AUTH_TOKEN and ANTHROPIC_API_KEY are present and opens with an
+# "Auth conflict" banner instead, and .bashrc is layered by two independent
+# writers (setup.sh's connect hook, then the desktop launch block) whose order
+# we do not control.
 if [ -n "${OPENRIND_GATEWAY_PROXY_URL:-}" ]; then
+  # Proxy mode: OpenrindGateway authenticates via the presign token embedded in the
+  # URL, so the token/key pair is irrelevant to it — but Claude still must not
+  # see two of them. ANTHROPIC_API_KEY is deliberately kept (direct-auth
+  # fallback + billing identity); the dummy token is what has to go.
   openrind_pty_exec env -u OPENRIND_GATEWAY_API_KEY -u ANTHROPIC_AUTH_TOKEN \
     HOME=/home/agent \
+    DISABLE_AUTOUPDATER=1 \
     SHELL=/usr/local/bin/openrind-shell-bash \
     ANTHROPIC_BASE_URL="$OPENRIND_GATEWAY_PROXY_URL" \
     claude "$@"
 else
-  openrind_pty_exec env \
+  # Direct-auth mode: ANTHROPIC_API_KEY only. Scrub both proxy-era variables so
+  # a stale export (persisted env.sh sourced by .bashrc before the cleanup above
+  # ran, or a hand-edited profile) cannot re-create the conflict or silently
+  # point Claude at a dead presign.
+  openrind_pty_exec env -u ANTHROPIC_AUTH_TOKEN -u ANTHROPIC_BASE_URL \
     HOME=/home/agent \
+    DISABLE_AUTOUPDATER=1 \
     SHELL=/usr/local/bin/openrind-shell-bash \
     claude "$@"
 fi
