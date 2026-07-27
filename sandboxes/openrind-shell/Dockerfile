@@ -20,8 +20,30 @@ RUN apt-get update \
 # SHARP_IGNORE_GLOBAL_LIBVIPS=1 skips the sharp native postinstall, which would
 # otherwise try to pull GitHub release assets (blocked in some CI environments).
 #
-# Pinned to 2026.4.29 — earlier 2026.4.24–2026.4.26 releases had a Docker regression
-# where the embedded gateway never became healthy.
+# Pinned to 2026.7.1-2 (the `latest` dist-tag at time of writing).
+#
+# Bumped from 2026.4.29, which had a TUI-side defect that made the sandbox
+# unusable: the client opened its gateway WebSocket and then burned 100% CPU for
+# ~4 minutes without servicing it, so the TUI sat on "connecting | idle" with the
+# model shown as "unknown". Root cause upstream: the `acpx` plugin bundled 35
+# runtime deps that installed to ~2.5 GB / 95,467 files, and the plugin loader
+# walked that tree on every TUI startup. 2026.7.1-2 removes acpx (and
+# amazon-bedrock*, anthropic-vertex) entirely and stages NO bundled runtime deps.
+#
+# Measured in the same container, same config, only the version differing:
+#                     2026.4.29              2026.7.1-2
+#   TUI CPU 15s->70s  12s -> 45s (climbing)  6s -> 6s (flat)
+#   TUI RSS           750-920 MB             250-274 MB
+#   gateway plugins   8 in 7.3s              5 in 0.6s
+#   model in status   "unknown"              resolved
+#
+# Do not downgrade below 2026.7.x without re-reading openclaw-hang-diagnosis.md.
+#
+# NOTE: as of 2026.7.1-2 upstream ships only 70 bundled extensions and has already
+# removed amazon-bedrock-mantle, amazon-bedrock and anthropic-vertex, so three of
+# the four `rm -rf` below are no-ops. They are kept deliberately: they cost
+# nothing, and they keep the image correct if the pin is ever moved back. Only
+# `google` still exists and is still pruned. The historical reasoning follows.
 #
 # Remove the amazon-bedrock-mantle extension: its bundled @anthropic-ai/sdk is
 # internally broken in this openclaw release (client.js requires
@@ -45,7 +67,16 @@ RUN apt-get update \
 # handshake (A/B verified: full tree = unbounded scan; pruned tree = ~19 s
 # one-time startup). Removing the extensions collapses the staged union to the
 # ~42 core deps: no runtime npm install AND no giant scan.
-RUN SHARP_IGNORE_GLOBAL_LIBVIPS=1 npm install -g --loglevel=error openclaw@2026.4.29 \
+#
+# NOTE: do NOT remove the other bundled model-provider extensions (deepseek,
+# groq, mistral, xai, codex, …). Deleting their dist/extensions dirs makes
+# openclaw fatally abort at session start — "plugins.deny: plugin not found:
+# <name>" — because the bundled manifest still declares them and a persisted
+# openclaw.json (restored from PostgreSQL after a full-image onboard) references
+# them. The startup-latency win from a smaller model catalog is NOT worth
+# breaking OpenClaw; the catalog load is instead kept fast via the pre-staged
+# runtime deps + baked V8 compile cache below.
+RUN SHARP_IGNORE_GLOBAL_LIBVIPS=1 npm install -g --loglevel=error openclaw@2026.7.1-2 \
     && rm -rf /usr/lib/node_modules/openclaw/dist/extensions/amazon-bedrock-mantle \
     && rm -rf /usr/lib/node_modules/openclaw/dist/extensions/amazon-bedrock \
     && rm -rf /usr/lib/node_modules/openclaw/dist/extensions/anthropic-vertex \
@@ -63,7 +94,15 @@ RUN SHARP_IGNORE_GLOBAL_LIBVIPS=1 npm install -g --loglevel=error openclaw@2026.
     # "disconnected" state. Fixing the key mismatch makes the runtime reuse
     # the baked cache; the first TUI launch then compiles only a ~2 MB delta.
     && find /usr/lib/node_modules/openclaw -exec touch -h -d "@1735689600" {} + \
-    && chmod -R a+rX /usr/lib/node_modules/openclaw
+    && chmod -R a+rX /usr/lib/node_modules/openclaw \
+    # Fail loudly if the pin ever resolves to a build that still bundles acpx's
+    # runtime-dep tree, which is what made the TUI unusable on 2026.4.29.
+    && if [ -d /usr/lib/node_modules/openclaw/dist/extensions/acpx ]; then \
+           echo "ERROR: this openclaw build still ships the acpx extension." >&2; \
+           echo "acpx bundles ~2.5GB/95k files of runtime deps that the TUI walks on" >&2; \
+           echo "startup (~4 min at 100% CPU). See openclaw-hang-diagnosis.md." >&2; \
+           exit 1; \
+       fi
 
 # Pre-stage OpenClaw's TUI plugin-runtime-deps AND pre-warm the V8 bytecode
 # compile cache at image-build time so end users don't pay the multi-minute
@@ -150,9 +189,14 @@ RUN set -e \
  #    of the status/health code path into NODE_COMPILE_CACHE.
  && timeout 900 openclaw status --deep </dev/null >/tmp/openclaw-bootstrap.log 2>&1 || true \
  # 2. Broaden coverage with cheap subcommands that share most of the bootstrap.
- && timeout 60 openclaw models list  </dev/null >>/tmp/openclaw-bootstrap.log 2>&1 || true \
- && timeout 60 openclaw plugins list </dev/null >>/tmp/openclaw-bootstrap.log 2>&1 || true \
- && timeout 60 openclaw infer list   </dev/null >>/tmp/openclaw-bootstrap.log 2>&1 || true \
+ #    config validate + devices list are on the RUNTIME launch path
+ #    (openclaw-launch.sh gates on both), so warming them here removes a few
+ #    seconds from every sandbox start.
+ && timeout 60 openclaw models list     </dev/null >>/tmp/openclaw-bootstrap.log 2>&1 || true \
+ && timeout 60 openclaw plugins list    </dev/null >>/tmp/openclaw-bootstrap.log 2>&1 || true \
+ && timeout 60 openclaw infer list      </dev/null >>/tmp/openclaw-bootstrap.log 2>&1 || true \
+ && timeout 60 openclaw config validate </dev/null >>/tmp/openclaw-bootstrap.log 2>&1 || true \
+ && timeout 60 openclaw devices list    </dev/null >>/tmp/openclaw-bootstrap.log 2>&1 || true \
  # 3. Pre-warm the embedded-agent run path (the slow one in the gateway trace:
  #    model-resolution, auth, core-plugin-tools, system-prompt, stream-setup).
  #    We write a fake auth profile via non-interactive onboarding, then run
@@ -185,16 +229,15 @@ RUN set -e \
  #     once the plugin registry is consolidated (mirrors setup.sh order).
  && timeout 120 openclaw doctor --fix </dev/null >>/tmp/openclaw-bootstrap.log 2>&1 || true \
  && (openclaw gateway --port 18799 --allow-unconfigured </dev/null >>/tmp/openclaw-bootstrap.log 2>&1 &) \
- # With the bedrock/vertex/google extensions removed above, the second-pass
- # union collapses to the core dep set, which the gateway stages before it
- # starts. Wait only for staging quiescence (no npm) + a core dep sentinel.
+ # 2026.7.x stages NO bundled runtime deps (verified: 0 staging log lines, empty
+ # stage dir), so there is nothing to wait for quiescence on. Just wait for the
+ # gateway to answer /readyz, bounded, so the TUI pass below has a live gateway.
  && _d=0 \
- && while [ $_d -lt 240 ]; do \
-        if ls -d /tmp/openclaw-plugin-runtime-deps/*/node_modules/express >/dev/null 2>&1 \
-           && ! ps -e -o comm= | grep -q "^npm" 2>/dev/null; then break; fi; \
+ && while [ $_d -lt 180 ]; do \
+        curl -fsS -m 3 -o /dev/null http://127.0.0.1:18799/readyz 2>/dev/null && break; \
         sleep 5; _d=$((_d+5)); \
     done \
- && echo "--- staging wait: ${_d}s ---" >>/tmp/openclaw-bootstrap.log \
+ && echo "--- gateway ready wait: ${_d}s ---" >>/tmp/openclaw-bootstrap.log \
  # 3c. Run the TUI once under a PTY while the gateway is up, mirroring the
  #     runtime launch (no OPENCLAW_PLUGIN_STAGE_DIR in its env, HOME symlink
  #     provides the stage dir — exactly like setup.sh's exec). This compiles
@@ -205,10 +248,18 @@ RUN set -e \
  #     -cached modules are skipped) and mops up whatever the first pass was
  #     killed in the middle of. Sizes are echoed for build-log visibility.
  && du -s /opt/openclaw-compile-cache | cut -f1 > /tmp/cc-before-tui \
- && TERM=xterm-256color env -u OPENCLAW_PLUGIN_STAGE_DIR \
-      script -qec "timeout 480 openclaw tui" /dev/null >>/tmp/openclaw-bootstrap.log 2>&1 || true \
- && TERM=xterm-256color env -u OPENCLAW_PLUGIN_STAGE_DIR \
-      script -qec "timeout 180 openclaw tui" /dev/null >>/tmp/openclaw-bootstrap.log 2>&1 || true \
+ # The TUI pass needs an OUTER timeout as well as the inner one. `timeout 480
+ # openclaw tui` kills openclaw, but openclaw respawns itself (see
+ # OPENCLAW_PACKAGED_COMPILE_CACHE_RESPAWNED) and the surviving grandchild keeps
+ # the PTY slave open, so `script` blocks forever reading the master and the build
+ # hangs with no output. That cost a 60+ minute stuck build before this was added.
+ # One bounded pass is enough: measured 1 MB -> 20 MB of bytecode cache on
+ # 2026.7.x, which clears the >= 12 MB gate below.
+ && (timeout -k 20 300 env -u OPENCLAW_PLUGIN_STAGE_DIR TERM=xterm-256color \
+      script -qec "timeout 240 openclaw tui" /dev/null >>/tmp/openclaw-bootstrap.log 2>&1 || true) \
+ && (pkill -9 -x openclaw-tui 2>/dev/null || true) \
+ && (pkill -9 -f "openclaw tui" 2>/dev/null || true) \
+ && sleep 2 \
  && du -s /opt/openclaw-compile-cache | cut -f1 > /tmp/cc-after-tui \
  && echo "--- compile cache KB before/after TUI prewarm: $(cat /tmp/cc-before-tui) / $(cat /tmp/cc-after-tui) ---" \
  && pkill -f "openclaw gateway" 2>/dev/null || true \
@@ -219,47 +270,35 @@ RUN set -e \
  && mkdir -p /opt/openclaw-plugin-cache \
  && cp -r --preserve=timestamps /tmp/openclaw-plugin-runtime-deps/. \
         /opt/openclaw-plugin-cache/ 2>/dev/null || true \
- # 5. Hard gate: an empty plugin cache means the pre-warm silently failed.
- && if [ -z "$(ls -A /opt/openclaw-plugin-cache 2>/dev/null)" ]; then \
-        echo "ERROR: /opt/openclaw-plugin-cache is empty — OpenClaw plugin pre-stage failed." >&2; \
-        echo "An image without staged plugins makes the sandbox gateway hang at startup." >&2; \
-        echo "--- tail of /tmp/openclaw-bootstrap.log ---" >&2; \
-        tail -100 /tmp/openclaw-bootstrap.log >&2 || true; \
-        exit 1; \
-    fi \
- # 5b. Hard gate: the staged install MANIFEST must be the CORE set only.
- #     openclaw's plugin loader walks the wildcard-exports tree of every
- #     DIRECT manifest dep on TUI startup; if the manifest unions in the
- #     AWS/Vertex/Google SDK specs again (extension removal regressed), that
- #     walk takes minutes at 100% CPU. Transitive @aws-sdk/@google trees
- #     pulled in by core deps (e.g. @mariozechner/pi-ai) are fine — the
- #     loader does not walk transitive deps — so only the manifest is checked.
- && if grep -lE "@aws-sdk/|@anthropic-ai/vertex-sdk|@google/genai" /opt/openclaw-plugin-cache/*/package.json >/dev/null 2>&1; then \
-        echo "ERROR: AWS/Vertex/Google SDK specs present in the staged manifest — extension removal regressed." >&2; \
-        grep -hE "@aws-sdk/|vertex-sdk|@google/genai" /opt/openclaw-plugin-cache/*/package.json >&2 || true; \
-        exit 1; \
-    fi \
- && if ! ls -d /opt/openclaw-plugin-cache/*/node_modules/express >/dev/null 2>&1; then \
-        echo "ERROR: core dep sentinel (express) missing from /opt/openclaw-plugin-cache." >&2; \
-        echo "--- tail of /tmp/openclaw-bootstrap.log ---" >&2; \
-        tail -100 /tmp/openclaw-bootstrap.log >&2 || true; \
+ # 5. Bundled runtime deps: 2026.7.x stages NONE (verified empty). The copy above
+ #    is therefore expected to produce an empty cache, and the old hard gates
+ #    (non-empty cache, `express` sentinel, AWS/Vertex/Google manifest scan) no
+ #    longer apply — they would now fail the build on a HEALTHY image. What we
+ #    assert instead is the inverse: if a future pin DOES start staging a large
+ #    tree again, say so, because that is the regression that broke the TUI.
+ && _stagedfiles=$(find /tmp/openclaw-plugin-runtime-deps -type f 2>/dev/null | wc -l) \
+ && echo "staged runtime-dep files: ${_stagedfiles}" \
+ && if [ "${_stagedfiles}" -gt 20000 ]; then \
+        echo "ERROR: openclaw staged ${_stagedfiles} runtime-dep files." >&2; \
+        echo "A tree this large is walked by the plugin loader on every TUI start" >&2; \
+        echo "(~4 min at 100% CPU on 2026.4.29). See openclaw-hang-diagnosis.md." >&2; \
+        du -sm /tmp/openclaw-plugin-runtime-deps >&2 || true; \
         exit 1; \
     fi \
  # 5c. Hard gate: the prewarm must have populated the V8 bytecode compile
- #     cache. It converges at ~46 MB total for openclaw 2026.4.29 — the
- #     status --deep + agent --local + gateway passes compile most of it and
- #     the TUI pass only tops up the remainder. Gate on the TOTAL cache size,
- #     NOT the TUI-step delta: which pass compiles the bulk shifts between
- #     openclaw / base-image versions (a delta check then flakes even though
- #     the cache is fully warm — the TUI pass legitimately adds ~0 when the
- #     earlier passes already compiled its modules). A near-empty cache still
- #     reliably means the prewarm silently did nothing (this happened twice:
- #     a missing TERM and a compile-cache key mismatch), and the first
- #     in-sandbox TUI launch would then freeze for minutes recompiling.
+ #     cache. Gate on the TOTAL cache size, NOT the TUI-step delta: which pass
+ #     compiles the bulk shifts between openclaw / base-image versions (a delta
+ #     check then flakes even though the cache is fully warm). A near-empty
+ #     cache still reliably means the prewarm silently did nothing (this happened
+ #     twice: a missing TERM and a compile-cache key mismatch).
+ #
+ #     Threshold is 12 MB, not the old 30 MB: 2026.7.x is a much smaller runtime
+ #     (no bundled dep tree) and measured 20 MB after a full prewarm, so 30 MB
+ #     would fail a healthy build. 12 MB still catches "did nothing".
  && _ccb=$(cat /tmp/cc-before-tui) && _cca=$(cat /tmp/cc-after-tui) \
  && echo "compile cache: ${_ccb} KB before TUI pass -> ${_cca} KB after (delta $((_cca - _ccb)) KB)" \
- && if [ "${_cca}" -lt 30000 ]; then \
-        echo "ERROR: compile cache is only ${_cca} KB after prewarm (expected >= 30 MB)." >&2; \
+ && if [ "${_cca}" -lt 12000 ]; then \
+        echo "ERROR: compile cache is only ${_cca} KB after prewarm (expected >= 12 MB)." >&2; \
         echo "The OpenClaw bytecode prewarm did not populate the cache — the first" >&2; \
         echo "in-sandbox TUI launch would freeze for minutes recompiling modules." >&2; \
         echo "--- tail of /tmp/openclaw-bootstrap.log ---" >&2; \
@@ -306,6 +345,18 @@ RUN chmod a+rx /opt/openrind-shell/openrind-pty-bridge.py
 # Rename real bash so openrind-shell-bash can fall back to it for interactive use
 RUN cp /bin/bash /bin/bash.real
 
+# OpenClaw launcher + deterministic config seeder.
+#
+# openclaw-launch.sh owns the entire OpenClaw lifecycle (config seeding, gateway
+# start, device-pairing approval, TUI handover, local-mode fallback). setup.sh
+# execs it; the /usr/local/bin/openclaw-launch shim lets a user re-run the exact
+# same flow by hand after a failure, which is the documented recovery step in the
+# fallback banner and in diagnose-openclaw.sh.
+COPY --chown=sandbox:sandbox sandboxes/openrind-shell/openclaw-launch.sh /opt/openrind-shell/openclaw-launch.sh
+COPY --chown=sandbox:sandbox sandboxes/openrind-shell/openclaw-config.mjs /opt/openrind-shell/openclaw-config.mjs
+RUN chmod a+rx /opt/openrind-shell/openclaw-launch.sh /opt/openrind-shell/openclaw-config.mjs \
+    && ln -sf /opt/openrind-shell/openclaw-launch.sh /usr/local/bin/openclaw-launch
+
 # Setup script (entry point for sandbox create).
 #
 # Users invoke this as the trailing command of `openshell sandbox create`.
@@ -316,7 +367,23 @@ RUN cp /bin/bash /bin/bash.real
 COPY sandboxes/openrind-shell/setup.sh /opt/openrind-shell/setup.sh
 RUN chmod 755 /opt/openrind-shell/setup.sh \
     && chown sandbox:sandbox /opt/openrind-shell/setup.sh \
-    && ln -sf /opt/openrind-shell/setup.sh /usr/local/bin/openrind-shell
+    && ln -sf /opt/openrind-shell/setup.sh /usr/local/bin/openrind-shell \
+    # Strip CR from every script that is exec'd directly. build-image.sh builds
+    # from the WORKING TREE, and this project is developed on Windows, so a
+    # checkout without .gitattributes applied yields CRLF here. The kernel then
+    # reads the shebang as `/bin/bash\r` and the sandbox dies with
+    # "bad interpreter" — a failure that points nowhere near line endings.
+    # .gitattributes fixes it at the source; this makes the image immune anyway.
+    && sed -i 's/\r$//' \
+        /opt/openrind-shell/setup.sh \
+        /opt/openrind-shell/openclaw-launch.sh \
+        /opt/openrind-shell/openclaw-config.mjs \
+        /opt/openrind-shell/openrind-shell-bash.mjs \
+        /opt/openrind-shell/openrind-pty-bridge.py \
+    && head -1 /opt/openrind-shell/setup.sh | grep -q '^#!/bin/bash$' \
+    && bash -n /opt/openrind-shell/setup.sh \
+    && bash -n /opt/openrind-shell/openclaw-launch.sh \
+    && node --check /opt/openrind-shell/openclaw-config.mjs
 
 # Override the upstream base policy
 COPY sandboxes/openrind-shell/policy.yaml /etc/openshell/policy.yaml
@@ -326,3 +393,15 @@ COPY .claude/skills/ /sandbox/.skills/
 
 # Workspace directory — must be owned by sandbox user so setup.sh can write .npmrc
 RUN mkdir -p /home/agent && chown sandbox:sandbox /home/agent
+
+# Agent-writable prefix for the Claude Code auto-upgrade in setup.sh.
+#
+# The base image bakes a root-owned native claude at /usr/local/bin/claude, which
+# the unprivileged agent cannot replace — so Claude Code's own updater fails on
+# every launch ("Auto-update failed") and the sandbox stays frozen on whatever
+# version the base shipped. setup.sh installs @latest here instead and puts this
+# bin dir ahead of /usr/local/bin on PATH.
+#
+# Outside /home/agent on purpose: that tree is synced to PostgreSQL and this
+# package is far too large to persist there.
+RUN mkdir -p /opt/openrind-shell-claude && chown sandbox:sandbox /opt/openrind-shell-claude

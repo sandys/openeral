@@ -34,7 +34,9 @@ echo "=== Agent: $AGENT ==="
 # Create a modified setup.sh that stops before exec claude/openclaw and runs checks instead
 echo ""
 echo "=== Running setup.sh (with verification instead of $AGENT) ==="
-out=$(timeout 60 docker run --rm --network host \
+# 180s, not 60: the OpenClaw path now runs `openclaw config validate`, which pays
+# a full OpenClaw bootstrap.
+out=$(timeout 180 docker run --rm --network host \
   -e DATABASE_URL="$DB_URL" \
   -e WORKSPACE_ID="$WORKSPACE" \
   -e OPENSHELL_SANDBOX_ID="$WORKSPACE" \
@@ -133,6 +135,56 @@ NPMRC
       echo "CHECK:agent-dirs-openclaw=$([ -d /home/agent/.config ] && echo ok || echo FAIL)"
       echo "CHECK:claude-dir-absent=$([ ! -d /home/agent/.claude ] && echo ok || echo PRESENT)"
       echo "CHECK:openclaw-binary=$(command -v openclaw >/dev/null 2>&1 && echo ok || echo FAIL)"
+      echo "CHECK:openclaw-launcher=$([ -x /opt/openrind-shell/openclaw-launch.sh ] && echo ok || echo FAIL)"
+      echo "CHECK:openclaw-launch-shim=$(command -v openclaw-launch >/dev/null 2>&1 && echo ok || echo FAIL)"
+
+      # --- Deterministic config seeding (the fix under test) ---
+      # Plant exactly the keys that used to strand the TUI on "connecting", plus a
+      # user-authored key that must survive, then assert the seeder result.
+      export HOME=/home/agent
+      export OPENRIND_GATEWAY_PROXY_URL="https://proxy.example.test/openrind-gateway-proxy/t/TESTTOKEN"
+      mkdir -p /home/agent/.openclaw
+      node -e "
+        require(\"fs\").writeFileSync(\"/home/agent/.openclaw/openclaw.json\", JSON.stringify({
+          gateway:{mode:\"remote\",bind:\"auto\",remote:{url:\"ws://dead.invalid:18789\"},auth:{mode:\"token\",token:\"stale\"},tailscale:{mode:\"on\"}},
+          plugins:{allow:[\"nothing\"],deny:[\"user-chosen-deny\"]},
+          channels:{telegram:{enabled:true}}
+        }));
+      "
+      if node /opt/openrind-shell/openclaw-config.mjs --tier full >/dev/null 2>&1; then
+        echo "CHECK:openclaw-config-seed=ok"
+      else
+        echo "CHECK:openclaw-config-seed=FAIL"
+      fi
+      node -e "
+        const c=JSON.parse(require(\"fs\").readFileSync(\"/home/agent/.openclaw/openclaw.json\",\"utf8\"));
+        const g=c.gateway||{}, a=g.auth||{}, m=c.models||{}, p=m.providers||{};
+        const gw=p[\"openrind-gateway\"]||{};
+        console.log(\"CHECK:openclaw-config=\"+[
+          \"bind=\"+g.bind,
+          \"mode=\"+g.mode,
+          \"authmode=\"+a.mode,
+          \"remote=\"+(g.remote?\"PRESENT\":\"removed\"),
+          \"authtoken=\"+(a.token?\"PRESENT\":\"removed\"),
+          \"tailscale=\"+(g.tailscale?\"PRESENT\":\"removed\"),
+          \"pluginsallow=\"+(c.plugins&&c.plugins.allow?\"PRESENT\":\"removed\"),
+          \"userchannel=\"+(c.channels&&c.channels.telegram?\"preserved\":\"LOST\"),
+          \"apikey=\"+(JSON.stringify(c).indexOf(\"apiKey\")>=0?\"PRESENT\":\"absent\"),
+          \"modelsarray=\"+(Array.isArray(gw.models)?\"present\":\"MISSING\"),
+          \"acpxdenied=\"+(((c.plugins||{}).deny||[]).indexOf(\"acpx\")>=0?\"yes\":\"NO\"),
+          \"userdenykept=\"+(((c.plugins||{}).deny||[]).indexOf(\"user-chosen-deny\")>=0?\"yes\":\"LOST\"),
+          \"primary=\"+((c.agents&&c.agents.defaults&&c.agents.defaults.model||{}).primary||\"none\"),
+          \"baseurl=\"+(gw.baseUrl||\"none\")
+        ].join(\",\"));
+      "
+      # OpenClaw itself must accept what we wrote. An invalid config is the one
+      # failure mode with no degraded path (local mode does not bypass it either).
+      if timeout 150 openclaw config validate >/tmp/oc-validate.log 2>&1; then
+        echo "CHECK:openclaw-config-valid=ok"
+      else
+        echo "CHECK:openclaw-config-valid=FAIL"
+        head -20 /tmp/oc-validate.log 2>/dev/null || true
+      fi
     else
       # claude path: /.claude should exist
       echo "CHECK:agent-dirs-claude=$([ -d /home/agent/.claude ] && echo ok || echo FAIL)"
@@ -170,6 +222,32 @@ if [ "$AGENT" = "openclaw" ]; then
   check "openclaw: /.config dir created" "CHECK:agent-dirs-openclaw=ok"
   check "openclaw: /.claude absent"      "CHECK:claude-dir-absent=ok"
   check "openclaw: binary present"       "CHECK:openclaw-binary=ok"
+  check "openclaw: launcher shipped"     "CHECK:openclaw-launcher=ok"
+  check "openclaw: openclaw-launch shim" "CHECK:openclaw-launch-shim=ok"
+  check "openclaw: config seeded"        "CHECK:openclaw-config-seed=ok"
+  # gateway.bind MUST be loopback: the container default (auto -> 0.0.0.0) is
+  # what breaks device-pairing auto-approval and hangs the TUI on "connecting".
+  check "openclaw: bind pinned loopback" "bind=loopback"
+  check "openclaw: gateway.mode=local"   "mode=local"
+  check "openclaw: auth.mode=none"       "authmode=none"
+  check "openclaw: stale remote removed" "remote=removed"
+  check "openclaw: stale token removed"  "authtoken=removed"
+  check "openclaw: tailscale removed"    "tailscale=removed"
+  check "openclaw: plugins.allow removed" "pluginsallow=removed"
+  check "openclaw: user keys preserved"  "userchannel=preserved"
+  # The raw API key must never land in a file the workspace sync persists.
+  check "openclaw: no apiKey in config"  "apikey=absent"
+  # OpenClaw's schema requires a models array on every declared provider;
+  # omitting it fails validation and the gateway refuses to start (exit 78).
+  check "openclaw: provider models array" "modelsarray=present"
+  # acpx pulls a 2.5GB/95k-file dep tree that the TUI walks on startup, burning
+  # ~4 min at 100% CPU and showing "connecting" the whole time.
+  check "openclaw: acpx denied"          "acpxdenied=yes"
+  # ...but denying it must not clobber the user's own deny entries.
+  check "openclaw: user deny preserved"  "userdenykept=yes"
+  check "openclaw: primary uses provider" "primary=openrind-gateway/"
+  check "openclaw: proxy baseUrl set"    "baseurl=https://proxy.example.test/openrind-gateway-proxy/t/TESTTOKEN"
+  check "openclaw: config validates"     "CHECK:openclaw-config-valid=ok"
 else
   check "claude: /.claude dir created"   "CHECK:agent-dirs-claude=ok"
 fi

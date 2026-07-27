@@ -64,7 +64,14 @@ network_policies:
       - { host: raw.githubusercontent.com, port: 443 }
       - { host: platform.claude.com, port: 443 }
     binaries:
+      # Native binary baked into the OpenShell base image.
       - { path: /usr/local/bin/claude }
+      # setup.sh upgrades Claude Code to @latest into this agent-writable prefix
+      # and puts it ahead of the baked binary on PATH (the base image's copy is
+      # root-owned, so it can never be updated in place). npm ships the CLI as a
+      # JS entry point, so /usr/bin/node below already covers the common case —
+      # this path is listed for the release channels that install a real binary.
+      - { path: /opt/openrind-shell-claude/bin/claude }
       - { path: /usr/bin/node }
 
   # --- OpenClaw (Anthropic API) ---
