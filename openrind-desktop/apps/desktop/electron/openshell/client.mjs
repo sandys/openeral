@@ -86,6 +86,15 @@ export async function createSandbox(opts) {
   args.push("--", ...command);
 
   const child = wslSpawn(args);
+  // Close stdin immediately: this command sends no input, and the openshell CLI
+  // waits for stdin EOF before producing any output. Leaving the pipe open (as
+  // wslSpawn does by default, unlike wslRun) means the readiness line below
+  // never arrives and this promise only settles on the timeout.
+  try {
+    child.stdin?.end();
+  } catch {
+    /* already closed */
+  }
 
   return new Promise((resolve, reject) => {
     let settled = false;

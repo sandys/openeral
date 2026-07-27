@@ -62,9 +62,11 @@ const DEFAULT_PROBE_TIMEOUT_MS = 15_000;
 // On a fresh app start the WSL VM boots and the openshell gateway (systemd user
 // service / docker container) starts a few seconds LATER; until it is
 // listening, `openshell sandbox list` exits 1 with a transport "Connection
-// refused (os error 111)". listSandboxes() retries within this budget so the
-// sidebar/manager self-heal during warmup instead of surfacing that transient
-// error (which previously required a manual refresh). Override for slow hosts.
+// refused (os error 111)". Both listSandboxes() and sandboxExists() retry
+// within this budget so the sidebar/manager self-heal during warmup instead of
+// surfacing that transient error (which previously required a manual refresh),
+// and so a cold-start connect never mistakes it for "no such sandbox".
+// Measured: the gateway binds 2-4s after the distro boots. Override for slow hosts.
 const LIST_GATEWAY_WARMUP_MS = Number(
   process.env.OPENRIND_DESKTOP_LIST_WARMUP_MS || 20_000,
 );
@@ -118,10 +120,38 @@ export function imageForProfile(profile) {
  * @param {string} imageRef
  * @param {{ onProgress?: (text: string) => void, timeoutMs?: number }} [options]
  */
+/**
+ * wslSpawn for a command that sends NO input, with stdin closed immediately.
+ *
+ * This is not optional hygiene — it is load-bearing. `wslSpawn` opens stdin as a
+ * pipe and, unlike `wslRun` (which always calls `child.stdin.end()`), never
+ * closes it. `openshell sandbox exec` forwards stdin to the remote command and
+ * therefore waits for EOF that never arrives: it produces NO output and never
+ * issues its ExecSandbox RPC at all.
+ *
+ * Measured against a live sandbox:
+ *   stdin left open  -> no output ever, still hung when killed at 90s
+ *   stdin.end()      -> exit 0 in 0.3s, first byte at 0.2s
+ *
+ * That silently disabled the whole OpenClaw loading-screen prewarm (the gateway
+ * was never warmed, so every session paid the full bootstrap at connect) and the
+ * terminal's setup-log follower. Only the PTY transport legitimately keeps stdin
+ * open, which is why this is a helper rather than a change to wslSpawn itself.
+ */
+function wslSpawnNoStdin(args, options = {}) {
+  const child = wslSpawn(args, options);
+  try {
+    child.stdin?.end();
+  } catch {
+    /* already closed / never opened */
+  }
+  return child;
+}
+
 export async function pullImage(imageRef, options = {}) {
   const { onProgress, timeoutMs = DEFAULT_PULL_TIMEOUT_MS } = options;
   return new Promise((resolve, reject) => {
-    const child = wslSpawn([
+    const child = wslSpawnNoStdin([
       "-d",
       DISTRO_NAME,
       "--",
@@ -571,27 +601,56 @@ export async function sandboxExists(name) {
   // parseSandboxList to return null and the fallback text-includes check to
   // miss the sandbox name (the error message doesn't contain it).
   // `--names` outputs one sandbox name per line and is supported in 0.0.42.
+  //
+  // COLD START: on a fresh app launch the WSL VM boots and the openshell
+  // gateway binds its socket a few seconds later, so this exits 1 with a
+  // transport "Connection refused (os error 111)". Returning false there is the
+  // worst possible answer — it means "no such sandbox", so the caller tries to
+  // CREATE one that already exists and the user gets an error on the very first
+  // connect that succeeds as soon as they hit Retry. Retry the transient window
+  // exactly like listSandboxes() does, and never let a transport error be
+  // mistaken for an answer about the sandbox.
   let r;
-  try {
-    r = await wslRun(
-      [
-        "-d",
-        DISTRO_NAME,
-        "--",
-        "bash",
-        "-c",
-        "timeout 15 openshell sandbox list --names",
-      ],
-      { timeout: 25_000 },
-    );
-  } catch (err) {
-    // wslRun throws (never returns r) when its own timer fires.
-    // Map any timeout to the user-friendly gateway message so the
-    // renderer can show a clear call-to-action instead of a raw stack.
-    throw new Error(
-      "OpenShell gateway is not responding (sandbox list timed out). " +
-        "Restart the gateway from Settings \u2192 Sandbox \u2192 OpenShell health \u2192 Restart Gateway, " +
-        "then try again.",
+  const deadline = Date.now() + LIST_GATEWAY_WARMUP_MS;
+  for (let attempt = 0; ; attempt++) {
+    try {
+      r = await wslRun(
+        [
+          "-d",
+          DISTRO_NAME,
+          "--",
+          "bash",
+          "-c",
+          "timeout 15 openshell sandbox list --names",
+        ],
+        { timeout: 25_000 },
+      );
+    } catch (err) {
+      // wslRun throws (never returns r) when its own timer fires.
+      // Map any timeout to the user-friendly gateway message so the
+      // renderer can show a clear call-to-action instead of a raw stack.
+      throw new Error(
+        "OpenShell gateway is not responding (sandbox list timed out). " +
+          "Restart the gateway from Settings \u2192 Sandbox \u2192 OpenShell health \u2192 Restart Gateway, " +
+          "then try again.",
+      );
+    }
+    if (r.exitCode === 0) break;
+    const errText = (r.stderr || r.stdout).trim();
+    if (!isGatewayWarmingError(errText)) break;
+    if (Date.now() >= deadline) {
+      // Still refusing connections after the warm-up budget: this is a real
+      // outage, not "the sandbox does not exist". Say so, so the UI offers a
+      // retry instead of silently creating a duplicate.
+      throw new Error(
+        "OpenShell gateway is not accepting connections yet. " +
+          "It usually finishes starting a few seconds after the app opens — try again, " +
+          "or restart it from Settings \u2192 Sandbox \u2192 OpenShell health \u2192 Restart Gateway.",
+      );
+    }
+    // Backoff 500ms → 1s → 2s (capped) while the gateway finishes binding.
+    await new Promise((resolve) =>
+      setTimeout(resolve, Math.min(500 * 2 ** attempt, 2_000)),
     );
   }
   if (r.exitCode === 124) {
@@ -954,10 +1013,16 @@ async function ensureOpensshClient(onProgress) {
  *   1. Export the real ANTHROPIC_API_KEY (embedded + /sandbox/anthropic-api-key
  *      override), OPENRIND_GATEWAY_PROXY_URL (setup.sh's highest-priority presign
  *      source), and OPENRIND_SHELL_AGENT=openclaw for setup.sh's agent gate.
- *   2. Reconnect fast path: the gateway from a previous session survives PTY
- *      disconnects (setup.sh starts it with setsid). When /readyz is healthy,
- *      exec the TUI directly — mirrors setup.sh's own final exec.
- *   3. Otherwise kill any zombie gateway and `exec openrind-shell`.
+ *   2. `exec openrind-shell` — ALWAYS, with no /readyz fast path.
+ *
+ * Do NOT reintroduce a "gateway already healthy, so exec openclaw tui directly"
+ * shortcut here. It looks like a free win but it skips openclaw-launch.sh, and
+ * with it: the device-pairing auto-approval + background watchdog, the
+ * OPENCLAW_PLUGIN_STAGE_DIR scrub (leaking it to a client saturates the event
+ * loop), the deterministic config seed, and the local-mode fallback. Going
+ * through setup.sh costs almost nothing when the gateway is already up —
+ * openclaw-launch.sh returns immediately on a ready /readyz — and it keeps every
+ * one of those guarantees.
  *
  * History: an earlier version of this block wrote auth-profiles.json and
  * openclaw.json by hand and started the gateway itself. That failed three
@@ -966,10 +1031,9 @@ async function ensureOpensshClient(onProgress) {
  * config was backed up and overwritten by the gateway ("Config write anomaly:
  * missing-meta-before-write"), and the cold gateway had to stage all 35
  * bundled runtime deps at startup inside the network-restricted sandbox —
- * hanging /readyz past the 600 s budget ("gateway keeps crashing"). setup.sh
- * avoids all three by running `openclaw onboard` (schema-correct profile +
- * foreground plugin staging) BEFORE the gateway starts, and it also brings up
- * the openrind-shell runtime this block previously skipped entirely: DB migrations,
+ * hanging /readyz past the 600 s budget ("gateway keeps crashing"). All of that
+ * now lives in openclaw-launch.sh, which setup.sh execs; it also brings up the
+ * openrind-shell runtime this block previously skipped entirely: DB migrations,
  * workspace seeding, and the openrind-shell-bash daemon.
  *
  * @param {string} profile
@@ -1052,13 +1116,12 @@ function buildLaunchBlock(profile, proxyBase, apiKey = null) {
       "  exec openrind-shell",
     );
   } else {
-    // OpenClaw is now onboarded and launched INTERACTIVELY by the user (see the
-    // openclaw branch of setup.sh): there is no pre-warmed gateway to fast-path
-    // into and no hardcoded session binding. Always run the image bootstrap so
-    // persistence (DB migrations + workspace restore + the openrind-shell-bash
-    // sync daemon) comes up first; setup.sh then hands the user an interactive
-    // shell to run "openclaw onboard" / "openclaw" themselves, exactly like a
-    // normal local install.
+    // Always run the image bootstrap. setup.sh brings up persistence (DB
+    // migrations + workspace restore + the openrind-shell-bash sync daemon) and
+    // then execs openclaw-launch.sh, which owns the whole OpenClaw lifecycle:
+    // deterministic config seed, gateway, pairing approval, TUI, and the
+    // local-mode fallback. There is deliberately no fast path around it (see the
+    // buildLaunchBlock docblock).
     block.push("  exec openrind-shell");
   }
   block.push("fi", "# <<< openrind-desktop launch <<<");
@@ -1133,13 +1196,8 @@ async function configureAgentLaunch({
     blockContent,
     "OPENRIND_DESKTOP_LAUNCH_EOF",
   ];
-  if (isClaude && proxyBase) {
-    lines.push(
-      "mkdir -p /sandbox/.claude",
-      // proxyBase / token are passed as argv — never interpolated into the
-      // bash line or the inline JS source (shell-injection hardening).
-      `node -e 'const fs=require("fs");const f="/sandbox/.claude/settings.json";let s={};try{s=JSON.parse(fs.readFileSync(f,"utf8")||"{}")}catch(e){}s.env=Object.assign({},s.env,{ANTHROPIC_BASE_URL:process.argv[1],ANTHROPIC_AUTH_TOKEN:process.argv[2]});fs.writeFileSync(f,JSON.stringify(s,null,2))' ${shellQuote(proxyBase)} ${shellQuote(OPENRIND_GATEWAY_PLACEHOLDER_AUTH_TOKEN)} 2>/dev/null || true`,
-    );
+  if (isClaude) {
+    lines.push(...buildClaudeProjectSettingsLines({ proxyBase, apiKey }));
   }
 
   await wslRun(
@@ -1171,16 +1229,64 @@ async function configureAgentLaunch({
 }
 
 /**
+ * Commands that reconcile /sandbox/.claude/settings.json with the auth mode.
+ *
+ * That path is Claude Code's PROJECT settings file: Claude runs with cwd
+ * /sandbox, so it reads this file and applies its `env` block ON TOP of the
+ * process environment. That is why setup.sh's `env -u ANTHROPIC_AUTH_TOKEN` at
+ * exec could not prevent
+ *
+ *   "Auth conflict: Both a token (ANTHROPIC_AUTH_TOKEN) and an API key
+ *    (ANTHROPIC_API_KEY) are set. This may lead to unexpected behavior."
+ *
+ * — the token was coming from HERE, not from the environment. No amount of
+ * scrubbing at exec time can fix a value the settings file re-injects.
+ *
+ * Two rules:
+ *  1. The placeholder token exists for exactly ONE reason: to stop Claude Code
+ *     prompting for login when there is no API key. It is therefore written
+ *     only when there is no key, and deleted whenever there is one. setup.sh
+ *     applies the same rule to the user-level /home/agent/.claude/settings.json.
+ *  2. This runs even with NO proxy, on purpose. The file used to be written by
+ *     the proxy branch and never taken back down by the other, so a sandbox
+ *     that once had a presign kept injecting a stale base URL and token forever.
+ *
+ * Values travel as argv — never interpolated into the bash line or the inline
+ * JS source (shell-injection hardening).
+ *
+ * @param {{ proxyBase?: string|null, apiKey?: string|null }} args
+ * @returns {string[]} bash lines
+ */
+function buildClaudeProjectSettingsLines({ proxyBase, apiKey }) {
+  const token = proxyBase && !apiKey ? OPENRIND_GATEWAY_PLACEHOLDER_AUTH_TOKEN : "";
+  const js =
+    'const fs=require("fs");' +
+    'const f="/sandbox/.claude/settings.json";' +
+    "const base=process.argv[1],tok=process.argv[2];" +
+    'let s={};try{s=JSON.parse(fs.readFileSync(f,"utf8")||"{}")}catch(e){}' +
+    "s.env=Object.assign({},s.env);" +
+    "if(base)s.env.ANTHROPIC_BASE_URL=base;else delete s.env.ANTHROPIC_BASE_URL;" +
+    "if(tok)s.env.ANTHROPIC_AUTH_TOKEN=tok;else delete s.env.ANTHROPIC_AUTH_TOKEN;" +
+    "if(Object.keys(s.env).length===0)delete s.env;" +
+    "fs.writeFileSync(f,JSON.stringify(s,null,2))";
+  return [
+    "mkdir -p /sandbox/.claude",
+    `node -e ${shellQuote(js)} ${shellQuote(proxyBase || "")} ${shellQuote(token)} 2>/dev/null || true`,
+  ];
+}
+
+/**
  * Run the selected agent's runtime setup headlessly while the app is still
  * showing the sandbox-creation loading screen, so the user's terminal never
  * streams setup.sh output. setup.sh in OPENRIND_SHELL_SETUP_ONLY mode brings up
  * everything (DB migrations, workspace seed + restore, openrind-shell-bash sync
- * daemon, and — for OpenClaw — onboard + gateway + plugin/compile caches) and
- * exits without launching the agent.
+ * daemon, and — for OpenClaw — the seeded config + a ready gateway via
+ * openclaw-launch.sh) and exits without launching the agent.
  *
  * Runs for BOTH agents:
- *   - OpenClaw: leaves a healthy gateway running; the terminal's .bashrc fast
- *     path then sees it and execs the TUI directly, painting only the agent UI.
+ *   - OpenClaw: leaves a healthy gateway running, so the terminal's launch block
+ *     still goes through setup.sh but openclaw-launch.sh finds /readyz already
+ *     green and execs the TUI without waiting on a cold gateway boot.
  *   - Claude: has no long-lived gateway, so this is primarily a DRY RUN that
  *     CONNECTS TO DATABASE_URL here, on the loading screen. A bad/unreachable
  *     connection string surfaces as a visible error now (via onProgress),
@@ -1198,16 +1304,22 @@ async function configureAgentLaunch({
  * @param {{ name: string, profile: string, env: NodeJS.ProcessEnv,
  *           onProgress?: Function }} args
  */
-async function prewarmAgentRuntime({ name, profile, env, onProgress }) {
-  const isClaude = profile !== "openrind-shell-openclaw";
-  const agentLabel = isClaude ? "Openrind Shell" : "OpenClaw";
-  onProgress?.({
-    phase: "prewarm",
-    message: isClaude
-      ? "Preparing Openrind Shell runtime and connecting to the database…"
-      : "Preparing OpenClaw runtime (first run can take a few minutes)…",
-  });
-  const script = isClaude
+/**
+ * Build the setup-only bootstrap script for the loading-screen prewarm.
+ *
+ * MUST be POSIX sh. sandboxRunScriptCmd() pipes this into `sh`, which on this
+ * image is dash — so no arrays, no `[[`, and in particular no `${PIPESTATUS[0]}`.
+ * Getting that wrong is silent: dash prints "Bad substitution" to the log nobody
+ * reads and exits 2, so a perfectly healthy prewarm reported failure and the
+ * loading screen blamed DATABASE_URL. Exported via __testing so the constraint
+ * is enforced by a test rather than by memory.
+ *
+ * @param {{ isClaude: boolean }} args
+ * @returns {string}
+ */
+function buildPrewarmScript({ isClaude }) {
+  return (
+    isClaude
     ? [
         // Claude has no gateway to reuse and every setup.sh step (migrations,
         // workspace seed/restore, sync daemon) is idempotent, so just run the
@@ -1224,8 +1336,24 @@ async function prewarmAgentRuntime({ name, profile, env, onProgress }) {
         // reaches the loading screen via onProgress below.
         'if [ "$rc" -eq 0 ]; then tail -5 /tmp/openrind-shell-setup.log; else tail -30 /tmp/openrind-shell-setup.log; fi',
         'exit "$rc"',
-      ].join("\n")
+      ]
     : [
+        // First line out, so the overlay can distinguish "the sandbox has not
+        // accepted a command yet" from "setup.sh is working but slow". Until
+        // something prints, `openshell sandbox exec` may still be waiting on the
+        // container, and saying so is the difference between a status and a
+        // spinner.
+        "echo 'prewarm: sandbox reachable'",
+        // PREFLIGHT. An image without openclaw-launch.sh cannot prewarm at all:
+        // the OpenClaw flow (config seeding, bounded gateway boot, pairing
+        // approval) lives entirely in that script. Running the OpenClaw path
+        // against an image that predates it is what a "loading screen stuck for
+        // eight minutes" actually looks like from the outside, so detect it in
+        // ~0s and say so instead of waiting out the whole budget.
+        "if [ ! -f /opt/openrind-shell/openclaw-launch.sh ]; then",
+        "  echo 'prewarm: image is missing /opt/openrind-shell/openclaw-launch.sh'",
+        `  exit ${PREWARM_EXIT_IMAGE_TOO_OLD}`,
+        "fi",
         // Already warm (reopen / repeated finalize): nothing to do.
         "if curl -fsS http://127.0.0.1:18789/readyz >/dev/null 2>&1; then",
         "  echo prewarm: gateway already healthy",
@@ -1238,55 +1366,357 @@ async function prewarmAgentRuntime({ name, profile, env, onProgress }) {
         // anthropic-api-key, openrind-shell-input/presign.json) — written by create
         // and configureAgentLaunch before this runs.
         "export OPENRIND_SHELL_AGENT=openclaw OPENRIND_SHELL_SETUP_ONLY=1 HOME=/sandbox",
-        "openrind-shell > /tmp/openrind-shell-setup.log 2>&1",
-        "rc=$?",
-        "tail -5 /tmp/openrind-shell-setup.log",
-        'exit "$rc"',
-      ].join("\n");
-  await wslRun(
-    ["-d", DISTRO_NAME, "--", "bash", "-c", sandboxRunScriptCmd(name, script)],
-    { timeout: 600_000, env },
-  )
-    .then((r) => {
-      if (r.exitCode === 0) {
-        onProgress?.({
-          phase: "prewarm",
-          message: `${agentLabel} runtime ready.`,
-        });
-      } else {
-        // Non-fatal: the .bashrc launch block still re-runs setup.sh in the
-        // terminal, so the session can recover. But SURFACE the failure on the
-        // loading screen too — the whole point of prewarming Claude is that an
-        // unreachable DATABASE_URL must be visible, not silent.
-        const tail = (r.stdout || r.stderr || "").trim().slice(-1200);
-        onProgress?.({
-          phase: "prewarm",
-          message:
-            `${agentLabel} setup did not complete (exit ${r.exitCode}). ` +
-            `Persistence may be unavailable — check DATABASE_URL.` +
-            (tail ? `\n${tail}` : ""),
-        });
-        console.warn(
-          "[prewarmAgentRuntime] setup-only run exited non-zero (non-fatal):",
-          r.stdout?.slice(-500),
-          r.stderr?.slice(-500),
-        );
-      }
-    })
-    .catch((e) => {
-      console.warn(
-        "[prewarmAgentRuntime] prewarm failed (non-fatal):",
-        e.message,
+        // Tighten openclaw-launch.sh's own budgets for the PREWARM only. Its
+        // defaults (180s gateway readiness, 420s overall) are sized for the
+        // terminal, where the user can see what is happening; here they would
+        // hold a silent loading screen for seven minutes. A healthy gateway
+        // measures 6s to /readyz, so 120s is already 20x headroom, and 240s
+        // keeps the launcher's own degraded path INSIDE the 300s outer timeout
+        // so it reports why it gave up instead of being cut off mid-step.
+        "export OPENCLAW_GATEWAY_READY_TIMEOUT=\"${OPENCLAW_GATEWAY_READY_TIMEOUT:-120}\"",
+        "export OPENCLAW_LAUNCH_BUDGET=\"${OPENCLAW_LAUNCH_BUDGET:-240}\"",
+        // `tee` (not `>`) so the log still exists for diagnostics while we ALSO
+        // stream the lines out for live loading-screen progress.
+        //
+        // The exit code is smuggled through a file rather than read from
+        // ${PIPESTATUS[0]}: sandboxRunScriptCmd runs this with `sh`, and on a
+        // dash /bin/sh PIPESTATUS is not an array — it fails with
+        // "Bad substitution", so the prewarm reported a non-zero exit on every
+        // successful run and the loading screen accused a perfectly good
+        // DATABASE_URL of being unreachable.
+        "rc_file=/tmp/openrind-shell-setup.rc",
+        "rm -f \"$rc_file\"",
+        '{ openrind-shell 2>&1; echo $? >"$rc_file"; } | tee /tmp/openrind-shell-setup.log',
+        'exit "$(cat "$rc_file" 2>/dev/null || echo 1)"',
+      ]
+  ).join("\n");
+}
+
+async function prewarmAgentRuntime({ name, profile, env, onProgress }) {
+  const isClaude = profile !== "openrind-shell-openclaw";
+  const agentLabel = isClaude ? "Openrind Shell" : "OpenClaw";
+  // First paint, before any sandbox output exists to report. streamSetupProgress
+  // takes over within ~2s and keeps the "first run" hint on screen for as long as
+  // the status is still generic — do not rely on this line surviving.
+  onProgress?.({
+    phase: "prewarm",
+    message: isClaude
+      ? "Preparing the Openrind Shell runtime and connecting to the database (first run can take a few minutes)…"
+      : "Preparing the OpenClaw runtime (first run can take a few minutes)…",
+  });
+  const script = buildPrewarmScript({ isClaude });
+
+  const result = await streamSetupProgress({
+    name,
+    script,
+    env,
+    agentLabel,
+    onProgress,
+  });
+
+  if (result.exitCode === 0) return;
+
+  // A timeout already said its piece on the loading screen ("still running —
+  // opening the terminal"), and it is not evidence of a broken DATABASE_URL, so
+  // do not follow it with the misleading failure message below.
+  if (result.timedOut) {
+    console.warn(
+      "[prewarmAgentRuntime] handed over to the terminal before setup finished:",
+      result.output.slice(-500),
+    );
+    return;
+  }
+
+  // The sandbox image predates OpenClaw support entirely (see the preflight in
+  // the script above). Name the image and the override, because no amount of
+  // waiting fixes this and the terminal will fail the same way.
+  if (result.exitCode === PREWARM_EXIT_IMAGE_TOO_OLD) {
+    const imageRef = imageForProfile(profile);
+    const message =
+      `This sandbox image has no OpenClaw support: ${imageRef} is missing ` +
+      `openclaw-launch.sh. Build the image from sandboxes/openrind-shell/Dockerfile ` +
+      `and point the app at it with OPENRIND_DESKTOP_SANDBOX_IMAGE=<tag> ` +
+      `(plus OPENRIND_DESKTOP_SANDBOX_SKIP_PULL=1 for a local-only tag), or use the ` +
+      `Claude Code agent with this image.`;
+    onProgress?.({ phase: "prewarm", message });
+    console.warn(`[prewarmAgentRuntime] ${message}`);
+    return;
+  }
+
+  // Non-fatal: the .bashrc launch block still re-runs setup.sh in the terminal,
+  // so the session can recover. But SURFACE the failure on the loading screen
+  // too — the whole point of prewarming Claude is that an unreachable
+  // DATABASE_URL must be visible, not silent.
+  const tail = result.output.trim().slice(-1200);
+  onProgress?.({
+    phase: "prewarm",
+    message:
+      `${agentLabel} setup did not complete (exit ${result.exitCode}). ` +
+      `Persistence may be unavailable — check DATABASE_URL.` +
+      (tail ? `\n${tail}` : ""),
+  });
+  console.warn(
+    "[prewarmAgentRuntime] setup-only run exited non-zero (non-fatal):",
+    result.output.slice(-500),
+  );
+}
+
+// Distinct exit code for "this sandbox image predates OpenClaw support", so the
+// prewarm can tell an unusable image apart from a failed bootstrap. 65 is
+// sysexits.h EX_DATAERR; setup.sh never uses it.
+const PREWARM_EXIT_IMAGE_TOO_OLD = 65;
+
+/**
+ * Human-readable labels for the setup.sh / openclaw-launch.sh progress lines.
+ *
+ * Why this exists: the loading screen used to show ONE static message for the
+ * whole prewarm ("Preparing OpenClaw runtime (first run can take a few
+ * minutes)…") while setup.sh did 40-70s of real work behind it — DB migrations,
+ * a workspace restore of several hundred entries, a gateway boot. With nothing
+ * changing on screen it reads as a hang. Each entry below maps a line the
+ * sandbox actually prints to a short phrase worth showing a waiting user.
+ *
+ * Ordered: the FIRST match wins, so put specific patterns before generic ones.
+ */
+const SETUP_PROGRESS_LABELS = [
+  [/using external PostgreSQL at (\S+)/, (m) => `Connecting to PostgreSQL (${m[1]})…`],
+  [/running migrations, seeding/, () => "Running database migrations…"],
+  [/migrations complete/, () => "Migrations complete; seeding workspace…"],
+  [/workspace seeded/, () => "Workspace seeded; restoring files…"],
+  [/restored (\d+) workspace entr/, (m) => `Restored ${m[1]} workspace files…`],
+  [/flushing \/home\/agent/, () => "Saving workspace changes…"],
+  [/flushed (\d+) workspace entr/, (m) => `Saved ${m[1]} workspace files…`],
+  [/starting openrind-shell-bash daemon/, () => "Starting the file-sync daemon…"],
+  [/daemon ready/, () => "File-sync daemon ready…"],
+  [/loaded DATABASE_URL/, () => "Loaded database credentials…"],
+  [/creating a permanent OpenrindGateway presign/, () => "Creating the Openrind Gateway token…"],
+  [/presign stored/, () => "Openrind Gateway token ready…"],
+  [/writing OpenrindGateway proxy/, () => "Wiring the Openrind Gateway proxy…"],
+  [/seeding OpenClaw V8 compile cache|seeded V8 compile cache/, () => "Seeding the OpenClaw bytecode cache…"],
+  [/seeded plugin runtime deps/, () => "Seeding OpenClaw plugin dependencies…"],
+  [/config valid at tier=(\w+)/, (m) => `OpenClaw config validated (${m[1]})…`],
+  [/repairing OpenClaw configuration/, () => "Repairing the OpenClaw config…"],
+  [/starting gateway on/, () => "Starting the OpenClaw gateway…"],
+  [/waiting for the gateway to become ready \((\d+)s\/(\d+)s\)/, (m) => `Waiting for the OpenClaw gateway (${m[1]}s of up to ${m[2]}s)…`],
+  [/reusing already-ready gateway/, () => "Reusing the running OpenClaw gateway…"],
+  [/gateway ready after (\d+)s/, (m) => `OpenClaw gateway ready (${m[1]}s); verifying…`],
+  [/verifying the OpenClaw connection \(attempt (\d+) of (\d+)\)/, (m) => `Verifying the OpenClaw connection (attempt ${m[1]} of ${m[2]})…`],
+  [/verifying the OpenClaw connection|testing the gateway connection/, () => "Verifying the OpenClaw connection (usually ~30s)…"],
+  [/OpenClaw connection verified/, () => "OpenClaw connection verified…"],
+  [/approving pending device pairing/, () => "Approving device pairing…"],
+  [/gateway did not come up/, () => "Gateway slow to start; running one repair pass…"],
+  [/launching Claude Code/, () => "Starting Claude Code…"],
+  [/Claude CLI not found, installing/, () => "Installing the Claude CLI…"],
+  [/prewarm: sandbox reachable/, () => "Sandbox reachable; starting the runtime…"],
+  [/prewarm: gateway already healthy/, () => "OpenClaw gateway already running…"],
+  [/database connection failed: (.{0,70})/, (m) => `Database connection failed: ${m[1].trim()}`],
+  [/setup-only mode/, () => null], // internal bookkeeping, not user-facing
+];
+
+// Lines that mean setup.sh is about to hand the terminal to the agent, so the
+// log follower can stop.
+const SETUP_HANDOVER_RE =
+  /launching Claude Code|authenticated gateway round trip ok|mode=local|setup-only mode/;
+
+function labelForSetupLine(line) {
+  for (const [re, fmt] of SETUP_PROGRESS_LABELS) {
+    const m = re.exec(line);
+    if (m) return fmt(m);
+  }
+  return null;
+}
+
+// Lines that carry no information for a waiting user and must never become the
+// on-screen status, even as a raw fallback: shell tracing, blank lines, and the
+// progress bars / carriage-return spinners of tools setup.sh shells out to.
+const SETUP_NOISE_RE = /^(\+|\s*$|npm (WARN|notice)\b|\(node:\d+\)|##+|\[?\d+%\]?$)/;
+
+/**
+ * Last-resort status text for a line no label rule matched.
+ *
+ * Why this exists: the overlay used to fall back to ONE fixed string for the
+ * whole prewarm, so any step whose wording is not in SETUP_PROGRESS_LABELS —
+ * every future step, and everything an older sandbox image prints — presented as
+ * a frozen message with only a seconds counter moving. A user cannot tell that
+ * apart from a hang. Echoing the sandbox's own last line is worse-looking than a
+ * curated label but strictly more honest: it proves work is happening and names
+ * what is happening.
+ *
+ * @returns {string|null} display text, or null when the line is noise
+ */
+function rawSetupLine(line) {
+  // Strip ANSI so a coloured line cannot inject escapes into the overlay.
+  const text = line.replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, "").replace(/\r/g, "").trim();
+  if (!text || SETUP_NOISE_RE.test(text)) return null;
+  // Drop the script's own prefix; the overlay already says what is running.
+  const body = text
+    .replace(/^(setup(?:\.sh)?|openclaw(?:-launch)?|prewarm)\s*:\s*/i, "")
+    .trim();
+  if (!body) return null;
+  return body.length > 88 ? `${body.slice(0, 87)}…` : body;
+}
+
+/** Seconds as `42s` / `3m07s` — a bare `(469s)` reads as a stall, not progress. */
+function formatElapsed(totalSeconds) {
+  if (totalSeconds < 60) return `${totalSeconds}s`;
+  const minutes = Math.floor(totalSeconds / 60);
+  return `${minutes}m${String(totalSeconds % 60).padStart(2, "0")}s`;
+}
+
+/**
+ * Run the setup-only bootstrap and stream its progress to the loading screen.
+ *
+ * Uses wslSpawn rather than wslRun because wslRun only resolves once the whole
+ * command finishes, which is precisely the 40-70s of silence that made the
+ * loading screen look stuck. A heartbeat re-emits the current step with an
+ * elapsed counter, so the text keeps moving even across a genuinely quiet
+ * stretch (a slow remote PostgreSQL connect, say).
+ *
+ * Three rules learned from a report of a loading screen sitting at 469s:
+ *
+ *   1. The status must always name what is happening. A curated label is best,
+ *      the sandbox's own last line is the fallback, and the generic "Preparing
+ *      the <agent> runtime" is only for the window before any output arrives.
+ *   2. "First run can take a few minutes" has to STAY on screen while the status
+ *      is generic. It used to be emitted once by prewarmAgentRuntime and then
+ *      overwritten by the first heartbeat 4s later, so nobody ever saw it.
+ *   3. Silence must be reported as silence, and the wait must be bounded well
+ *      below the old 10 minutes. The prewarm is an optimisation: if it has not
+ *      finished, the user is better served by the terminal — where setup.sh's
+ *      output is visible — than by a spinner.
+ *
+ * Never throws: a failed prewarm is non-fatal (the terminal re-runs setup.sh).
+ *
+ * @returns {Promise<{ exitCode: number, output: string, timedOut: boolean }>}
+ */
+function streamSetupProgress({ name, script, env, agentLabel, onProgress }) {
+  // openclaw-launch.sh's own hard ceiling is OPENCLAW_LAUNCH_BUDGET (the prewarm
+  // script lowers it to 240s), and a healthy prewarm measures ~37s end to end.
+  // 300s leaves the launcher room to finish or degrade on its own terms while
+  // still capping the loading screen at five minutes instead of ten.
+  const TIMEOUT_MS = 300_000;
+  // 4s was slow enough that the elapsed counter itself looked stalled.
+  const HEARTBEAT_MS = 2_000;
+  // How long the sandbox may print nothing before the overlay admits it.
+  const QUIET_WARN_S = 40;
+  return new Promise((resolve) => {
+    let child;
+    try {
+      // stdin MUST be closed or `openshell sandbox exec` waits on it forever and
+      // this whole prewarm produces nothing — see wslSpawnNoStdin.
+      child = wslSpawnNoStdin(
+        ["-d", DISTRO_NAME, "--", "bash", "-c", sandboxRunScriptCmd(name, script)],
+        { env },
       );
+    } catch (e) {
+      console.warn("[prewarmAgentRuntime] spawn failed (non-fatal):", e.message);
+      resolve({ exitCode: 0, output: "", timedOut: false });
+      return;
+    }
+
+    const startedAt = Date.now();
+    let lastOutputAt = startedAt;
+    let output = "";
+    let pending = "";
+    /** Curated label from SETUP_PROGRESS_LABELS, or null before the first match. */
+    let step = null;
+    /** Sandbox's own last line, used when it is more recent than `step`. */
+    let rawStatus = null;
+    let settled = false;
+    let timedOut = false;
+
+    const elapsed = () => Math.round((Date.now() - startedAt) / 1000);
+    const emit = () => {
+      const total = elapsed();
+      const notes = [formatElapsed(total)];
+      // Keep the expectation-setting hint while the status is still generic —
+      // that is exactly the state a user reads as "stuck" — and bring it back
+      // once the wait is long enough to need reassuring regardless of status.
+      if (!step && !rawStatus) {
+        notes.push("first run can take a few minutes");
+      } else if (total >= 150) {
+        notes.push("still working; a first run can take several minutes");
+      }
+      const quiet = Math.round((Date.now() - lastOutputAt) / 1000);
+      if (quiet >= QUIET_WARN_S) notes.push(`no output for ${formatElapsed(quiet)}`);
+      // Before ANY output the honest status is the sandbox handshake, not the
+      // agent runtime: `openshell sandbox exec` can still be waiting on the
+      // container to accept a command, and a fresh image makes that wait real.
+      const head =
+        rawStatus ?? step ?? `Waiting for the sandbox to start the ${agentLabel} runtime`;
+      onProgress?.({ phase: "prewarm", message: `${head} (${notes.join(" · ")})` });
+    };
+
+    const heartbeat = setInterval(emit, HEARTBEAT_MS);
+    const timer = setTimeout(() => {
+      timedOut = true;
+      console.warn(
+        "[prewarmAgentRuntime] prewarm exceeded its budget; handing over to the terminal",
+      );
+      onProgress?.({
+        phase: "prewarm",
+        message:
+          `${agentLabel} setup is still running after ${formatElapsed(elapsed())} — ` +
+          `opening the terminal so you can watch it finish.`,
+      });
+      try {
+        child.kill();
+      } catch {
+        /* best effort */
+      }
+      // Settle HERE rather than waiting for 'close'. Killing wsl.exe does not
+      // reliably reap the process on the Linux side, so a timeout that only
+      // killed the child could leave this promise pending forever — the overlay
+      // then hangs past the very deadline it exists to enforce.
+      finish(124);
+    }, TIMEOUT_MS);
+
+    const onChunk = (chunk) => {
+      const text = chunk.toString("utf8");
+      output += text;
+      lastOutputAt = Date.now();
+      pending += text;
+      const lines = pending.split(/\r?\n/);
+      pending = lines.pop() ?? "";
+      for (const line of lines) {
+        const label = labelForSetupLine(line);
+        if (label) {
+          // A curated label supersedes whatever raw line preceded it.
+          step = label;
+          rawStatus = null;
+          emit();
+          continue;
+        }
+        const raw = rawSetupLine(line);
+        if (raw) {
+          rawStatus = raw;
+          emit();
+        }
+      }
+    };
+    child.stdout?.on("data", onChunk);
+    child.stderr?.on("data", onChunk);
+
+    const finish = (exitCode) => {
+      if (settled) return;
+      settled = true;
+      clearInterval(heartbeat);
+      clearTimeout(timer);
+      resolve({ exitCode, output, timedOut });
+    };
+    child.on("error", (e) => {
+      console.warn("[prewarmAgentRuntime] stream error (non-fatal):", e.message);
+      finish(0);
     });
+    child.on("close", (code) => finish(code ?? 0));
+  });
 }
 
 /**
  * Prewarm the agent runtime only when it actually saves the user time.
  *
- * OpenClaw NEEDS it: its embedded gateway must be warm before connect so the
- * .bashrc fast-path can exec the TUI directly instead of doing a ~3-minute cold
- * plugin-staging pass in the terminal. Claude does NOT: it has no long-lived
+ * OpenClaw NEEDS it: its gateway must be warm before connect so openclaw-launch.sh
+ * reuses a ready one instead of doing a cold gateway boot in the terminal. Claude does NOT: it has no long-lived
  * gateway, and its connect-time .bashrc runs the full setup.sh (DB migrations +
  * workspace restore + sync daemon) exactly once regardless. Prewarming Claude
  * would run that same slow bootstrap a SECOND time on the loading screen —
@@ -1610,6 +2040,7 @@ export async function createOpenrindShellSandbox(opts) {
         env: reopenEnv,
         onProgress,
       });
+      emitHandoverProgress(onProgress, name, profile, reopenEnv);
       return { name, profile, imageRef, existed: true };
     }
     // Fall through to create a fresh sandbox.
@@ -1809,6 +2240,16 @@ export async function createOpenrindShellSandbox(opts) {
         }
       }
     }
+    // The gateway went away between the existence probe and this create (it is
+    // restarted whenever the WSL distro cycles). Raw gRPC transport text tells
+    // the user nothing and makes a transient warm-up look like a broken app.
+    if (isGatewayWarmingError(output)) {
+      throw new Error(
+        `The OpenShell gateway stopped responding while creating ${name}. ` +
+          `This is usually a transient restart just after the app opens — try again. ` +
+          `If it persists, restart it from Settings \u2192 Sandbox \u2192 OpenShell health \u2192 Restart Gateway.`,
+      );
+    }
     const cli = await getCliInfo().catch(() => null);
     const versionTag = cli?.version ? ` [CLI ${cli.version}]` : "";
     throw new Error(
@@ -1861,8 +2302,98 @@ export async function createOpenrindShellSandbox(opts) {
   // Provisioning, which silently skipped these steps when they ran pre-Ready.
   await finalizeSandboxLaunch({ name, profile, env, onProgress });
   await prewarmIfNeeded({ name, profile, env, onProgress });
-  onProgress?.({ phase: "ready", message: `Sandbox ${name} ready.` });
+  emitHandoverProgress(onProgress, name, profile, env);
   return { name, profile, imageRef, existed: false };
+}
+
+/**
+ * Follow the sandbox's setup log and stream it to the loading screen while the
+ * TERMINAL-side bootstrap runs.
+ *
+ * Why this is separate from the prewarm: setup.sh runs a SECOND time when the PTY
+ * connects (that run is the one that establishes the live sync daemon), and it
+ * redirects its own stdout to /tmp/openrind-shell-setup.log to keep the agent's
+ * TUI clean. For Claude Code there is no prewarm at all (see prewarmIfNeeded), so
+ * without this the loading screen sits on one static message for the entire
+ * migrations + workspace-restore window and looks hung — which is exactly the
+ * complaint this addresses.
+ *
+ * `tail -n0 -F` so we only see lines from THIS run, not the appended history of
+ * previous ones. Entirely best-effort and bounded: it never blocks the caller,
+ * never throws, and kills itself at handover or after the cap.
+ */
+function followTerminalSetupLog({ name, env, onProgress }) {
+  const CAP_MS = 240_000;
+  let child;
+  try {
+    child = wslSpawnNoStdin(
+      [
+        "-d",
+        DISTRO_NAME,
+        "--",
+        "bash",
+        "-c",
+        `openshell sandbox exec --name ${shellQuote(name)} -- ` +
+          `sh -c ${shellQuote("tail -n0 -F /tmp/openrind-shell-setup.log 2>/dev/null")}`,
+      ],
+      { env },
+    );
+  } catch {
+    return; // no progress detail is not worth failing a launch over
+  }
+
+  let pending = "";
+  let done = false;
+  const stop = () => {
+    if (done) return;
+    done = true;
+    clearTimeout(cap);
+    try {
+      child.kill();
+    } catch {
+      /* best effort */
+    }
+  };
+  const cap = setTimeout(stop, CAP_MS);
+
+  child.stdout?.on("data", (chunk) => {
+    pending += chunk.toString("utf8");
+    const lines = pending.split(/\r?\n/);
+    pending = lines.pop() ?? "";
+    for (const line of lines) {
+      const label = labelForSetupLine(line);
+      if (label) onProgress?.({ phase: "starting", message: label });
+      if (SETUP_HANDOVER_RE.test(line)) {
+        // Give the agent's own first paint the last word.
+        setTimeout(stop, 1_000);
+      }
+    }
+  });
+  child.on("error", stop);
+  child.on("close", stop);
+}
+
+/**
+ * Last progress message before the caller connects the PTY.
+ *
+ * This used to be `Sandbox <name> ready.` — which was true of the SANDBOX but
+ * actively misleading as a loading-screen message: after it, the terminal still
+ * has to attach the PTY and the agent still has to boot and paint its first
+ * frame (tens of seconds for Claude Code, which is not prewarmed). Users read a
+ * static "ready" against a blank pane as a hang. Name the step that is actually
+ * in progress instead.
+ */
+function emitHandoverProgress(onProgress, name, profile, env) {
+  const agent =
+    profile === "openrind-shell-openclaw" ? "OpenClaw" : "Claude Code";
+  onProgress?.({
+    phase: "ready",
+    message: `Sandbox ${name} ready — starting ${agent}…`,
+  });
+  // The terminal-side setup.sh is about to run (the caller connects the PTY
+  // right after we return). Follow its log so the remaining wait reports real
+  // steps instead of freezing on the line above.
+  followTerminalSetupLog({ name, env, onProgress });
 }
 
 export async function deleteOpenrindShellSandbox(name) {
@@ -1947,6 +2478,14 @@ export async function probeDatabaseUrl({
 
 export const __testing = {
   IMAGE_BY_PROFILE,
+  labelForSetupLine,
+  rawSetupLine,
+  formatElapsed,
+  buildPrewarmScript,
+  buildClaudeProjectSettingsLines,
+  OPENRIND_GATEWAY_PLACEHOLDER_AUTH_TOKEN,
+  PREWARM_EXIT_IMAGE_TOO_OLD,
+  SETUP_HANDOVER_RE,
   buildWslEnvForwarding,
   shellQuote,
   createOpenrindGatewayPresign,
