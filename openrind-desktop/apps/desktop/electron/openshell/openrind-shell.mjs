@@ -1587,6 +1587,9 @@ function formatElapsed(totalSeconds) {
  *
  * Never throws: a failed prewarm is non-fatal (the terminal re-runs setup.sh).
  *
+ * `output` is only the most recent SETUP_OUTPUT_TAIL_BYTES of the run, prefixed
+ * with a truncation marker when anything was dropped.
+ *
  * @returns {Promise<{ exitCode: number, output: string, timedOut: boolean }>}
  */
 function streamSetupProgress({ name, script, env, agentLabel, onProgress }) {
@@ -1599,6 +1602,15 @@ function streamSetupProgress({ name, script, env, agentLabel, onProgress }) {
   const HEARTBEAT_MS = 2_000;
   // How long the sandbox may print nothing before the overlay admits it.
   const QUIET_WARN_S = 40;
+  // Cap on the DIAGNOSTIC buffer only. The prewarm gets a 300s budget, so a noisy
+  // or runaway setup.sh can emit output for five minutes straight, and every byte
+  // of it used to be retained in the Electron main process. Nothing needs that:
+  // the only readers slice the last 500-1200 chars, and a failure's cause is at
+  // the END of the log, so anything past this tail is dead weight. 64 KiB is ~50x
+  // the largest slice taken, which leaves plenty of context around a failure.
+  // (JS string length, not UTF-8 bytes — setup output is effectively ASCII.)
+  const SETUP_OUTPUT_TAIL_BYTES = 64 * 1024;
+  const SETUP_OUTPUT_TRUNCATION_MARKER = "…[truncated]\n";
   return new Promise((resolve) => {
     let child;
     try {
@@ -1617,6 +1629,8 @@ function streamSetupProgress({ name, script, env, agentLabel, onProgress }) {
     const startedAt = Date.now();
     let lastOutputAt = startedAt;
     let output = "";
+    /** Set once `output` has had anything dropped, so the marker cannot stack. */
+    let outputTruncated = false;
     let pending = "";
     /** Curated label from SETUP_PROGRESS_LABELS, or null before the first match. */
     let step = null;
@@ -1674,6 +1688,14 @@ function streamSetupProgress({ name, script, env, agentLabel, onProgress }) {
     const onChunk = (chunk) => {
       const text = chunk.toString("utf8");
       output += text;
+      // Drop from the FRONT: the tail holds the error that actually matters. The
+      // marker is NOT stored here (finish() prepends it) so repeated trims cannot
+      // stack markers, and `pending` below is deliberately left whole — the line
+      // parser must keep seeing every line exactly as before.
+      if (output.length > SETUP_OUTPUT_TAIL_BYTES) {
+        output = output.slice(-SETUP_OUTPUT_TAIL_BYTES);
+        outputTruncated = true;
+      }
       lastOutputAt = Date.now();
       pending += text;
       const lines = pending.split(/\r?\n/);
@@ -1702,7 +1724,11 @@ function streamSetupProgress({ name, script, env, agentLabel, onProgress }) {
       settled = true;
       clearInterval(heartbeat);
       clearTimeout(timer);
-      resolve({ exitCode, output, timedOut });
+      resolve({
+        exitCode,
+        output: outputTruncated ? `${SETUP_OUTPUT_TRUNCATION_MARKER}${output}` : output,
+        timedOut,
+      });
     };
     child.on("error", (e) => {
       console.warn("[prewarmAgentRuntime] stream error (non-fatal):", e.message);

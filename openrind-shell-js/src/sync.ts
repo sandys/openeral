@@ -61,11 +61,21 @@ export const HOME_SYNC_EXCLUDE_PATH_PREFIXES = [
   '/.openclaw/runtime',
   '/.openclaw/tmp',
   '/.openclaw/var',
-  // Sessions hold in-progress task state from the previous sandbox run. Persisting
-  // them causes OpenClaw to auto-resume those tasks on the next launch, blocking
-  // new user input for the entire duration. Memory-core data (agent knowledge) is
-  // kept on the sync path so the agent retains context across sessions.
-  '/.openclaw/sessions',
+  // Conversation transcripts. Persisting them makes every NEW sandbox restore
+  // the PREVIOUS sandbox's conversation and resume it, so the user opens a fresh
+  // sandbox and is greeted by a question they asked days ago.
+  //
+  // OpenClaw stores these PER AGENT at `.openclaw/agents/<agent>/sessions/`
+  // (`<id>.jsonl`, `<id>.trajectory.jsonl`, `<id>.jsonl.reset.<ts>`). It does NOT
+  // use `.openclaw/sessions` — that directory never exists, so the original
+  // literal exclusion matched nothing and every transcript synced anyway. The
+  // wildcard segment is what makes this actually match; see prefixMatches().
+  //
+  // Memory-core data (`/.openclaw/memory`, agent knowledge) is deliberately NOT
+  // excluded, so the agent still retains context across sandboxes — it is the
+  // verbatim transcript replay that is unwanted, not the memory.
+  '/.openclaw/agents/*/sessions',
+  '/.openclaw/sessions', // legacy/alternate layout — harmless if absent
 ];
 
 export interface SyncOptions {
@@ -115,9 +125,26 @@ function splitDbPath(path: string): string[] {
   return normalizeDbPath(path).split('/').filter(Boolean);
 }
 
+/**
+ * Does `path` sit at or below `prefix`?
+ *
+ * A `*` segment in the prefix matches exactly one path component. That is
+ * needed because OpenClaw namespaces per-agent state as
+ * `.openclaw/agents/<agent>/sessions`, so a literal prefix cannot express it.
+ */
+function prefixMatches(normalized: string, prefix: string): boolean {
+  if (!prefix.includes('*')) {
+    return normalized === prefix || normalized.startsWith(`${prefix}/`);
+  }
+  const want = splitDbPath(prefix);
+  const got = splitDbPath(normalized);
+  if (got.length < want.length) return false;
+  return want.every((segment, i) => segment === '*' || segment === got[i]);
+}
+
 function hasExcludedPrefix(path: string, prefixes: string[]): boolean {
   const normalized = normalizeDbPath(path);
-  return prefixes.some((prefix) => normalized === prefix || normalized.startsWith(`${prefix}/`));
+  return prefixes.some((prefix) => prefixMatches(normalized, prefix));
 }
 
 function shouldExcludePath(path: string, opts: ResolvedSyncOptions, isDir?: boolean): boolean {
@@ -133,6 +160,23 @@ function shouldExcludePath(path: string, opts: ResolvedSyncOptions, isDir?: bool
   }
 
   return false;
+}
+
+/**
+ * Is `path` excluded from the sync set?
+ *
+ * `path` is a DB-style absolute path relative to the synced root (e.g.
+ * `/.openclaw/agents/main/sessions/x.jsonl` for `/home/agent/...`). Exported so
+ * the exclusion set can be asserted directly — the previous `/.openclaw/sessions`
+ * entry silently matched nothing for months because nothing tested the paths
+ * OpenClaw actually writes.
+ */
+export function isExcludedFromSync(
+  path: string,
+  opts?: SyncOptions,
+  isDir?: boolean,
+): boolean {
+  return shouldExcludePath(path, normalizeSyncOptions(opts), isDir);
 }
 
 function normalizeSyncOptions(opts?: SyncOptions): ResolvedSyncOptions {

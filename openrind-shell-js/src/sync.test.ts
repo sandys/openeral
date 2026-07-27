@@ -2,9 +2,83 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import { isExcludedFromSync, createHomeSyncOptions } from './sync.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const syncSrc = readFileSync(join(__dirname, 'sync.ts'), 'utf8');
+
+// Paths captured from a live sandbox. OpenClaw namespaces session transcripts
+// per agent; there is no top-level `.openclaw/sessions` directory, which is why
+// the original literal exclusion never matched anything and every conversation
+// was persisted to PostgreSQL and restored into the next sandbox.
+describe('home sync excludes OpenClaw conversation transcripts', () => {
+  const home = createHomeSyncOptions();
+  const excluded = (p: string, isDir?: boolean) => isExcludedFromSync(p, home, isDir);
+
+  it('excludes the transcripts OpenClaw actually writes', () => {
+    const id = '21c54ca2-0126-4aa6-9cf1-90cb4b5c6236';
+    expect(excluded(`/.openclaw/agents/main/sessions/${id}.jsonl`)).toBe(true);
+    expect(excluded(`/.openclaw/agents/main/sessions/${id}.trajectory.jsonl`)).toBe(true);
+    expect(excluded(`/.openclaw/agents/main/sessions/${id}.jsonl.reset.2026-07-25T18-43-52.917Z`)).toBe(true);
+    expect(excluded('/.openclaw/agents/main/sessions', true)).toBe(true);
+  });
+
+  it('excludes transcripts for any agent name, not just "main"', () => {
+    expect(excluded('/.openclaw/agents/researcher/sessions/a.jsonl')).toBe(true);
+    expect(excluded('/.openclaw/agents/some-other-agent/sessions/b.jsonl')).toBe(true);
+  });
+
+  it('still keeps agent memory and config on the sync path', () => {
+    // The point is to stop transcript REPLAY, not to make the agent amnesiac.
+    expect(excluded('/.openclaw/memory/memory.sqlite')).toBe(false);
+    expect(excluded('/.openclaw/openclaw.json')).toBe(false);
+    expect(excluded('/.openclaw/agents/main/agent.json')).toBe(false);
+    expect(excluded('/.openclaw/agents', true)).toBe(false);
+  });
+
+  it('does not over-match: the wildcard is one segment and segment-aligned', () => {
+    // A user directory that merely happens to be called "sessions".
+    expect(excluded('/sessions/notes.md')).toBe(false);
+    expect(excluded('/projects/app/sessions/data.json')).toBe(false);
+    // Prefix matching must not treat "sessionsomething" as "sessions".
+    expect(excluded('/.openclaw/agents/main/sessionsomething.json')).toBe(false);
+    // The wildcard stands for exactly one segment.
+    expect(excluded('/.openclaw/agents/sessions/x.jsonl')).toBe(false);
+  });
+
+  it('leaves the existing literal exclusions working', () => {
+    expect(excluded('/.openclaw/logs/gateway.log')).toBe(true);
+    expect(excluded('/.openclaw/plugins/installs.json')).toBe(true);
+    expect(excluded('/.ssh/id_ed25519')).toBe(true);
+    expect(excluded('/.bash_history')).toBe(true);
+    expect(excluded('/node_modules/pkg/index.js')).toBe(true);
+  });
+
+  it('documents the original bug: the literal prefix matched nothing', () => {
+    // Exactly what the exclusion list used to contain. Against the path OpenClaw
+    // really writes it returns false — the rule was a no-op, which is why every
+    // conversation was persisted and replayed in the next sandbox.
+    const old = { excludePathPrefixes: ['/.openclaw/sessions'] };
+    expect(isExcludedFromSync('/.openclaw/agents/main/sessions/a.jsonl', old)).toBe(false);
+    // The corrected pattern does match it.
+    const fixed = { excludePathPrefixes: ['/.openclaw/agents/*/sessions'] };
+    expect(isExcludedFromSync('/.openclaw/agents/main/sessions/a.jsonl', fixed)).toBe(true);
+  });
+
+  it('excluded rows are pruned, so old transcripts clean themselves up', () => {
+    // syncFromFs adds only non-excluded paths to seenPaths and prune deletes
+    // every DB row not in seenPaths, so transcripts already stored by the old
+    // build are removed on the sync daemon's first pass (it uses prune: true).
+    expect(syncSrc).toContain('if (shouldExcludePath(dbPath, syncOpts, false)) continue;');
+    expect(syncSrc).toContain('!seenPaths.has(path)');
+  });
+
+  it('is inert for the default (non-home) sync options', () => {
+    // Only the home sync carries these prefixes; a plain workspace sync must be
+    // unaffected.
+    expect(isExcludedFromSync('/.openclaw/agents/main/sessions/a.jsonl')).toBe(false);
+  });
+});
 
 describe('sync.ts structural checks', () => {
   it('syncFromFs tracks seen paths for deletion', () => {

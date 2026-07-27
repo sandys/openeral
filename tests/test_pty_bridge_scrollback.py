@@ -10,6 +10,7 @@ importantly, everything it must NOT touch — are pinned here.
 No Docker, no PostgreSQL, no network. Run:  python3 tests/test_pty_bridge_scrollback.py
 """
 import importlib.util
+import os
 import sys
 from pathlib import Path
 
@@ -60,6 +61,9 @@ def check(label, got, want):
 
 def keeper(enabled=True):
     return bridge.ScrollbackKeeper(ROWS, enabled=enabled)
+
+
+CLEAR = b"\x1b[2J\x1b[H"
 
 
 print("\n--- ScrollbackKeeper: the rewrite ---")
@@ -114,6 +118,52 @@ for used in (0, 3, 999):
     if not out.endswith(b"\x1b[2J\x1b[H"):
         failures.append("blank-screen guarantee missing for used=%d: %r" % (used, out))
 check("every rewrite still ends with erase+home", True, True)
+
+print("\n--- ScrollbackKeeper: the rewrite budget ---")
+
+# Preserving EVERY clear is self-defeating. Only the first few have anything
+# above them worth saving (banner, launch log, a degraded-mode explanation);
+# every later full redraw repaints the same UI, so pushing it into the
+# scrollback evicts the very content the first rewrite saved. The realistic
+# trigger is a window drag, not token streaming: pi-tui takes the clearing
+# variant of its full redraw on every dimension change.
+k = keeper()
+budget = bridge.MAX_SCROLL_REWRITES
+check("the default budget is 4", budget, 4)
+check("every clear within budget is rewritten", [k.feed(CLEAR) for _ in range(budget)], [SCROLL] * budget)
+check("...and the counters agree", (k.scrolls, k.passthroughs), (budget, 0))
+check("the next clear is forwarded verbatim", k.feed(CLEAR), CLEAR)
+check("...and counted as a passthrough, not a scroll", (k.scrolls, k.passthroughs), (budget, 1))
+
+# Dropping ESC[3J is independent of the budget: erasing the USER's scrollback is
+# never required for the agent's own rendering to be correct.
+check("ESC[3J is still dropped past the budget", k.feed(PI_TUI_CLEAR), CLEAR)
+
+# The whole point: a resize storm must cost a fixed few bytes per clear rather
+# than a screenful of linefeeds each.
+k = bridge.ScrollbackKeeper(ROWS, max_rewrites=1)
+k.feed(CLEAR)
+storm = b"".join(k.feed(PI_TUI_CLEAR) for _ in range(200))
+check("200 later redraws push no linefeeds at all", storm.count(b"\n"), 0)
+check("...and emit exactly one plain clear each", storm, CLEAR * 200)
+check("...leaving the preserved frame the only one in scrollback", k.scrolls, 1)
+
+# 0 disables the rewrite entirely while keeping every other guarantee.
+k = bridge.ScrollbackKeeper(ROWS, max_rewrites=0)
+check("max_rewrites=0 rewrites nothing", k.feed(PI_TUI_CLEAR), CLEAR)
+check("...but still drops ESC[3J", k.drops, 1)
+
+# A malformed override must never silently change the budget.
+os.environ.pop(bridge.MAX_SCROLL_REWRITES_ENV, None)
+check("an unset override keeps the default", bridge._env_int(bridge.MAX_SCROLL_REWRITES_ENV, 4), 4)
+for bad in ("", " ", "abc", "-1", "4.5", "1e3"):
+    os.environ[bridge.MAX_SCROLL_REWRITES_ENV] = bad
+    if bridge._env_int(bridge.MAX_SCROLL_REWRITES_ENV, 4) != 4:
+        failures.append("bad override %r changed the budget" % bad)
+check("every malformed override keeps the default", True, True)
+os.environ[bridge.MAX_SCROLL_REWRITES_ENV] = "9"
+check("a valid override is honoured", bridge._env_int(bridge.MAX_SCROLL_REWRITES_ENV, 4), 9)
+os.environ.pop(bridge.MAX_SCROLL_REWRITES_ENV, None)
 
 print("\n--- ScrollbackKeeper: what must NOT change ---")
 

@@ -873,13 +873,27 @@ test("prewarmAgentRuntime (openclaw): runs setup.sh headlessly in setup-only mod
     /pkill -f 'openclaw gateway'/,
     "must clear zombie gateways before setup.sh binds the port",
   );
-  assert.match(script, /openrind-shell > \/tmp\/openrind-shell-setup\.log/);
+  // The openclaw prewarm streams for the loading screen instead of redirecting
+  // to a log, so it uses tee (the log still exists for diagnostics) and carries
+  // the exit code out through a file. NOT ${PIPESTATUS[0]}: sandboxRunScriptCmd
+  // pipes this into `sh`, where that is a "Bad substitution" and every healthy
+  // prewarm reported failure.
+  assert.match(
+    script,
+    /\| tee \/tmp\/openrind-shell-setup\.log/,
+    "must tee so the log survives while the lines stream to the overlay",
+  );
+  assert.match(
+    script,
+    /exit "\$\(cat "\$rc_file"/,
+    "must propagate setup.sh's real exit code out of the pipeline",
+  );
+  assert.doesNotMatch(script, /PIPESTATUS/, "PIPESTATUS is bash-only");
   assert.ok(
     progress.some((p) => p.phase === "prewarm"),
     "must surface loading-screen progress",
   );
 });
-
 test("prewarmAgentRuntime (openclaw): failure is non-fatal", async () => {
   process.env.MOCK_WSL_EXIT = "1";
   process.env.MOCK_WSL_STDERR = "setup exploded";

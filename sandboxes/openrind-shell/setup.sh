@@ -837,7 +837,17 @@ if [ "$OPENRIND_SHELL_AGENT" = "openclaw" ]; then
     # orphaned would strand /tmp/openrind-shell-bash.sock for the next run. The
     # gateway the launcher starts is unaffected — setsid already detached it, and
     # surviving the prewarm is the entire point.
-    bash "$OPENCLAW_LAUNCHER"
+    #
+    # Same credential scrub as the interactive handover below, and for a stronger
+    # reason: the gateway started here OUTLIVES this script, so anything left in
+    # the environment is inherited by a long-lived daemon and every plugin
+    # subprocess it spawns for the rest of the session. See the interactive path
+    # for why each of the three goes (ANTHROPIC_API_KEY deliberately stays).
+    env -u OPENRIND_GATEWAY_API_KEY -u ANTHROPIC_AUTH_TOKEN \
+      -u OPENCLAW_PLUGIN_STAGE_DIR \
+      HOME=/home/agent \
+      OPENRIND_SHELL_DIR="$OPENRIND_SHELL_DIR" \
+      bash "$OPENCLAW_LAUNCHER"
     exit 0
   fi
 

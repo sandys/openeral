@@ -235,6 +235,11 @@ network_policies:
         access: full
     binaries:
       - { path: /usr/local/bin/claude }
+      # Must mirror claude_code.binaries above: setup.sh puts this upgraded copy
+      # AHEAD of the baked binary on PATH, so it is the one that actually runs.
+      # Omitting it here meant the preferred executable was the only one that
+      # could not reach the gateway once OpenrindGateway was enabled.
+      - { path: /opt/openrind-shell-claude/bin/claude }
       - { path: /usr/bin/openclaw }
       - { path: /usr/local/bin/openclaw }
       - { path: /usr/bin/node }

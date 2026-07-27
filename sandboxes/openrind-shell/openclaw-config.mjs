@@ -57,13 +57,21 @@
  *
  * ENVIRONMENT
  *   OPENCLAW_CONFIG_PATH            config file to write (default $HOME/.openclaw/openclaw.json)
- *   OPENRIND_SHELL_OPENCLAW_PORT    gateway port (default 18789)
+ *   OPENRIND_SHELL_OPENCLAW_PORT    gateway port (default 18789; ignored unless an integer 1-65535)
  *   OPENRIND_SHELL_OPENCLAW_MODEL   agents.defaults.model.primary override
  *   OPENRIND_GATEWAY_PROXY_URL      normalized presign base URL (no /v1 suffix)
  *   OPENRIND_SHELL_OPENCLAW_WORKSPACE  agents.defaults.workspace override
  */
 
-import { existsSync, copyFileSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  existsSync,
+  copyFileSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  writeFileSync,
+} from 'node:fs';
 import { dirname, join } from 'node:path';
 
 const TIERS = ['full', 'core', 'minimal'];
@@ -86,7 +94,25 @@ if (!explicitConfig && !process.env.OPENCLAW_CONFIG_PATH && home !== '/home/agen
   );
   process.exit(2);
 }
-const port = Number(process.env.OPENRIND_SHELL_OPENCLAW_PORT || 18789) || 18789;
+// A bad port override must fall back, never propagate. This value is written into
+// gateway.port AND handed to `openclaw gateway run --port`, so a garbage one costs
+// more than it looks: `openclaw config validate` rejects the whole config, which
+// walks the launcher down to a needlessly degraded tier, or the gateway binds
+// something nobody probes while every client still talks to 18789 — i.e. the
+// "connecting" hang again, from a typo. `Infinity` is the case the old
+// `Number(x) || 18789` guard could not catch at all: it is truthy, so it passed
+// straight through, and JSON.stringify serializes it as `null`.
+const DEFAULT_PORT = 18789;
+const portOverride = (process.env.OPENRIND_SHELL_OPENCLAW_PORT || '').trim();
+const parsedPort = Number(portOverride);
+const portValid = Number.isInteger(parsedPort) && parsedPort >= 1 && parsedPort <= 65535;
+if (portOverride && !portValid) {
+  process.stderr.write(
+    `openclaw-config: ignoring OPENRIND_SHELL_OPENCLAW_PORT=${portOverride} ` +
+      `(want an integer 1-65535); using ${DEFAULT_PORT}\n`,
+  );
+}
+const port = portValid ? parsedPort : DEFAULT_PORT;
 // Derive sibling paths from the config file's own directory (the state dir) so
 // every path stays consistent when --config points somewhere else.
 const stateDir = dirname(configPath);
@@ -354,6 +380,17 @@ mkdirSync(dirname(configPath), { recursive: true });
 mkdirSync(dirname(logFile), { recursive: true });
 mkdirSync(workspace, { recursive: true });
 writeFileSync(configPath, `${JSON.stringify(merged, null, 2)}\n`, { mode: 0o600 });
+// writeFileSync's `mode` is only honoured when the file is CREATED. A config
+// restored from the workspace, or left by an older image that wrote it 0644, keeps
+// its group/world-readable bits forever otherwise — and this file carries the
+// Openrind Gateway presign proxy URL, which is itself a bearer credential. chmod
+// explicitly, but best effort: a filesystem that cannot chmod must not fail a
+// launch whose config is already correctly seeded.
+try {
+  chmodSync(configPath, 0o600);
+} catch {
+  /* best effort — tightening permissions is never worth aborting the launch */
+}
 
 const result = {
   ok: true,

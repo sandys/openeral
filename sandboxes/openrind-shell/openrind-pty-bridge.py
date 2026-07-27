@@ -165,14 +165,50 @@ HOLDBACK_FLUSH_S = 0.01
 # Env kill switch: set to 0 to stream the agent's bytes through verbatim.
 KEEP_SCROLLBACK_ENV = "OPENRIND_SHELL_PTY_KEEP_SCROLLBACK"
 
+# How many clears are rewritten before the pair is left alone.
+#
+# Everything this filter exists to protect — the banner, the launch log, a
+# degraded-mode explanation — is printed BEFORE the agent's TUI settles, so only
+# the first few clears have anything above them worth saving. Every later full
+# redraw repaints the SAME UI, and pushing each one into the scrollback is not
+# preservation but noise: it evicts the very content the first rewrite saved.
+#
+# The realistic trigger is a window resize, not token streaming. pi-tui takes the
+# clearing variant of its full redraw whenever the dimensions change, so dragging
+# the Openrind Desktop window emits one clear per resize event; unbudgeted, a few
+# seconds of dragging pushes hundreds of duplicate frames and the banner falls off
+# the end of xterm.js's scrollback.
+#
+# Past the budget the pair is forwarded verbatim, which is exactly what the agent
+# gets with no bridge at all: an in-place erase. Nothing is corrupted, the screen
+# state the agent asked for is identical either way, and the only difference is
+# that the outgoing frame is discarded instead of saved. 4 covers every
+# legitimate case with headroom (healthy launch uses 1; local-mode fallback uses
+# 2 — the launcher's own clear_screen() plus pi-tui's first render).
+#
+# ESC[3J is dropped regardless of this budget: erasing the user's scrollback is
+# never required for the agent's own rendering to be correct.
+MAX_SCROLL_REWRITES = 4
+MAX_SCROLL_REWRITES_ENV = "OPENRIND_SHELL_PTY_MAX_SCROLL_REWRITES"
+
+
+def _env_int(name, default):
+    """Non-negative integer from the environment; anything else keeps the
+    default. A bad value must never be able to disable the filter by accident."""
+    raw = os.environ.get(name, "").strip()
+    return int(raw) if raw.isdigit() else default
+
 
 class ScrollbackKeeper:
     """Stream filter over the agent's PTY output. See the comment above."""
 
-    def __init__(self, rows, enabled=True):
+    def __init__(self, rows, enabled=True, max_rewrites=MAX_SCROLL_REWRITES):
         self.enabled = enabled
         self.scrolls = 0
         self.drops = 0
+        # Clears forwarded untouched after the rewrite budget ran out.
+        self.passthroughs = 0
+        self._max_rewrites = max(0, int(max_rewrites))
         self._rows = max(1, int(rows))
         self._held = b""
         self._held_at = 0.0
@@ -245,16 +281,31 @@ class ScrollbackKeeper:
             out += data[index:esc]
             window = data[esc : esc + _REWRITE_WINDOW]
             if window.startswith(CLEAR_AND_HOME):
-                used = self._used_rows
-                out += self._scroll_out()
-                self.scrolls += 1
-                if self.scrolls == 1:
-                    log(
-                        "scrollback: rewrote agent full-screen clear "
-                        "(rows=%d, pushed=%d) — banner/launch log preserved"
-                        % (self._rows, min(used + 1, self._rows))
-                    )
                 index = esc + len(CLEAR_AND_HOME)
+                if self.scrolls < self._max_rewrites:
+                    used = self._used_rows
+                    out += self._scroll_out()
+                    self.scrolls += 1
+                    if self.scrolls == 1:
+                        log(
+                            "scrollback: rewrote agent full-screen clear "
+                            "(rows=%d, pushed=%d) — banner/launch log preserved"
+                            % (self._rows, min(used + 1, self._rows))
+                        )
+                    continue
+                # Budget spent: hand the agent's own clear straight through, the
+                # way an unbridged terminal would. Reset the row estimate anyway
+                # — the screen really is being cleared, so the drawn-rows count
+                # restarts regardless of who performs the erase.
+                self._used_rows = 0
+                self.passthroughs += 1
+                if self.passthroughs == 1:
+                    log(
+                        "scrollback: rewrite budget (%d) reached — later clears "
+                        "pass through so repeated redraws cannot evict the "
+                        "preserved banner/launch log" % self._max_rewrites
+                    )
+                out += CLEAR_AND_HOME
                 continue
             # Absolute cursor positioning tells us how far down the agent draws.
             if window.startswith(b"\x1b["):
@@ -630,6 +681,7 @@ def main():
         rows,
         enabled=os.environ.get(KEEP_SCROLLBACK_ENV, "1").strip().lower()
         not in ("0", "false", "no"),
+        max_rewrites=_env_int(MAX_SCROLL_REWRITES_ENV, MAX_SCROLL_REWRITES),
     )
 
     # os.openpty() opens /dev/ptmx (a symlink to /dev/pts/ptmx). The sandbox's

@@ -36,7 +36,34 @@ OPENRIND_SHELL_DIR="${OPENRIND_SHELL_DIR:-/opt/openrind-shell}"
 OPENCLAW_CONFIG_SEEDER="$OPENRIND_SHELL_DIR/openclaw-config.mjs"
 
 export HOME=/home/agent
-export OPENCLAW_PORT="${OPENRIND_SHELL_OPENCLAW_PORT:-18789}"
+
+# A bad port override must fall back, never propagate. This value is written into
+# gateway.port AND handed to `openclaw gateway run --port`, so a garbage one costs
+# more than it looks: the gateway binds a port the TUI is not looking at, which
+# presents as "stuck on connecting" with a perfectly healthy gateway.
+#
+# The clamp has to happen HERE rather than only in openclaw-config.mjs: the
+# re-export below is what the seeder reads, so clamping first means the seeder can
+# never see the raw value and the two can never disagree about the port. (The
+# seeder keeps its own equivalent check — it is also run standalone.)
+OPENCLAW_PORT_DEFAULT=18789
+OPENCLAW_PORT="${OPENRIND_SHELL_OPENCLAW_PORT:-$OPENCLAW_PORT_DEFAULT}"
+openclaw_port_ok() {
+  case "$1" in
+    '' | *[!0-9]*) return 1 ;;
+  esac
+  # Bound the digit count before the numeric compare so a 40-digit string cannot
+  # overflow the shell's integer parsing.
+  [ "${#1}" -le 5 ] || return 1
+  [ "$((10#$1))" -ge 1 ] && [ "$((10#$1))" -le 65535 ]
+}
+if ! openclaw_port_ok "$OPENCLAW_PORT"; then
+  printf 'openclaw-launch: ignoring OPENRIND_SHELL_OPENCLAW_PORT=%s (want an integer 1-65535); using %s\n' \
+    "$OPENCLAW_PORT" "$OPENCLAW_PORT_DEFAULT" >&2
+  OPENCLAW_PORT="$OPENCLAW_PORT_DEFAULT"
+fi
+OPENCLAW_PORT="$((10#$OPENCLAW_PORT))"
+export OPENCLAW_PORT
 export OPENRIND_SHELL_OPENCLAW_PORT="$OPENCLAW_PORT"
 
 OPENCLAW_STATE_DIR_DEFAULT="$HOME/.openclaw"
@@ -519,7 +546,11 @@ DIAG
 # ── Main ─────────────────────────────────────────────────────────────────────
 if ! command -v openclaw >/dev/null 2>&1; then
   warn "OpenClaw not found in image — falling back to a runtime install (slow)"
-  SHARP_IGNORE_GLOBAL_LIBVIPS=1 npm install -g --loglevel=error openclaw@latest >>"$LAUNCH_LOG" 2>&1
+  # Pinned to the same build as the Dockerfile. `@latest` here made the one path
+  # that actually needs reproducibility — an image that somehow shipped without
+  # OpenClaw — the only path that ignored the pin, and CLAUDE.md forbids anything
+  # below 2026.7.x (2026.4.29's acpx plugin wedges the TUI on "connecting").
+  SHARP_IGNORE_GLOBAL_LIBVIPS=1 npm install -g --loglevel=error openclaw@2026.7.1-2 >>"$LAUNCH_LOG" 2>&1
   if ! command -v openclaw >/dev/null 2>&1; then
     warn "ERROR: OpenClaw install failed; see $LAUNCH_LOG"
     exit 1
