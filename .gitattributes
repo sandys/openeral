@@ -1,0 +1,10 @@
+# Anything that executes inside the Linux sandbox container must be LF.
+#
+# build-image.sh runs `docker build ... .` against the WORKING TREE, so on a
+# Windows checkout with core.autocrlf=true the CRLF form is what gets baked into
+# the image. A CRLF shebang fails with "/bin/bash^M: bad interpreter" and a CRLF
+# `set -uo pipefail` is a syntax error — both surface as an unexplained sandbox
+# start failure rather than anything pointing at line endings.
+*.sh            text eol=lf
+sandboxes/**    text eol=lf
+tests/**        text eol=lf
