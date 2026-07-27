@@ -586,16 +586,68 @@ export function OpenrindShellTerminal(props: OpenrindShellTerminalProps) {
       });
     };
 
+    // Every STREAMING chunk reaches xterm through here, so the accounting can't
+    // be bypassed: count the chunk as in-flight until xterm's write callback
+    // confirms it has been PARSED (not merely queued), then re-check the low
+    // water mark.
+    //
+    // The one deliberate exception is the buffered-replay write on the attach
+    // path. It is fully awaited before anything else proceeds, so it cannot
+    // grow the queue the way live data can, and it runs after sessionIdRef is
+    // set but before openrindPtyAttach — counting it would fire a pause/resume
+    // pair at a session that is not streaming yet.
+    const writeCounted = (
+      term: TerminalType,
+      data: string,
+      onParsed?: () => void,
+    ) => {
+      unprocessedRef.current += data.length;
+      term.write(data, () => {
+        unprocessedRef.current -= data.length;
+        maybeResumeFlow();
+        onParsed?.();
+      });
+      maybePauseFlow();
+    };
+
+    // Drain the chunks that arrived before xterm existed.
+    //
+    // These have to go through writeCounted like live data does. Writing them
+    // straight to term.write() left a pre-ready burst — which is exactly when
+    // the biggest one arrives, the agent's first full-screen paint plus any
+    // replayed buffer — parsed with no backpressure at all, recreating the lag
+    // the flow control exists to remove.
+    //
+    // Paint bytes are deliberately NOT re-counted: writeToTerm already counted
+    // them when the chunk was buffered, and counting again would double every
+    // pre-ready byte and trip the agent-ready heuristic early.
+    //
+    // Resolves once every flushed chunk has been parsed, so callers that resize
+    // afterwards don't re-wrap a replay that is still queued (same reason the
+    // buffered-replay write above is awaited).
+    const flushEarlyBuffer = (term: TerminalType) => {
+      const chunks = earlyBufferRef.current;
+      if (chunks.length === 0) return Promise.resolve();
+      // Take the chunks and swap in a fresh array. Nothing can interleave
+      // between the two (single-threaded), so no chunk is dropped or written
+      // twice, and anything that arrives during the flush goes straight to the
+      // terminal (callers set termRef first) and lands after these in xterm's
+      // FIFO write queue.
+      earlyBufferRef.current = [];
+      return new Promise<void>((resolve) => {
+        let pending = chunks.length;
+        for (const chunk of chunks) {
+          writeCounted(term, chunk, () => {
+            pending -= 1;
+            if (pending === 0) resolve();
+          });
+        }
+      });
+    };
+
     const writeToTerm = (data: string) => {
       if (termRef.current) {
-        // Count the chunk as in-flight until xterm's write callback confirms it
-        // has been PARSED (not merely queued), then re-check the low water mark.
-        unprocessedRef.current += data.length;
-        termRef.current.write(data, () => {
-          unprocessedRef.current -= data.length;
-          maybeResumeFlow();
-        });
-        maybePauseFlow();
+        writeCounted(termRef.current, data);
       } else {
         earlyBufferRef.current.push(data);
       }
@@ -897,11 +949,10 @@ export function OpenrindShellTerminal(props: OpenrindShellTerminalProps) {
         termRef.current = term;
         fitRef.current = fit;
 
-        // Flush any bytes that arrived during mount.
-        if (earlyBufferRef.current.length > 0) {
-          for (const chunk of earlyBufferRef.current) term.write(chunk);
-          earlyBufferRef.current = [];
-        }
+        // Flush any bytes that arrived during mount. Awaited so the parser has
+        // caught up before the ResizeObserver / fit() below can re-wrap them.
+        await flushEarlyBuffer(term);
+        if (cancelled) return;
 
         // ── Key fix for the cols=1 / vertical-text bug ──────────────────
         // Set up the ResizeObserver NOW, before the PTY is opened.
@@ -1052,10 +1103,10 @@ export function OpenrindShellTerminal(props: OpenrindShellTerminalProps) {
             );
           }
           if (cancelled) return;
-          if (earlyBufferRef.current.length > 0) {
-            for (const chunk of earlyBufferRef.current) term.write(chunk);
-            earlyBufferRef.current = [];
-          }
+          // Same await rationale as the replay above: the fit() further down
+          // must not resize while these are still queued.
+          await flushEarlyBuffer(term);
+          if (cancelled) return;
           // Phase 2: wire live PTY streaming now that sessionIdRef is set.
           if (!attached.exited) {
             await invoke("openrindPtyAttach", attached.id);
@@ -1107,11 +1158,11 @@ export function OpenrindShellTerminal(props: OpenrindShellTerminalProps) {
           return;
         }
         sessionIdRef.current = pty.id;
-        // Flush any bytes that queued between open and this point.
-        if (earlyBufferRef.current.length > 0) {
-          for (const chunk of earlyBufferRef.current) term.write(chunk);
-          earlyBufferRef.current = [];
-        }
+        // Flush any bytes that queued between open and this point. sessionIdRef
+        // is set first so a flush big enough to cross the high water mark can
+        // actually issue the pause — maybePauseFlow() needs the session id.
+        await flushEarlyBuffer(term);
+        if (cancelled) return;
         wireTerminalIO();
         // Keep the bootstrap overlay up until the agent actually paints its UI.
         // setup.sh's DB restore/flush runs silently and the agent then
