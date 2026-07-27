@@ -18,7 +18,7 @@ const pty = await import("../../electron/openshell/openrind-shell-pty.mjs");
 function makeFakePty() {
   let dataHandler = null;
   let exitHandler = null;
-  const events = { writes: [], resizes: [], kills: [] };
+  const events = { writes: [], resizes: [], kills: [], flow: [] };
   const fake = {
     pid: 12_345,
     write(data) {
@@ -29,6 +29,12 @@ function makeFakePty() {
     },
     kill(signal) {
       events.kills.push(signal ?? null);
+    },
+    pause() {
+      events.flow.push("pause");
+    },
+    resume() {
+      events.flow.push("resume");
     },
     onData(handler) {
       dataHandler = handler;
@@ -292,6 +298,125 @@ test("buffer cap: evicts oldest output, retains the tail, stays within the byte 
   );
   assert.ok(buffered.includes("ENDMARKER"), "retains the newest output");
   assert.ok(!buffered.includes("START"), "evicts the oldest output");
+});
+
+// ── raw stream capture (diagnostics) ────────────────────────────────────
+
+test("getBufferBytes: returns the byte-exact stream, not a decoded round-trip", async () => {
+  const { id } = await pty.openSession({ sandboxName: "x" });
+  // A lone 0x80 is invalid UTF-8. Decoding would replace it with U+FFFD and
+  // re-encoding that is 3 different bytes — so a decoded round-trip could not
+  // reproduce this stream. The raw accessor must hand back the original bytes.
+  activeFake.emit(new Uint8Array([0x1b, 0x5b, 0x41, 0x80]));
+  assert.deepEqual(
+    Array.from(pty.getBufferBytes(id)),
+    [0x1b, 0x5b, 0x41, 0x80],
+  );
+});
+
+test("getBufferBytes: returns null for an unknown session", () => {
+  assert.equal(pty.getBufferBytes("not-a-real-id"), null);
+});
+
+test("getBufferRecording: chunk payloads concatenate to the merged decode", async () => {
+  const { id } = await pty.openSession({ sandboxName: "x", cols: 90, rows: 25 });
+  // Split "é" (0xC3 0xA9) across two chunks. A per-chunk decode would emit
+  // U+FFFD twice — i.e. fabricate the corruption the dump exists to diagnose.
+  activeFake.emit(new Uint8Array([0xc3]));
+  activeFake.emit(new Uint8Array([0xa9]));
+  activeFake.emit("!");
+  const rec = pty.getBufferRecording(id);
+  assert.equal(rec.cols, 90);
+  assert.equal(rec.rows, 25);
+  assert.equal(rec.sandboxName, "x");
+  assert.equal(
+    rec.chunks.map((c) => c.data).join(""),
+    "é!",
+    "streaming decode across chunks reproduces the merged decode",
+  );
+  assert.ok(
+    rec.chunks.every((c) => Number.isFinite(c.t) && c.t >= 0),
+    "every chunk carries a finite, non-negative timestamp",
+  );
+});
+
+test("getBufferRecording: timestamps stay parallel to the buffer after eviction", async () => {
+  const { id } = await pty.openSession({ sandboxName: "x" });
+  activeFake.emit("START" + "a".repeat(400_000));
+  activeFake.emit("b".repeat(400_000)); // pushes total over the cap
+  activeFake.emit("ENDMARKER");
+  const rec = pty.getBufferRecording(id);
+  // The eviction must shift buffer and bufferTimes in lockstep, or every
+  // surviving chunk would be stamped with an older chunk's arrival time.
+  assert.equal(
+    rec.chunks.length,
+    2,
+    "one chunk evicted, two retained",
+  );
+  assert.equal(rec.chunks.map((c) => c.data).join(""), pty.getBuffer(id));
+});
+
+test("getBufferRecording: returns null for an unknown session", () => {
+  assert.equal(pty.getBufferRecording("not-a-real-id"), null);
+});
+
+// ── flow control (renderer backpressure) ───────────────────────────────
+
+test("pauseSession/resumeSession: throttle the transport, idempotently", async () => {
+  const { id } = await pty.openSession({ sandboxName: "x" });
+  assert.equal(pty.pauseSession(id), true);
+  assert.equal(pty.pauseSession(id), false, "second pause is a no-op");
+  assert.equal(pty.listSessions()[0].paused, true);
+  assert.equal(pty.resumeSession(id), true);
+  assert.equal(pty.resumeSession(id), false, "second resume is a no-op");
+  assert.equal(pty.listSessions()[0].paused, false);
+  assert.deepEqual(activeFake.events.flow, ["pause", "resume"]);
+});
+
+test("pauseSession: no-op on an exited session and on an unknown id", async () => {
+  const { id } = await pty.openSession({ sandboxName: "x" });
+  activeFake.exit(0);
+  assert.equal(pty.pauseSession(id), false);
+  assert.equal(pty.pauseSession("not-a-real-id"), false);
+  assert.deepEqual(activeFake.events.flow, []);
+});
+
+test("detachSession: resumes a paused session so the agent is never left blocked", async () => {
+  const { id } = await pty.openSession({ sandboxName: "x" });
+  pty.pauseSession(id);
+  pty.detachSession(id);
+  // The renderer that applied the backpressure is gone, so nothing would ever
+  // call resumeSession() — detach must release it or the agent stays blocked
+  // on write for the whole time the user is away.
+  assert.equal(pty.listSessions()[0].paused, false);
+  assert.deepEqual(activeFake.events.flow, ["pause", "resume"]);
+});
+
+test("attachHandlers: resumes flow so a fresh renderer starts unthrottled", async () => {
+  const { id } = await pty.openSession({ sandboxName: "x" });
+  pty.pauseSession(id);
+  pty.attachHandlers(id, { onData: () => {} });
+  assert.equal(pty.listSessions()[0].paused, false);
+});
+
+test("pause/resume: tolerates a transport without pause() (legacy stubs)", async () => {
+  // IPtyLike.pause/resume are optional, so a spawn impl that predates flow
+  // control must still bookkeep correctly rather than throw.
+  pty.__testing.installSpawnImpl(async () => ({
+    pid: 1,
+    write() {},
+    resize() {},
+    kill() {},
+    onData() {
+      return { dispose() {} };
+    },
+    onExit() {
+      return { dispose() {} };
+    },
+  }));
+  const { id } = await pty.openSession({ sandboxName: "x" });
+  assert.equal(pty.pauseSession(id), true);
+  assert.equal(pty.resumeSession(id), true);
 });
 
 // ── findSessionBySandbox ────────────────────────────────────────────────

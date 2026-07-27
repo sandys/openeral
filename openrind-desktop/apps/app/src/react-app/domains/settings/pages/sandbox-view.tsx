@@ -2,9 +2,8 @@
 
 import { AlertTriangle, CheckCircle2, CircleDashed, Loader2, RefreshCcw, XCircle } from "lucide-react";
 
-import type { SandboxBackend, SandboxProfile } from "../../../../app/lib/desktop";
+import type { SandboxBackend } from "../../../../app/lib/desktop";
 import { Button } from "../../../design-system/button";
-import type { VoiceProvider } from "../../session/surface/composer/voice/config";
 import type {
   OpenShellComponent,
   OpenShellDoctorResult,
@@ -45,62 +44,23 @@ const BACKEND_OPTIONS: BackendOption[] = [
   },
 ];
 
-type ProfileOption = {
-  value: SandboxProfile;
-  label: string;
-  summary: string;
-};
+// NOTE: there is deliberately no launch-profile selector and no voice-engine
+// selector here.
+//
+// Launch profile: workspaces are always the chat experience — createWorkspace
+// coerces any openrind-shell-* profile back to "openrind-desktop" (see
+// handleLocalSubmit in create-workspace-modal.tsx), and Openrind Shell sandboxes
+// are created from the sandbox manager, which carries its own Claude Code /
+// OpenClaw picker. A radio group here changed a value nothing acted on.
+//
+// Voice engine: the mic button renders VoiceEngineMenu next to itself in both
+// the chat composer and the Openrind Shell terminal, writing the same
+// `voiceProvider` preference. Switching engines belongs at the point of use.
 
-const PROFILE_OPTIONS: ProfileOption[] = [
-  {
-    value: "openrind-desktop",
-    label: "Openrind Desktop (default)",
-    summary: "Bundled image with OpenCode. Rich chat UI in Openrind Desktop.",
-  },
-  {
-    value: "openrind-shell-claude",
-    label: "Openrind Shell — Claude Code",
-    summary:
-      "ghcr.io/openrind/openrind-shell image with Claude Code as the agent. Workspace persists via PostgreSQL. Requires DATABASE_URL configured below.",
-  },
-  {
-    value: "openrind-shell-openclaw",
-    label: "Openrind Shell — OpenClaw",
-    summary:
-      "Same Openrind Shell image, OpenClaw as the agent. Also requires ANTHROPIC_API_KEY to be configured below.",
-  },
-];
-
-type VoiceEngineOption = {
-  value: VoiceProvider;
-  label: string;
-  summary: string;
-  badge?: string;
-};
-
-const VOICE_ENGINE_OPTIONS: VoiceEngineOption[] = [
-  {
-    value: "whisper",
-    label: "On-device (Whisper)",
-    summary:
-      "Runs locally via Hugging Face Transformers.js. Audio never leaves your machine. Downloads a small model on first use.",
-    badge: "Default",
-  },
-  {
-    value: "elevenlabs",
-    label: "ElevenLabs (cloud)",
-    summary:
-      "Sends recorded audio to the ElevenLabs Scribe API for higher-accuracy transcription. Requires an API key.",
-  },
-];
 
 export type SandboxViewProps = {
   selectedBackend: SandboxBackend;
   onSelectBackend: (next: SandboxBackend) => void;
-  selectedProfile: SandboxProfile;
-  onSelectProfile: (next: SandboxProfile) => void;
-  voiceProvider: VoiceProvider;
-  onSelectVoiceProvider: (next: VoiceProvider) => void;
   doctor: OpenShellDoctorResult | null;
   doctorLoading: boolean;
   doctorError: string | null;
@@ -234,99 +194,6 @@ export function SandboxView(props: SandboxViewProps) {
           })}
         </div>
       </div>
-
-      <div className={`${settingsPanelClass} space-y-3`}>
-        <div>
-          <div className="text-sm font-medium text-gray-12">Voice input (speech-to-text)</div>
-          <div className="text-xs text-gray-10">
-            Engine used by the microphone button in the Openrind Shell terminal and the chat composer.
-          </div>
-        </div>
-        <div className="grid gap-2">
-          {VOICE_ENGINE_OPTIONS.map((option) => {
-            const checked = props.voiceProvider === option.value;
-            return (
-              <label
-                key={option.value}
-                className={`flex cursor-pointer items-start gap-3 rounded-2xl border p-3 transition-colors ${
-                  checked
-                    ? "border-dls-text/70 bg-gray-3/50"
-                    : "border-dls-border bg-dls-surface hover:bg-gray-2/30"
-                }`}
-              >
-                <input
-                  type="radio"
-                  name="voice-engine"
-                  className="mt-1"
-                  value={option.value}
-                  checked={checked}
-                  onChange={() => props.onSelectVoiceProvider(option.value)}
-                />
-                <div className="space-y-0.5">
-                  <div className="flex items-center gap-2">
-                    <span className="text-sm font-medium text-gray-12">{option.label}</span>
-                    {option.badge ? (
-                      <span className="rounded-full border border-green-7/60 bg-green-3/30 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wider text-green-12">
-                        {option.badge}
-                      </span>
-                    ) : null}
-                  </div>
-                  <div className="text-xs text-gray-10">{option.summary}</div>
-                </div>
-              </label>
-            );
-          })}
-        </div>
-        {props.voiceProvider === "elevenlabs" ? null : (
-          <div className="rounded-xl border border-dls-border bg-gray-2/30 p-3 text-xs text-gray-10">
-            Runs fully on-device. No API key needed and audio never leaves your machine.
-          </div>
-        )}
-      </div>
-
-      {showOpenShellPanel ? (
-        <div className={`${settingsPanelClass} space-y-3`}>
-          <div>
-            <div className="text-sm font-medium text-gray-12">OpenShell launch profile</div>
-            <div className="text-xs text-gray-10">
-              Picks which agent + image runs inside the OpenShell sandbox. Default workspaces use
-              the Openrind Desktop image. Openrind Shell profiles boot from the published image at{" "}
-              <code className="rounded bg-gray-2/40 px-1 py-0.5 text-[11px]">
-                ghcr.io/openrind/openrindShell/sandbox:just-bash
-              </code>{" "}
-              and require credentials configured below.
-            </div>
-          </div>
-          <div className="grid gap-2">
-            {PROFILE_OPTIONS.map((option) => {
-              const checked = props.selectedProfile === option.value;
-              return (
-                <label
-                  key={option.value}
-                  className={`flex cursor-pointer items-start gap-3 rounded-2xl border p-3 transition-colors ${
-                    checked
-                      ? "border-dls-text/70 bg-gray-3/50"
-                      : "border-dls-border bg-dls-surface hover:bg-gray-2/30"
-                  }`}
-                >
-                  <input
-                    type="radio"
-                    name="sandbox-profile"
-                    className="mt-1"
-                    value={option.value}
-                    checked={checked}
-                    onChange={() => props.onSelectProfile(option.value)}
-                  />
-                  <div className="space-y-0.5">
-                    <div className="text-sm font-medium text-gray-12">{option.label}</div>
-                    <div className="text-xs text-gray-10">{option.summary}</div>
-                  </div>
-                </label>
-              );
-            })}
-          </div>
-        </div>
-      ) : null}
 
       {showOpenShellPanel ? (
         <div className={`${settingsPanelClass} space-y-4`}>

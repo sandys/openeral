@@ -60,37 +60,36 @@ Openrind Shell needs two credentials at session start:
 Open **Settings → Sandbox**:
 
 - Pick **OpenShell** as the sandbox backend
-- Pick **Openrind Shell — Claude Code** as the launch profile
-- The **Openrind Shell configuration** panel appears below
-- Click **Configure** on each credential row, paste the value, click
-  **Save**. Values are encrypted at rest via the OS keyring
-  (Keychain / DPAPI / libsecret) and never leave the main process
-  after they're saved
+- In the **Openrind Shell configuration** panel, click **Configure** on each
+  credential row, paste the value, click **Save**. Values are encrypted at
+  rest via the OS keyring (Keychain / DPAPI / libsecret) and never leave the
+  main process after they're saved
 - Click **Test** next to `DATABASE_URL` to verify reachability. A
   transient `postgres:16-alpine` container runs `psql -tAc "select 1"`;
   green if it succeeds
 
 ---
 
-## Step 2 — create a workspace
+## Step 2 — create a sandbox
 
-**Workspaces → Create local**:
+Openrind Shell terminals are sandboxes, not workspaces. A workspace is always the
+regular chat experience — the create-workspace flow deliberately coerces any
+Openrind Shell profile back to the Openrind Desktop image, so there is no launch-profile
+choice there (and none in Settings either).
 
-- The sandbox backend defaults to OpenShell (matching your Settings
-  pick)
-- The launch profile sub-selector defaults to Openrind Shell — Claude Code
+Open the **sandbox manager** (**Sandboxes → ⋯ → open the manager**, or the
+`/sandboxes` route):
+
+- Choose the agent: **Claude Code** or **OpenClaw**
+- Name the sandbox
 - Click **Create**
-
-The workspace is created locally. The first time you open it, Openrind Desktop
-materializes the sandbox.
 
 ---
 
-## Step 3 — open the workspace
+## Step 3 — open the sandbox
 
-Click the workspace in the sidebar. Instead of Openrind Desktop's chat UI, the
-session pane shows an embedded terminal with a three-step bootstrap
-indicator:
+Click the sandbox in the sidebar's **Sandboxes** section. The session pane
+shows an embedded terminal with a three-step bootstrap indicator:
 
 1. **Pulling image + creating sandbox** — `docker pull
    ghcr.io/openrind/openrind-shell/sandbox:just-bash` (lazy, only on first use
@@ -147,6 +146,7 @@ actions:
   (closed Windows Terminal pop-out, EDR killed the process, etc.).
   Tears down the old PTY and opens a fresh one against the same
   sandbox.
+
 
 ---
 
@@ -207,6 +207,41 @@ the wsl.exe child died. Common causes:
   an allowlist entry on `%LOCALAPPDATA%\Openrind Desktop\Openrind Desktop.exe`
 - Laptop went to sleep — Windows can reset WSL2's utility VM. Hyper-V
   power settings can mitigate
+
+### Terminal output looks garbled, torn, or misaligned
+
+Don't guess at which layer is broken — capture the bytes and find out.
+There is no menu entry for this (it is a debugging tool, not a feature).
+Open **View → Toggle DevTools** and run:
+
+```js
+const b = window.__OPENRIND_DESKTOP_ELECTRON__;
+const [s] = await b.invokeDesktop("openrindPtyList");
+await b.invokeDesktop("openrindPtyDumpBuffer", s.id);
+```
+
+That writes a byte-exact `.raw` plus a replayable asciinema `.cast` to
+`%LOCALAPPDATA%\Openrind Desktop\logs\openrind-shell-dumps\` and reveals the
+folder. Replay the artifact with the app out of the picture:
+
+```bash
+cat <dump>.raw                  # any known-good terminal
+asciinema play <dump>.cast      # with the original timing
+```
+
+- **Renders correctly outside the app, wrong inside** — the bug is on our
+  side: the renderer, the Unicode/width addons, or the terminal geometry.
+  Note whether the pane is on the GPU renderer or fell back to the DOM one
+  (a `WebGL context lost` warning in DevTools means it fell back).
+- **Wrong in both** — the bytes were already corrupt before xterm.js saw
+  them, so the fault is upstream in the byte path (the container-side
+  `openrind-pty-bridge.py`, or the agent itself). Nothing in the renderer
+  can un-corrupt them.
+
+One known upstream cause: if `OPENRIND_DESKTOP_PTY_CONPTY=1` is set, the PTY
+runs through the Windows Pseudoconsole, which re-serializes its own screen
+model and mangles full-screen TUIs. That variable is a last-resort escape
+hatch only — unset it and reconnect.
 
 ### "Files disappear after sandbox delete"
 

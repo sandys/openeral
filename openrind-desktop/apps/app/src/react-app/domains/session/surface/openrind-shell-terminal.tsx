@@ -14,6 +14,16 @@ import {
   Trash2,
 } from "lucide-react";
 
+// REQUIRED, not cosmetic. Every bit of xterm's layout lives in this stylesheet:
+// `.xterm` gets `position: relative`, `.xterm-helpers` gets `position:
+// absolute`, and `.xterm-screen canvas` / the row spans get absolute
+// positioning. Without it the helper <textarea> renders inline as a visible
+// resize handle in the corner and the row/canvas layers collapse out of place,
+// so the pane paints NOTHING — a silent, total failure that looks exactly like a
+// broken terminal emulator rather than a missing import. Do not remove this, and
+// do not assume a bundler will pick it up on its own.
+import "@xterm/xterm/css/xterm.css";
+
 import type { SandboxProfile } from "../../../../app/lib/desktop";
 import { Button } from "../../../design-system/button";
 import { useVoiceInput } from "./composer/voice/use-voice-input";
@@ -36,10 +46,171 @@ const AGENT_PAINT_MIN_BYTES = 2048;
 const AGENT_PAINT_SETTLE_MS = 700;
 const AGENT_PAINT_CAP_MS = 75_000;
 
+// Flow control. term.write() is asynchronous — xterm.js queues the chunk and
+// parses it on a later task — so an agent that floods output (streaming a long
+// diff, a `find /`, a repainting spinner) can enqueue far more than the parser
+// drains. Unbounded, that queue is what turns into multi-second input lag and
+// half-painted frames. So we count unparsed chars and, above the high water
+// mark, apply REAL backpressure at the source (stop draining the bridge's
+// stdout in the main process) until the queue falls back below the low mark.
+// Two marks rather than one so we don't thrash pause/resume on every chunk.
+const FLOW_HIGH_WATER_CHARS = 200_000;
+const FLOW_LOW_WATER_CHARS = 50_000;
+
 // xterm.js is loaded dynamically so it doesn't bloat the workspace
 // dashboard bundle for users who never open an Openrind Shell session.
 type TerminalType = import("@xterm/xterm").Terminal;
 type FitAddonType = import("@xterm/addon-fit").FitAddon;
+type WebglAddonType = import("@xterm/addon-webgl").WebglAddon;
+type WebglAddonCtor = typeof import("@xterm/addon-webgl").WebglAddon;
+
+/**
+ * Resolve the Unicode width provider for a new Terminal.
+ *
+ * An agent's TUI lays each frame out against the widths ITS measuring library
+ * reports, and xterm has to agree cell-for-cell or the cursor drifts and glyphs
+ * strand. xterm defaults to Unicode 6, where most modern emoji measure as width
+ * 1 — that mismatch is what garbled the banner line and left stray emoji /
+ * number glyphs at the top of the pane.
+ *
+ * Claude Code's Ink measures with string-width, which does full GRAPHEME
+ * CLUSTERING: ZWJ sequences, VS16 presentation selectors, combining marks and
+ * regional-indicator flag pairs each occupy exactly one cell.
+ * addon-unicode11 only corrects the wcwidth tables, so those clusters still
+ * measured wide; addon-unicode-graphemes is the superset that handles both and
+ * self-selects its own activeVersion ("15-graphemes").
+ *
+ * The graphemes addon is flagged experimental upstream, so unicode11 stays as
+ * the degraded path — partially-correct widths beat no width fix at all.
+ *
+ * @returns the addon plus the activeVersion to force, or null to let the addon
+ *   choose (the graphemes addon sets its own).
+ */
+async function loadUnicodeAddon(): Promise<{
+  addon: import("@xterm/xterm").ITerminalAddon;
+  activeVersion: string | null;
+}> {
+  try {
+    const { UnicodeGraphemesAddon } = await import(
+      "@xterm/addon-unicode-graphemes"
+    );
+    return { addon: new UnicodeGraphemesAddon(), activeVersion: null };
+  } catch {
+    const { Unicode11Addon } = await import("@xterm/addon-unicode11");
+    return { addon: new Unicode11Addon(), activeVersion: "11" };
+  }
+}
+
+/**
+ * Resolve the WebGL renderer addon's constructor, or null if the chunk can't be
+ * loaded at all. A null result means the terminal keeps xterm's default DOM
+ * renderer; whether WebGL2 actually initialises is only known once the addon is
+ * loaded into a Terminal, so that failure is handled at the call site.
+ */
+async function loadWebglAddonCtor(): Promise<WebglAddonCtor | null> {
+  try {
+    const { WebglAddon } = await import("@xterm/addon-webgl");
+    return WebglAddon;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Verify xterm's stylesheet actually reached the document.
+ *
+ * A missing `@xterm/xterm/css/xterm.css` is indistinguishable from a broken
+ * terminal emulator: the pane is blank, with a stray resize handle in the
+ * corner where the unpositioned helper <textarea> landed. There is no error, no
+ * exception and no failed request — just a black box. Since that is exactly the
+ * kind of bug that gets misdiagnosed as "xterm.js can't render TUIs", assert it
+ * at runtime instead of trusting the import to survive future refactors.
+ *
+ * `position: absolute` on the helper textarea comes only from the stylesheet, so
+ * it is a reliable sentinel.
+ */
+function assertXtermStylesLoaded(term: TerminalType): boolean {
+  try {
+    const helper = term.element?.querySelector(".xterm-helper-textarea");
+    if (!helper) return false;
+    if (getComputedStyle(helper).position === "absolute") return true;
+  } catch {
+    return false;
+  }
+  console.error(
+    "[openrindShellTerminal] xterm stylesheet is NOT loaded. The terminal will " +
+      'render blank. Restore `import "@xterm/xterm/css/xterm.css"` in ' +
+      "openrind-shell-terminal.tsx.",
+  );
+  return false;
+}
+
+/** Which renderer the terminal should try. See RENDERER_PREF_KEY. */
+type RendererPreference = "auto" | "webgl" | "dom";
+
+/**
+ * Kill switch for the terminal renderer, readable and writable from DevTools so
+ * a machine whose GPU stack paints nothing can be recovered WITHOUT a rebuild:
+ *
+ *   localStorage.setItem("openrind-shell:renderer", "dom");  // then reconnect
+ *
+ * "auto" (default) uses WebGL only when probeWebgl2() clears it; "webgl" forces
+ * it past the probe; "dom" pins xterm's DOM renderer.
+ */
+const RENDERER_PREF_KEY = "openrind-shell:renderer";
+
+function readRendererPreference(): RendererPreference {
+  try {
+    const raw = localStorage.getItem(RENDERER_PREF_KEY);
+    if (raw === "webgl" || raw === "dom" || raw === "auto") return raw;
+  } catch {
+    // localStorage blocked — fall through to the default.
+  }
+  return "auto";
+}
+
+/**
+ * Pre-flight WebGL2 check, run on a THROWAWAY canvas.
+ *
+ * The xterm WebGL addon reports genuine context loss via onContextLoss, but it
+ * has no signal for "initialised and then quietly painted nothing" — which is
+ * what a blank terminal pane looks like. Probing a scratch canvas first means a
+ * hostile GPU stack is detected before the real terminal is ever handed to the
+ * addon, so the failure mode is a DOM-rendered terminal rather than a black box.
+ */
+function probeWebgl2(): { ok: boolean; reason: string } {
+  let canvas: HTMLCanvasElement | null = null;
+  try {
+    canvas = document.createElement("canvas");
+    canvas.width = 2;
+    canvas.height = 2;
+    const gl = canvas.getContext("webgl2");
+    if (!gl) return { ok: false, reason: "no webgl2 context" };
+    if (gl.isContextLost()) return { ok: false, reason: "context lost on creation" };
+    // A software rasteriser makes the GPU renderer slower than the DOM one and,
+    // on some Windows/RDP/VM stacks, produces no visible output at all. The
+    // debug extension is not always exposed; an unknown renderer is allowed
+    // through rather than treated as a failure.
+    const debugInfo = gl.getExtension("WEBGL_debug_renderer_info");
+    const name = debugInfo
+      ? String(gl.getParameter(debugInfo.UNMASKED_RENDERER_WEBGL) ?? "")
+      : "";
+    if (/swiftshader|llvmpipe|software|basic render/i.test(name)) {
+      return { ok: false, reason: `software renderer (${name})` };
+    }
+    // Release the probe context immediately; browsers cap live WebGL contexts
+    // and the terminal needs one of its own.
+    gl.getExtension("WEBGL_lose_context")?.loseContext();
+    return { ok: true, reason: name || "webgl2" };
+  } catch (err) {
+    return {
+      ok: false,
+      reason: err instanceof Error ? err.message : "probe threw",
+    };
+  } finally {
+    if (canvas) canvas.width = canvas.height = 0;
+  }
+}
 
 type ElectronBridge = NonNullable<Window["__OPENRIND_DESKTOP_ELECTRON__"]>;
 
@@ -115,8 +286,19 @@ export function OpenrindShellTerminal(props: OpenrindShellTerminalProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const termRef = useRef<TerminalType | null>(null);
   const fitRef = useRef<FitAddonType | null>(null);
+  // Null whenever the GPU renderer isn't active: WebGL2 unavailable at mount,
+  // or the context was lost later and we fell back to the DOM renderer.
+  const webglRef = useRef<WebglAddonType | null>(null);
+  // Which renderer actually ended up painting, for the status tooltip and the
+  // raw-stream capture notice — a bug report about a blank or torn pane is
+  // near-useless without it.
+  const rendererRef = useRef<string>("dom");
   const sessionIdRef = useRef<string | null>(null);
   const resizeObserverRef = useRef<ResizeObserver | null>(null);
+  // Flow control bookkeeping (see FLOW_*): chars handed to term.write() that
+  // xterm hasn't parsed yet, and whether we've asked main to stop draining.
+  const unprocessedRef = useRef(0);
+  const flowPausedRef = useRef(false);
   // Persists the last successfully resolved sandbox name so that the
   // "Delete sandbox" and "Pop out" buttons remain functional even when
   // sandboxName state is null (e.g. after an error before first connect).
@@ -297,11 +479,45 @@ export function OpenrindShellTerminal(props: OpenrindShellTerminalProps) {
     let unsubExit: (() => void) | undefined;
     let unsubProgress: (() => void) | undefined;
 
+    // Self-heal a GPU renderer that activated cleanly but is not actually
+    // drawing. probeWebgl2() catches a hostile GPU stack up front, but a driver
+    // can still pass every capability check and then paint nothing — which
+    // presents as a completely blank pane, the worst outcome of the whole
+    // renderer change.
+    //
+    // The addon rasterises glyphs into a texture atlas on its first real paint,
+    // so once the agent has painted a full screen with no atlas in existence,
+    // the canvas is not being drawn to. Drop to the DOM renderer and repaint.
+    // A false positive here just costs GPU acceleration; a false negative costs
+    // the user their entire terminal, so this errs toward falling back.
+    const verifyRendererPainted = () => {
+      const term = termRef.current;
+      const webgl = webglRef.current;
+      if (!term || !webgl) return;
+      if (webgl.textureAtlas) return;
+      try {
+        webgl.dispose();
+      } catch {
+        // Already gone.
+      }
+      webglRef.current = null;
+      rendererRef.current = "dom (webgl drew nothing)";
+      console.warn(
+        "[openrindShellTerminal] WebGL renderer produced no glyphs — fell back to the DOM renderer.",
+      );
+      try {
+        term.refresh(0, term.rows - 1);
+      } catch {
+        // Disposed mid-check.
+      }
+    };
+
     // Mark the agent's UI as painted: tear down paint tracking + reveal the
     // terminal by hiding the bootstrap overlay. Idempotent.
     const markAgentReady = () => {
       if (!trackPaintRef.current) return;
       trackPaintRef.current = false;
+      verifyRendererPainted();
       if (paintSettleTimerRef.current) {
         clearTimeout(paintSettleTimerRef.current);
         paintSettleTimerRef.current = null;
@@ -313,9 +529,73 @@ export function OpenrindShellTerminal(props: OpenrindShellTerminalProps) {
       setAgentReady(true);
     };
 
+    // Reveal the terminal because the paint CAP expired, not because the agent
+    // actually rendered. Without this the overlay just disappears and the user
+    // is left staring at a black rectangle with a green "Connected" badge and no
+    // explanation — the worst possible failure presentation.
+    //
+    // The byte count is the whole diagnosis. Near-zero means the PTY connected
+    // but the agent never painted, which is sandbox-side (setup.sh, the agent
+    // launch, credentials) and nothing in the renderer can fix. A healthy count
+    // means the bytes arrived and WE failed to paint them, which is ours.
+    const markAgentReadyOnPaintTimeout = () => {
+      if (!trackPaintRef.current) return;
+      const received = paintBytesRef.current;
+      markAgentReady();
+      if (received >= AGENT_PAINT_MIN_BYTES) return;
+      const seconds = Math.round(AGENT_PAINT_CAP_MS / 1000);
+      writeToTerm(
+        `\r\n\x1b[33m[No agent output after ${seconds}s — received ${received} byte(s).]\x1b[0m\r\n` +
+          `\x1b[2mThe PTY is connected, so the sandbox is reachable, but the agent never\r\n` +
+          `painted. That points at the sandbox side rather than this terminal.\r\n\r\n` +
+          `Try, in order:\r\n` +
+          `  1. Press Enter — the agent may be waiting at a prompt that never drew.\r\n` +
+          `  2. Overflow menu (⋮) → "Open in OS terminal" — if it is blank there too,\r\n` +
+          `     the problem is inside the sandbox, not in the renderer.\r\n` +
+          `  3. "Reconnect" to relaunch the agent in a fresh PTY.\x1b[0m\r\n`,
+      );
+    };
+
+    // ── Flow control (see FLOW_* constants) ───────────────────────────────
+    // Applied at the SOURCE rather than by buffering here: pausing the bridge's
+    // stdout in the main process propagates all the way back to the agent's
+    // write() into the container PTY, so the agent throttles itself instead of
+    // us accumulating its backlog in the renderer.
+    const maybePauseFlow = () => {
+      if (flowPausedRef.current) return;
+      if (unprocessedRef.current < FLOW_HIGH_WATER_CHARS) return;
+      const id = sessionIdRef.current;
+      if (!id) return;
+      flowPausedRef.current = true;
+      void invoke("openrindPtyPause", id).catch(() => {
+        // Pause never landed, so the stream is still flowing — clear the flag
+        // rather than sit in a "paused" state nothing will ever resume from.
+        flowPausedRef.current = false;
+      });
+    };
+
+    const maybeResumeFlow = () => {
+      if (!flowPausedRef.current) return;
+      if (unprocessedRef.current > FLOW_LOW_WATER_CHARS) return;
+      flowPausedRef.current = false;
+      const id = sessionIdRef.current;
+      if (!id) return;
+      void invoke("openrindPtyResume", id).catch(() => {
+        // Best-effort: main also resumes on detach, so a dropped resume can't
+        // wedge the session permanently.
+      });
+    };
+
     const writeToTerm = (data: string) => {
       if (termRef.current) {
-        termRef.current.write(data);
+        // Count the chunk as in-flight until xterm's write callback confirms it
+        // has been PARSED (not merely queued), then re-check the low water mark.
+        unprocessedRef.current += data.length;
+        termRef.current.write(data, () => {
+          unprocessedRef.current -= data.length;
+          maybeResumeFlow();
+        });
+        maybePauseFlow();
       } else {
         earlyBufferRef.current.push(data);
       }
@@ -353,6 +633,11 @@ export function OpenrindShellTerminal(props: OpenrindShellTerminalProps) {
       }
       resizeObserverRef.current?.disconnect();
       resizeObserverRef.current = null;
+      // Reset flow-control state so a remount starts with an empty queue. The
+      // main process resumes the stream itself on detach/attach, so there is no
+      // need to round-trip a resume here on the way out.
+      unprocessedRef.current = 0;
+      flowPausedRef.current = false;
       if (sessionIdRef.current) {
         const id = sessionIdRef.current;
         sessionIdRef.current = null;
@@ -369,6 +654,14 @@ export function OpenrindShellTerminal(props: OpenrindShellTerminalProps) {
           // Best-effort.
         }
       }
+      // Dispose the GPU renderer before the terminal so its WebGL context and
+      // texture atlas are released deterministically rather than on GC.
+      try {
+        webglRef.current?.dispose();
+      } catch {
+        // Context may already be gone.
+      }
+      webglRef.current = null;
       termRef.current?.dispose();
       termRef.current = null;
       fitRef.current = null;
@@ -461,7 +754,12 @@ export function OpenrindShellTerminal(props: OpenrindShellTerminalProps) {
         // positioning, so mounting underneath first is invisible.
         const { Terminal } = await import("@xterm/xterm");
         const { FitAddon } = await import("@xterm/addon-fit");
-        const { Unicode11Addon } = await import("@xterm/addon-unicode11");
+        // Resolve the optional addons up front, while there is still no Terminal
+        // instance to leak. Every await between `new Terminal()` and the
+        // termRef.current assignment below is a window in which a cancelled run
+        // would abandon an opened terminal that cleanup() cannot see.
+        const unicode = await loadUnicodeAddon();
+        const WebglAddon = await loadWebglAddonCtor();
         if (cancelled || !containerRef.current) return;
 
         // Wait for the browser to complete layout so fit() can measure
@@ -517,16 +815,78 @@ export function OpenrindShellTerminal(props: OpenrindShellTerminalProps) {
           },
         });
         const fit = new FitAddon();
-        // Load Unicode 11 width tables BEFORE any content is written so emoji /
-        // CJK cell widths match what Claude Code's Ink renderer assumes
-        // (string-width / wcwidth v11). xterm defaults to Unicode 6, where most
-        // modern emoji measure as width 1; that mismatch desyncs the cursor and
-        // leaves stray emoji/number glyphs and a garbled banner line at the top.
-        const unicode11 = new Unicode11Addon();
-        term.loadAddon(unicode11);
-        term.unicode.activeVersion = "11";
+        // Install the Unicode width tables BEFORE any content is written so the
+        // cell widths match what the agent's renderer assumed when it laid the
+        // frame out (see loadUnicodeAddon).
+        term.loadAddon(unicode.addon);
+        if (unicode.activeVersion) {
+          term.unicode.activeVersion = unicode.activeVersion;
+        }
         term.loadAddon(fit);
         term.open(containerRef.current);
+
+        // Renderer: WebGL2 on the GPU instead of xterm's default DOM renderer.
+        // Agent TUIs repaint whole frames many times a second (Ink re-emits the
+        // entire composer + transcript viewport on each token); the DOM renderer
+        // rebuilds a <span> tree per row for every one of those frames, which is
+        // where the tearing, stranded glyphs and input lag come from. Loaded
+        // AFTER term.open() because it needs the attached canvas, and BEFORE
+        // fit() so cell metrics are measured with the renderer that will
+        // actually paint.
+        //
+        // Degraded path: no WebGL2 (blocklisted driver, software rendering,
+        // context lost later under GPU pressure) ⇒ stay on the DOM renderer.
+        // Uglier and slower beats a blank pane, so the GPU path is only taken
+        // when a scratch-canvas probe clears it — see probeWebgl2 — and
+        // localStorage can pin either renderer without a rebuild.
+        const rendererPref = readRendererPreference();
+        let activeRenderer = "dom";
+        if (WebglAddon && rendererPref !== "dom") {
+          const probe =
+            rendererPref === "webgl"
+              ? { ok: true, reason: "forced via localStorage" }
+              : probeWebgl2();
+          if (!probe.ok) {
+            console.warn(
+              `[openrindShellTerminal] WebGL unavailable (${probe.reason}) — using the DOM renderer.`,
+            );
+          } else {
+            try {
+              const webgl = new WebglAddon();
+              webgl.onContextLoss(() => {
+                try {
+                  webgl.dispose();
+                } catch {
+                  // Already disposed.
+                }
+                if (webglRef.current === webgl) webglRef.current = null;
+                rendererRef.current = "dom (after context loss)";
+                console.warn(
+                  "[openrindShellTerminal] WebGL context lost — fell back to the DOM renderer.",
+                );
+              });
+              // loadAddon() is where the addon activates and where it throws if
+              // WebGL2 can't be initialised, so the catch has to wrap it.
+              term.loadAddon(webgl);
+              webglRef.current = webgl;
+              activeRenderer = "webgl";
+            } catch (err) {
+              webglRef.current = null;
+              console.warn(
+                "[openrindShellTerminal] WebGL renderer failed to activate — using the DOM renderer.",
+                err,
+              );
+            }
+          }
+        }
+        const stylesOk = assertXtermStylesLoaded(term);
+        rendererRef.current = stylesOk
+          ? activeRenderer
+          : `${activeRenderer} (STYLESHEET MISSING)`;
+        console.info(
+          `[openrindShellTerminal] renderer=${activeRenderer} (pref=${rendererPref}) unicode=${term.unicode.activeVersion} styles=${stylesOk ? "ok" : "MISSING"}`,
+        );
+
         // Initial fit — may give cols=1 if the browser hasn't committed
         // layout for the container yet (timing race on first mount).
         try {
@@ -584,6 +944,18 @@ export function OpenrindShellTerminal(props: OpenrindShellTerminalProps) {
           } catch {
             // ignore
           }
+        }
+
+        // Geometry is final now. Force one full repaint of the viewport: the
+        // renderer was attached while the terminal was still at its default
+        // 80x24, and every fit()/resize() since then only marks the CHANGED
+        // rows dirty. Anything already written during mount would otherwise
+        // keep whatever the pre-resize pass left on screen — which, for the
+        // GPU renderer, can be nothing at all.
+        try {
+          term.refresh(0, term.rows - 1);
+        } catch {
+          // Terminal disposed mid-mount — nothing to repaint.
         }
 
         // Wire terminal input → PTY stdin (every keystroke, incl. arrows)
@@ -750,7 +1122,10 @@ export function OpenrindShellTerminal(props: OpenrindShellTerminalProps) {
         paintBytesRef.current = 0;
         trackPaintRef.current = true;
         if (paintCapTimerRef.current) clearTimeout(paintCapTimerRef.current);
-        paintCapTimerRef.current = setTimeout(markAgentReady, AGENT_PAINT_CAP_MS);
+        paintCapTimerRef.current = setTimeout(
+          markAgentReadyOnPaintTimeout,
+          AGENT_PAINT_CAP_MS,
+        );
         setPhase("connected");
       } catch (err) {
         if (cancelled) return;
@@ -878,6 +1253,7 @@ export function OpenrindShellTerminal(props: OpenrindShellTerminalProps) {
                   ? "border-red-7/50 bg-red-2/30 text-red-11"
                   : "border-amber-7/50 bg-amber-2/30 text-amber-11"
             }`}
+            title={`Renderer: ${rendererRef.current}\n\nIf the pane is blank or torn, pin the other renderer from DevTools and reconnect:\n  localStorage.setItem("${RENDERER_PREF_KEY}", "dom")\n  localStorage.setItem("${RENDERER_PREF_KEY}", "webgl")\n  localStorage.removeItem("${RENDERER_PREF_KEY}")  // auto`}
           >
             {phaseLabel(phase)}
           </span>
@@ -1005,6 +1381,7 @@ export function OpenrindShellTerminal(props: OpenrindShellTerminalProps) {
                   )}
                   Open in OS terminal
                 </button>
+
                 {props.onOpenSettings ? (
                   <button
                     type="button"
@@ -1041,6 +1418,7 @@ export function OpenrindShellTerminal(props: OpenrindShellTerminalProps) {
           Pop out failed: {popoutError}
         </div>
       ) : null}
+
       {/* The terminal container is always in the DOM with real CSS dimensions
           so xterm.js fit() measures correctly on first paint (avoids cols=1
           vertical-text bug). Loading / error overlays sit on top via absolute

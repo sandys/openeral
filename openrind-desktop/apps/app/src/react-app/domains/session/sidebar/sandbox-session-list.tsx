@@ -2,7 +2,6 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
-  Boxes,
   ChevronDown,
   ChevronRight,
   Loader2,
@@ -213,11 +212,11 @@ export function SandboxSessionList(props: SandboxSessionListProps) {
         collapsed ? "shrink-0" : "min-h-0 flex-1"
       }`}
     >
-      <div className="relative group shrink-0">
+      <div className="relative group/section shrink-0">
         <div
           role="button"
           tabIndex={0}
-          className="w-full flex items-center justify-between rounded-xl px-3.5 py-2.5 text-left text-[13px] text-gray-10"
+          className="flex w-full items-center justify-between rounded-lg px-3.5 py-1.5 text-left transition-colors hover:bg-gray-1/40"
           onClick={toggleCollapsed}
           onKeyDown={(event) => {
             if (event.key !== "Enter" && event.key !== " ") return;
@@ -226,43 +225,45 @@ export function SandboxSessionList(props: SandboxSessionListProps) {
             toggleCollapsed();
           }}
         >
-          <div className="flex min-w-0 items-center gap-3.5">
-            <Boxes size={18} className="shrink-0 text-dls-secondary" />
-            <div className="min-w-0 whitespace-nowrap text-[13px] font-normal text-dls-text">
+          <div className="flex min-w-0 items-center gap-1.5">
+            <span className="text-[11px] font-semibold uppercase tracking-[0.08em] text-dls-secondary">
               Sandboxes
-            </div>
+            </span>
+            {rows.length > 0 ? (
+              <span className="rounded-full bg-gray-3/70 px-1.5 py-0.5 text-[10px] font-medium text-gray-10">
+                {rows.length}
+              </span>
+            ) : null}
           </div>
 
-          <div className="ml-4 flex shrink-0 items-center gap-1.5">
-            <div className="flex items-center gap-0.5">
-              <button
-                type="button"
-                className="rounded-md p-1 text-gray-9 hover:bg-gray-3/80 hover:text-gray-11"
-                onClick={(event) => {
-                  event.stopPropagation();
-                  props.onOpenManager();
-                }}
-                aria-label="New sandbox"
-                title="Open the sandbox manager"
-              >
-                <Plus size={14} />
-              </button>
-              <button
-                type="button"
-                className="rounded-md p-1 text-gray-9 hover:bg-gray-3/80 hover:text-gray-11"
-                onClick={(event) => {
-                  event.stopPropagation();
-                  setRowMenuFor(null);
-                  setHeaderMenuOpen((current) => !current);
-                }}
-                aria-label="Sandbox options"
-              >
-                <MoreHorizontal size={14} />
-              </button>
-            </div>
+          <div className="flex shrink-0 items-center gap-0.5 text-gray-9">
             <button
               type="button"
-              className="rounded-md p-1 text-gray-9 hover:bg-gray-3/80 hover:text-gray-11"
+              className="rounded-md p-1 opacity-0 transition hover:bg-gray-3/80 hover:text-gray-11 group-hover/section:opacity-100 focus-visible:opacity-100"
+              onClick={(event) => {
+                event.stopPropagation();
+                props.onOpenManager();
+              }}
+              aria-label="New sandbox"
+              title="Open the sandbox manager"
+            >
+              <Plus size={14} />
+            </button>
+            <button
+              type="button"
+              className="rounded-md p-1 opacity-0 transition hover:bg-gray-3/80 hover:text-gray-11 group-hover/section:opacity-100 focus-visible:opacity-100"
+              onClick={(event) => {
+                event.stopPropagation();
+                setRowMenuFor(null);
+                setHeaderMenuOpen((current) => !current);
+              }}
+              aria-label="Sandbox options"
+            >
+              <MoreHorizontal size={14} />
+            </button>
+            <button
+              type="button"
+              className="rounded-md p-1 transition hover:bg-gray-3/80 hover:text-gray-11"
               aria-label={collapsed ? "Expand sandboxes" : "Collapse sandboxes"}
               onClick={(event) => {
                 event.stopPropagation();
@@ -335,6 +336,14 @@ export function SandboxSessionList(props: SandboxSessionListProps) {
                 const isRenaming = renamingFor === row.name;
                 return (
                   <div key={row.name} className="relative">
+                    {selected ? (
+                      // Selected-item vertical guide. Kept identical to the
+                      // workspace list's guide (h-5 w-[3px] rounded-full accent,
+                      // vertically centred). The -left-2.5 cancels this list's
+                      // pl-2.5 row indent so the bar lands on the same section
+                      // left-edge as the workspace guide's left-0.
+                      <span className="pointer-events-none absolute -left-2.5 top-1/2 z-10 h-5 w-[3px] -translate-y-1/2 rounded-full bg-dls-accent" />
+                    ) : null}
                     <div
                       role="button"
                       tabIndex={0}

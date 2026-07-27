@@ -172,6 +172,9 @@ function makeFakeChild() {
   child.pid = 4242;
   child.stdin = { writes: [], write(buf) { this.writes.push(Buffer.from(buf)); } };
   child.stdout = new EventEmitter();
+  child.stdout.flow = [];
+  child.stdout.pause = () => child.stdout.flow.push("pause");
+  child.stdout.resume = () => child.stdout.flow.push("resume");
   child.stderr = new EventEmitter();
   child.killed = [];
   child.kill = (signal) => child.killed.push(signal ?? null);
@@ -243,4 +246,23 @@ test("makePipePty: kill forwards the signal to the child", () => {
   const term = makePipePty(child, 80, 24);
   term.kill("SIGTERM");
   assert.deepEqual(child.killed, ["SIGTERM"]);
+});
+
+test("makePipePty: pause/resume map onto the child's stdout flow state", () => {
+  const child = makeFakeChild();
+  const term = makePipePty(child, 80, 24);
+  // Backpressure has to land on the stream itself: an undrained pipe is what
+  // stops wsl.exe reading, which is what eventually blocks the agent's write
+  // into the container PTY. Buffering in the renderer would not throttle it.
+  term.pause();
+  term.resume();
+  assert.deepEqual(child.stdout.flow, ["pause", "resume"]);
+});
+
+test("makePipePty: pause/resume never throw once the stream is gone", () => {
+  const child = makeFakeChild();
+  const term = makePipePty(child, 80, 24);
+  child.stdout = null;
+  term.pause();
+  term.resume();
 });

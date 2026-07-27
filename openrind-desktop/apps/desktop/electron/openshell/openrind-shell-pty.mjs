@@ -53,15 +53,22 @@ const bufferEncoder = new TextEncoder();
  * once the byte cap is exceeded. Never empties the buffer mid-stream (keeps
  * at least the most recent chunk even if a single chunk exceeds the cap).
  *
+ * `bufferTimes` is kept strictly parallel to `buffer` (same length, same
+ * order): it records the ms-since-openedAt each chunk arrived so the raw
+ * stream can be exported as a real asciinema recording with faithful timing
+ * (see getBufferRecording). Push and shift must always move in lockstep.
+ *
  * @param {Session} session
  * @param {string | Uint8Array} data
  */
 function appendToBuffer(session, data) {
   const bytes = typeof data === "string" ? bufferEncoder.encode(data) : data;
   session.buffer.push(bytes);
+  session.bufferTimes.push(Date.now() - session.openedAt);
   session.bufferBytes += bytes.length;
   while (session.bufferBytes > BUFFER_CAP_BYTES && session.buffer.length > 1) {
     const dropped = session.buffer.shift();
+    session.bufferTimes.shift();
     session.bufferBytes -= dropped.length;
   }
 }
@@ -77,6 +84,8 @@ function appendToBuffer(session, data) {
  * @property {(handler: DataHandler) => { dispose: () => void }} onData
  * @property {(handler: (event: { exitCode: number; signal?: number | undefined }) => void) => { dispose: () => void }} onExit
  * @property {number | undefined} pid
+ * @property {(() => void)} [pause]   Stop draining the transport (backpressure)
+ * @property {(() => void)} [resume]  Resume draining the transport
  */
 
 /**
@@ -93,8 +102,12 @@ function appendToBuffer(session, data) {
  * @property {{ cols: number; rows: number }} size
  * @property {number} openedAt
  * @property {Uint8Array[]} buffer        Replayable output chunks (raw bytes)
+ * @property {number[]} bufferTimes       ms-since-openedAt per `buffer` chunk
  * @property {number} bufferBytes         Running byte total of `buffer`
  * @property {boolean} detached           True while no renderer is attached
+ * @property {boolean} paused             True while the renderer has applied
+ *   backpressure (see pauseSession). Tracked so detach/attach can never leave
+ *   a session paused with nobody left to resume it.
  * @property {{ exitCode: number | null; signal: string | null } | null} exitInfo
  */
 
@@ -188,6 +201,12 @@ function encodeResizeFrame(cols, rows) {
  * FRAMES, however, are buffered until the first output byte proves the bridge
  * has switched its stdio into raw mode, so a frame's length/payload byte (e.g.
  * 0x03) can't trip the container PTY's line discipline and raise SIGINT.
+ *
+ * pause()/resume() map onto the child's stdout flow state, which is real
+ * end-to-end backpressure: an unread pipe stops being drained, wsl.exe stops
+ * reading, and the agent's own write() into the container PTY eventually
+ * blocks. That is what keeps a flooding TUI from outrunning xterm's parser
+ * instead of letting the queue grow without bound.
  *
  * @param {import("node:child_process").ChildProcess} child
  * @param {number} cols  initial columns (announced in the handshake)
@@ -289,6 +308,20 @@ function makePipePty(child, cols, rows) {
         child.kill(signal);
       } catch {
         /* already gone */
+      }
+    },
+    pause() {
+      try {
+        child.stdout?.pause();
+      } catch {
+        /* stream already destroyed — nothing to throttle */
+      }
+    },
+    resume() {
+      try {
+        child.stdout?.resume();
+      } catch {
+        /* stream already destroyed */
       }
     },
     onData(handler) {
@@ -456,8 +489,10 @@ export async function openSession(opts) {
     size: { cols, rows },
     openedAt: Date.now(),
     buffer: [],
+    bufferTimes: [],
     bufferBytes: 0,
     detached: false,
+    paused: false,
     exitInfo: null,
   };
 
@@ -504,6 +539,41 @@ export function writeSession(id, data) {
   // stdin to write to. Swallow rather than throw on a dead pty.
   if (session.exitInfo) return false;
   session.pty.write(typeof data === "string" ? data : String(data));
+  return true;
+}
+
+/**
+ * Apply renderer backpressure: stop draining the bridge's stdout so the agent
+ * can't push more output than xterm's parser is consuming. Paired with
+ * resumeSession() from the renderer's write-callback drain (see the flow
+ * control block in openrind-shell-terminal.tsx).
+ *
+ * Idempotent, and a no-op on an exited session (nothing left to throttle).
+ * `pause` is optional on IPtyLike so test stubs need not implement it.
+ *
+ * @param {string} id
+ */
+export function pauseSession(id) {
+  const session = sessions.get(id);
+  if (!session) return false;
+  if (session.exitInfo || session.paused) return false;
+  session.paused = true;
+  session.pty.pause?.();
+  return true;
+}
+
+/**
+ * Release backpressure applied by pauseSession(). Safe to call unconditionally
+ * — returns false when the session wasn't paused.
+ *
+ * @param {string} id
+ */
+export function resumeSession(id) {
+  const session = sessions.get(id);
+  if (!session) return false;
+  if (!session.paused) return false;
+  session.paused = false;
+  session.pty.resume?.();
   return true;
 }
 
@@ -624,15 +694,70 @@ export function closeSessionsForSandbox(sandboxName) {
  * @returns {string}
  */
 export function getBuffer(id) {
+  const bytes = getBufferBytes(id);
+  if (!bytes) return "";
+  return new TextDecoder().decode(bytes);
+}
+
+/**
+ * Return the session's retained scrollback as the RAW bytes the PTY emitted,
+ * with no decoding step at all. This is the byte-exact stream the agent wrote,
+ * so dumping it to a file and `cat`-ing that file into a known-good terminal
+ * reproduces the agent's output independently of xterm.js. That is the
+ * measurement that separates "xterm.js mis-parsed a sequence" from "the
+ * renderer painted it wrong" — do this before concluding anything about the
+ * emulator.
+ *
+ * @param {string} id
+ * @returns {Uint8Array | null} null for an unknown session
+ */
+export function getBufferBytes(id) {
   const session = sessions.get(id);
-  if (!session) return "";
+  if (!session) return null;
   const merged = new Uint8Array(session.bufferBytes);
   let offset = 0;
   for (const chunk of session.buffer) {
     merged.set(chunk, offset);
     offset += chunk.length;
   }
-  return new TextDecoder().decode(merged);
+  return merged;
+}
+
+/**
+ * Return the retained scrollback as an asciinema-v2-shaped recording: the
+ * per-chunk arrival times captured in appendToBuffer plus the chunk payloads.
+ *
+ * Chunks are decoded with a SINGLE streaming decoder walked over them in
+ * order, not one decode per chunk. A multi-byte glyph split across a chunk
+ * boundary therefore stays intact (its tail simply lands at the head of the
+ * next chunk's string) and concatenating every payload reproduces the merged
+ * decode exactly. Decoding each chunk independently would inject U+FFFD at
+ * every boundary — i.e. it would fabricate the very corruption we are trying
+ * to diagnose.
+ *
+ * @param {string} id
+ * @returns {{ chunks: Array<{ t: number, data: string }>, cols: number,
+ *   rows: number, openedAt: number, sandboxName: string } | null}
+ */
+export function getBufferRecording(id) {
+  const session = sessions.get(id);
+  if (!session) return null;
+  const decoder = new TextDecoder("utf-8");
+  const chunks = [];
+  for (let i = 0; i < session.buffer.length; i++) {
+    const data = decoder.decode(session.buffer[i], { stream: true });
+    // A chunk that was pure continuation bytes decodes to "" — drop it rather
+    // than emit an empty asciinema event.
+    if (!data) continue;
+    chunks.push({ t: (session.bufferTimes[i] ?? 0) / 1000, data });
+  }
+  return {
+    chunks,
+    cols: session.size.cols,
+    rows: session.size.rows,
+    openedAt: session.openedAt,
+    sandboxName: session.sandboxName,
+  };
 }
 
 /**
@@ -649,6 +774,10 @@ export function detachSession(id) {
   session.onData = null;
   session.onExit = null;
   session.detached = true;
+  // Never leave a detached session throttled: the renderer that applied the
+  // backpressure is gone, so nothing would ever call resumeSession() and the
+  // agent would stay blocked on write for the whole time the user is away.
+  resumeSession(id);
   return true;
 }
 
@@ -666,6 +795,7 @@ export function listSessions() {
     rows: s.size.rows,
     openedAt: s.openedAt,
     pid: s.pty.pid ?? null,
+    paused: s.paused,
   }));
 }
 
@@ -686,6 +816,9 @@ export function attachHandlers(id, handlers = {}) {
   // A renderer is now (re)attached — clear the detached flag so the
   // buffer-append path knows there's a live consumer again.
   if (session.onData || session.onExit) session.detached = false;
+  // A fresh renderer starts with an empty write queue and no memory of an
+  // earlier pause, so hand it a flowing stream.
+  resumeSession(id);
   return true;
 }
 

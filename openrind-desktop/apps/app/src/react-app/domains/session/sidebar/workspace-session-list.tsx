@@ -1,6 +1,6 @@
 /** @jsxImportSource react */
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { ChevronDown, ChevronRight, Folder, Loader2, MoreHorizontal, Plus } from "lucide-react";
+import { ChevronDown, ChevronRight, Loader2, MoreHorizontal, Plus } from "lucide-react";
 
 import { getDisplaySessionTitle } from "../../../../app/lib/session-title";
 import type { WorkspaceInfo } from "../../../../app/lib/desktop";
@@ -155,6 +155,21 @@ const workspaceKindLabel = (workspace: WorkspaceInfo) =>
       ? t("workspace.sandbox_badge")
       : t("workspace.remote_badge")
     : t("workspace.local_badge");
+
+const WORKSPACE_SWATCHES = ["#2563eb", "#5a67d8", "#f97316", "#10b981"];
+
+// Colour each workspace's dot from a hash of its id, so the same workspace keeps
+// the same colour across restarts and the sidebar stays scannable by colour
+// rather than by reading every label. Deterministic on purpose — no state.
+const workspaceSwatchColor = (seed: string) => {
+  const value = seed.trim() || "workspace";
+  let hash = 0;
+  for (let index = 0; index < value.length; index += 1) {
+    hash = (hash << 5) - hash + value.charCodeAt(index);
+    hash |= 0;
+  }
+  return WORKSPACE_SWATCHES[Math.abs(hash) % WORKSPACE_SWATCHES.length];
+};
 
 export function WorkspaceSessionList(props: Props) {
   const [expandedWorkspaceIds, setExpandedWorkspaceIds] = useState<Set<string>>(
@@ -330,6 +345,21 @@ export function WorkspaceSessionList(props: Props) {
 
     return (
       <div key={session.id} className="relative">
+        {isSelected ? (
+          // Active-item guide. There is exactly ONE of these in the sidebar at a
+          // time, and the route guarantees it rather than this component: while a
+          // sandbox terminal is showing, session-route.tsx passes
+          // selectedSessionId=null (no session row can match), and opening a
+          // session clears selectedSandbox (no sandbox row can match).
+          //
+          // Geometry is kept identical to the sandbox list's guide so both land
+          // on the same vertical line: -left-2.5 cancels the session container's
+          // pl-2.5 indent, putting the bar on the container's left-0 edge, right
+          // over the gray tree rail. Deliberately NOT offset by row.depth — a
+          // nested session still marks the one rail, so the eye has a single
+          // predictable position to track instead of a bar that jumps inward.
+          <span className="pointer-events-none absolute -left-2.5 top-1/2 z-10 h-5 w-[3px] -translate-y-1/2 rounded-full bg-dls-accent" />
+        ) : null}
         <div
           role="button"
           tabIndex={0}
@@ -435,8 +465,29 @@ export function WorkspaceSessionList(props: Props) {
 
   return (
     <div className="flex h-full min-h-0 min-w-0 flex-1 flex-col">
+      <div className="group/section flex shrink-0 items-center justify-between px-3.5 pt-3 pb-1.5">
+        <div className="flex min-w-0 items-center gap-1.5">
+          <span className="text-[11px] font-semibold uppercase tracking-[0.08em] text-dls-secondary">
+            Workspaces
+          </span>
+          {props.workspaceSessionGroups.length > 0 ? (
+            <span className="rounded-full bg-gray-3/70 px-1.5 py-0.5 text-[10px] font-medium text-gray-10">
+              {props.workspaceSessionGroups.length}
+            </span>
+          ) : null}
+        </div>
+        <button
+          type="button"
+          className="rounded-md p-1 text-gray-9 opacity-0 transition hover:bg-gray-3/80 hover:text-gray-11 group-hover/section:opacity-100 focus-visible:opacity-100"
+          onClick={props.onOpenCreateWorkspace}
+          aria-label={t("workspace_list.add_workspace")}
+          title={t("workspace_list.add_workspace")}
+        >
+          <Plus size={14} />
+        </button>
+      </div>
       <div className="min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto pr-1">
-        <div className="space-y-2 pb-3">
+        <div className="space-y-1 pb-3">
           {props.workspaceSessionGroups.map((group) => {
             const tree = buildSessionTreeState(group.sessions, props.sessionStatusById);
             const forcedExpandedSessionIds = new Set(
@@ -479,6 +530,11 @@ export function WorkspaceSessionList(props: Props) {
 
             return (
               <div key={workspace.id} className="space-y-2">
+                {/* No active guide on the workspace row itself. The guide marks
+                    the ONE thing the main pane is currently showing, and a
+                    workspace is a container, not a destination — so it belongs on
+                    the active session row below (see renderSessionRow) or on the
+                    active sandbox row. A workspace is merely selected. */}
                 <div className="relative group">
                   <div
                     role="button"
@@ -501,7 +557,14 @@ export function WorkspaceSessionList(props: Props) {
                     }}
                   >
                     <div className="flex min-w-0 items-center gap-3.5">
-                      <Folder size={18} className="shrink-0 text-dls-secondary" />
+                      <div
+                        className="flex h-5.5 w-5.5 shrink-0 items-center justify-center rounded-full"
+                        style={{
+                          backgroundColor: workspaceSwatchColor(
+                            workspace.id || workspaceLabel(workspace),
+                          ),
+                        }}
+                      />
                       <div className="min-w-0 flex-1">
                         <div className="min-w-0 truncate text-[14px] font-normal text-dls-text">
                           {workspaceLabel(workspace)}

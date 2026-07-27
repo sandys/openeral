@@ -539,6 +539,72 @@ function emitOpenrindShellPtyExit(sessionId, exitCode, signal) {
 }
 
 /**
+ * Dump a PTY session's retained scrollback to disk as BOTH a byte-exact `.raw`
+ * file and a replayable asciinema-v2 `.cast`.
+ *
+ * DEVELOPER-ONLY: deliberately has no UI entry point — it is a debugging tool,
+ * not a feature, and it was removed from the terminal's overflow menu because it
+ * means nothing to an end user. Invoke it from DevTools:
+ *
+ *   const b = window.__OPENRIND_DESKTOP_ELECTRON__;
+ *   const [s] = await b.invokeDesktop("openrindPtyList");
+ *   await b.invokeDesktop("openrindPtyDumpBuffer", s.id);
+ *
+ * This exists to make terminal bugs measurable instead of guessable. The `.raw`
+ * file is exactly what the agent wrote, so `cat dump.raw` in a known-good
+ * terminal (or `asciinema play dump.cast`) reproduces the output with xterm.js
+ * entirely out of the picture. If the artifact renders correctly there but not
+ * in-app, the bug is ours (renderer/addons/theming/geometry); if it is mangled
+ * there too, the bytes were already corrupt upstream and no amount of emulator
+ * work will fix it. Always produce this before concluding anything about
+ * xterm.js.
+ *
+ * @param {string} sessionId
+ * @returns {Promise<{ rawPath: string, castPath: string, bytes: number,
+ *   chunks: number }>}
+ */
+async function dumpOpenrindShellPtyBuffer(sessionId) {
+  const bytes = openrindPty.getBufferBytes(sessionId);
+  const recording = openrindPty.getBufferRecording(sessionId);
+  if (!bytes || !recording) {
+    throw new Error(`No PTY session found for id ${sessionId}`);
+  }
+  const dir = path.join(app.getPath("logs"), "openrind-shell-dumps");
+  await mkdir(dir, { recursive: true });
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const safeSandbox =
+    recording.sandboxName.replace(/[^a-zA-Z0-9_.-]+/g, "-") || "sandbox";
+  const base = path.join(dir, `${safeSandbox}-${stamp}`);
+  const rawPath = `${base}.raw`;
+  const castPath = `${base}.cast`;
+
+  // Eviction means the oldest retained chunk rarely starts at t=0. Rebase onto
+  // the first retained chunk so playback starts immediately instead of sitting
+  // on a blank screen for however long the evicted prefix lasted.
+  const t0 = recording.chunks.length > 0 ? recording.chunks[0].t : 0;
+  const header = {
+    version: 2,
+    width: recording.cols,
+    height: recording.rows,
+    timestamp: Math.floor((recording.openedAt + t0 * 1000) / 1000),
+    env: { TERM: "xterm-256color", SHELL: "/bin/bash" },
+  };
+  const lines = [JSON.stringify(header)];
+  for (const chunk of recording.chunks) {
+    lines.push(JSON.stringify([Number((chunk.t - t0).toFixed(6)), "o", chunk.data]));
+  }
+
+  await writeFile(rawPath, bytes);
+  await writeFile(castPath, `${lines.join("\n")}\n`, "utf8");
+  return {
+    rawPath,
+    castPath,
+    bytes: bytes.length,
+    chunks: recording.chunks.length,
+  };
+}
+
+/**
  * Build the extra env forwarded into the Openrind Shell PTY at spawn time:
  * decrypted Anthropic / OpenrindGateway keys (so Claude Code auto-configures
  * its provider on first run without an interactive prompt) plus COLUMNS /
@@ -2508,6 +2574,34 @@ async function handleDesktopInvoke(event, command, ...args) {
         Number(input.cols),
         Number(input.rows),
       );
+    }
+    case "openrindPtyPause": {
+      // Renderer-driven backpressure: xterm's parse queue is above its high
+      // water mark, so stop draining the bridge's stdout until it drains.
+      // Without this a flooding TUI (an agent streaming a long diff, a `find /`)
+      // outruns the parser and the unparsed queue grows without bound.
+      const id = String(args[0] ?? "").trim();
+      if (!id) throw new Error("sessionId is required");
+      return openrindPty.pauseSession(id);
+    }
+    case "openrindPtyResume": {
+      const id = String(args[0] ?? "").trim();
+      if (!id) throw new Error("sessionId is required");
+      return openrindPty.resumeSession(id);
+    }
+    case "openrindPtyDumpBuffer": {
+      // Diagnostic: write the raw PTY byte stream to disk so a rendering bug
+      // can be reproduced (or ruled out) outside xterm.js. See
+      // dumpOpenrindShellPtyBuffer.
+      const id = String(args[0] ?? "").trim();
+      if (!id) throw new Error("sessionId is required");
+      const result = await dumpOpenrindShellPtyBuffer(id);
+      try {
+        shell.showItemInFolder(result.rawPath);
+      } catch {
+        // Headless / no file manager — the returned paths are still valid.
+      }
+      return result;
     }
     case "openrindPtyClose": {
       const id = String(args[0] ?? "").trim();

@@ -1262,14 +1262,6 @@ export function SettingsRoute() {
             onSelectBackend={(next) =>
               local.setPrefs((previous) => ({ ...previous, preferredSandboxBackend: next }))
             }
-            selectedProfile={local.prefs.preferredSandboxProfile}
-            onSelectProfile={(next) =>
-              local.setPrefs((previous) => ({ ...previous, preferredSandboxProfile: next }))
-            }
-            voiceProvider={local.prefs.voiceProvider}
-            onSelectVoiceProvider={(next) =>
-              local.setPrefs((previous) => ({ ...previous, voiceProvider: next }))
-            }
             doctor={openshellState.doctor}
             doctorLoading={openshellState.doctorLoading}
             doctorError={openshellState.doctorError}
