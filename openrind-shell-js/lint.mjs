@@ -697,6 +697,279 @@ try {
 }
 
 // ---------------------------------------------------------------------------
+// Lint 31: OpenClaw launch invariants
+// Catches: regressions that put the OpenClaw TUI back into a permanent
+// "connecting" state. Each rule below maps to a root cause we actually hit.
+// ---------------------------------------------------------------------------
+console.log('\n--- Lint: OpenClaw launch invariants ---');
+
+try {
+  const launch = readFileSync('../sandboxes/openrind-shell/openclaw-launch.sh', 'utf8');
+  const seeder = readFileSync('../sandboxes/openrind-shell/openclaw-config.mjs', 'utf8');
+  const setup = readFileSync('../sandboxes/openrind-shell/setup.sh', 'utf8');
+  const LAUNCH = 'sandboxes/openrind-shell/openclaw-launch.sh';
+  const SEEDER = 'sandboxes/openrind-shell/openclaw-config.mjs';
+  const SETUP = 'sandboxes/openrind-shell/setup.sh';
+  let ok = true;
+  const bad = (file, message) => {
+    fail(file, message);
+    ok = false;
+  };
+  // Negative checks ("must NOT contain X") have to ignore comments, or the
+  // header blocks that EXPLAIN why X is forbidden would trip them.
+  const codeOnly = (src) =>
+    src
+      .split('\n')
+      .filter((line) => !/^\s*#/.test(line))
+      .join('\n');
+  const launchCode = codeOnly(launch);
+  const setupCode = codeOnly(setup);
+
+  // gateway.bind must be pinned to loopback. OpenClaw defaults it to `auto`
+  // (0.0.0.0) inside a container, and only true 127.0.0.1 connections get the
+  // loopback trust that auto-approves device pairing.
+  if (!/bind:\s*'loopback'/.test(seeder)) {
+    bad(SEEDER, "must pin gateway.bind to 'loopback' — the container default is auto (0.0.0.0), which breaks pairing auto-approval");
+  }
+  if (!/mode:\s*'local'/.test(seeder)) {
+    bad(SEEDER, "must set gateway.mode to 'local' — the gateway refuses to start without it");
+  }
+
+  // The raw API key must never be written into a file the workspace sync
+  // persists to PostgreSQL. Env is OpenClaw's documented auth source.
+  if (/apiKey\s*:/.test(seeder)) {
+    bad(SEEDER, 'must not write an apiKey into openclaw.json — rely on ANTHROPIC_API_KEY in the environment');
+  }
+
+  // acpx declares 35 bundled runtime deps whose install is ~2.5GB / 95k files.
+  // OpenClaw's plugin loader walks that tree on TUI startup: ~4 minutes at 100%
+  // CPU during which the event loop never services the already-open WebSocket,
+  // so the TUI shows "connecting" the whole time. Denying it is the fix.
+  if (!/'acpx'/.test(seeder)) {
+    bad(SEEDER, "must deny the `acpx` plugin — its 2.5GB bundled dep tree makes the TUI burn ~4 minutes at 100% CPU on startup and show \"connecting\"");
+  }
+  // plugins.deny must be UNIONED with the restored value. Replacing it silently
+  // re-enables every plugin the user had disabled.
+  if (!/plugins\?\.deny|plugins\.deny/.test(seeder) || !/new Set\(\[\.\.\.previous/.test(seeder)) {
+    bad(SEEDER, 'plugins.deny must be unioned with the existing config value, never replaced');
+  }
+
+  // OpenClaw's schema REQUIRES a `models` array on every declared provider.
+  // Omitting it fails config validation with
+  // "models.providers.<id>.models: expected array, received undefined", which
+  // makes the gateway refuse to start (exit 78) — verified against 2026.4.29.
+  if (/providers\s*=|PROXY_PROVIDER_ID\]:/.test(seeder) && !/models:\s*\[/.test(seeder)) {
+    bad(SEEDER, 'a declared models provider must include a `models: [...]` array — OpenClaw config validation rejects a provider without it');
+  }
+
+  // A stale gateway.remote makes `openclaw tui` dial a dead host forever.
+  for (const key of ['gateway.remote', 'gateway.auth.token', 'plugins.allow']) {
+    if (!seeder.includes(`'${key}'`)) {
+      bad(SEEDER, `must remove ${key} from a restored config — it is a known "connecting" hang cause`);
+    }
+  }
+
+  // OPENCLAW_PLUGIN_STAGE_DIR in a client process triggers a staging loop that
+  // saturates the event loop and freezes the terminal. Gateway only.
+  const stageAssignments = [...launch.matchAll(/OPENCLAW_PLUGIN_STAGE_DIR=/g)].length;
+  if (stageAssignments !== 1 || !/setsid env \\\s*\n\s*OPENCLAW_PLUGIN_STAGE_DIR=/.test(launch)) {
+    bad(LAUNCH, 'OPENCLAW_PLUGIN_STAGE_DIR must be set exactly once, on the gateway spawn only — never for a client process');
+  }
+  // Every `openclaw tui` invocation must unset it. The exec spans several
+  // backslash-continued lines, so inspect the whole preceding command instead of
+  // trying to match a fixed number of lines.
+  const tuiInvocations = [...launchCode.matchAll(/openclaw tui\b/g)];
+  if (tuiInvocations.length === 0) {
+    bad(LAUNCH, 'no `openclaw tui` invocation found — the launcher must hand the terminal to the TUI');
+  }
+  for (const m of tuiInvocations) {
+    const command = launchCode.slice(Math.max(0, m.index - 400), m.index);
+    if (!/-u OPENCLAW_PLUGIN_STAGE_DIR/.test(command)) {
+      bad(LAUNCH, 'every `openclaw tui` invocation must unset OPENCLAW_PLUGIN_STAGE_DIR');
+    }
+  }
+  if (!/-u OPENCLAW_PLUGIN_STAGE_DIR/.test(setup)) {
+    bad(SETUP, 'the OpenClaw handover must unset OPENCLAW_PLUGIN_STAGE_DIR');
+  }
+
+  // There must always be a reachable degraded path. A working local agent beats
+  // a spinner.
+  if (!/openclaw tui --local/.test(launchCode)) {
+    bad(LAUNCH, 'must keep the `openclaw tui --local` fallback so a bad gateway never leaves the user on "connecting"');
+  }
+
+  // Every wait needs a budget. An unbounded poll is indistinguishable from a hang.
+  if (/while\s+(true|:)\s*;?\s*do/.test(launchCode) || /until\s+curl/.test(launchCode)) {
+    bad(LAUNCH, 'contains an unbounded wait loop — every wait must have an explicit budget');
+  }
+  if (!/GW_READY_TIMEOUT/.test(launch)) {
+    bad(LAUNCH, 'gateway readiness wait must be bounded by GW_READY_TIMEOUT');
+  }
+
+  // The old flow re-ran interactive onboarding on every launch and hung waiting
+  // for a browser. The config seeder replaced it entirely.
+  if (/openclaw onboard/.test(launchCode) || /openclaw onboard/.test(setupCode)) {
+    bad(/openclaw onboard/.test(launchCode) ? LAUNCH : SETUP, 'must not run `openclaw onboard` — headless onboarding waits on a browser that cannot open; seed the config instead');
+  }
+
+  // setsid forks, so $! is not the gateway pid. Liveness must be process-matched.
+  if (/setsid env/.test(launch) && !/pgrep -f 'openclaw gateway'/.test(launch)) {
+    bad(LAUNCH, 'gateway liveness must use pgrep — setsid forks, so $! is not the gateway pid');
+  }
+
+  if (ok) pass('OpenClaw launch invariants hold');
+} catch (err) {
+  if (err?.code === 'ENOENT') {
+    pass('OpenClaw launch invariants skipped (scripts not found)');
+  } else {
+    fail('OpenClaw launch invariants', err?.message || String(err));
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Lint: the database bootstrap is not repeated within one container
+// Catches: setup.sh running migrations + workspace restore + flush twice per
+// OpenClaw session (once for the loading-screen prewarm, once at connect),
+// which measured 28s of a ~75s provisioning against a remote PostgreSQL.
+// ---------------------------------------------------------------------------
+console.log('\n--- Lint: setup.sh bootstrap is done once per container ---');
+
+try {
+  const SETUP = 'sandboxes/openrind-shell/setup.sh';
+  const setup = readFileSync(`../${SETUP}`, 'utf8');
+  let ok = true;
+  const bad = (message) => {
+    fail(SETUP, message);
+    ok = false;
+  };
+
+  // The marker must never live under /home/agent — that tree is persisted to
+  // PostgreSQL, so the skip would leak into every future container.
+  if (!/BOOTSTRAP_MARKER=\/tmp\//.test(setup)) {
+    bad('the bootstrap marker must live in /tmp, never under /home/agent (which is persisted)');
+  }
+  // Keyed on the workspace AND the container run. /tmp survives `docker restart`,
+  // so a marker keyed on the workspace alone would skip the restore after a
+  // restart — and another sandbox sharing that workspace may have changed
+  // PostgreSQL in the meantime.
+  if (!/BOOTSTRAP_TOKEN="\$WORKSPACE_ID:\$CONTAINER_RUN"/.test(setup)) {
+    bad('the bootstrap marker must be keyed on WORKSPACE_ID *and* the container run');
+  }
+  if (!/\/proc\/1\/stat/.test(setup)) {
+    bad('the container run must come from PID 1 starttime — /tmp survives docker restart');
+  }
+
+  // Written only AFTER the flush: a bootstrap that dies midway must be retried
+  // in full, not skipped because a marker was dropped too early.
+  const markerWrite = setup.indexOf('> "$BOOTSTRAP_MARKER"');
+  const flushStart = setup.indexOf('flushing /home/agent to workspace');
+  if (markerWrite === -1 || flushStart === -1 || markerWrite < flushStart) {
+    bad('the bootstrap marker must be written after the flush, not before it');
+  }
+
+  // THE SUBTLE ONE. The sync daemon flushes /home/agent to PostgreSQL from its
+  // SIGTERM handler, and setup.sh's EXIT trap is what sends that SIGTERM. That
+  // shutdown flush is the ONLY thing that persists whatever openclaw-launch.sh
+  // wrote during the prewarm (seeded config, memory sqlite) — the connect run
+  // now skips its own flush. So the daemon start must stay OUTSIDE the skipped
+  // block: skipping it to save three seconds would silently lose agent state.
+  const skipEnd = setup.indexOf('end: skip-when-already-bootstrapped');
+  const daemonStart = setup.indexOf('starting openrind-shell-bash daemon');
+  if (skipEnd === -1 || daemonStart === -1 || daemonStart < skipEnd) {
+    bad('the sync daemon must start on EVERY run — its SIGTERM flush is what persists the prewarm writes');
+  }
+
+  if (ok) pass('setup.sh bootstraps the workspace once per container');
+} catch (err) {
+  if (err?.code === 'ENOENT') {
+    pass('setup.sh bootstrap lint skipped (script not found)');
+  } else {
+    fail('setup.sh bootstrap', err?.message || String(err));
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Lint: PTY bridge preserves the desktop terminal's scrollback
+// Catches: the agent's own full-screen clear wiping OpenClaw's banner and the
+// whole launch progress log off the screen AND out of the scrollback, so there
+// is nothing left to scroll back to.
+// ---------------------------------------------------------------------------
+console.log('\n--- Lint: PTY bridge scrollback preservation ---');
+
+try {
+  const BRIDGE = 'sandboxes/openrind-shell/openrind-pty-bridge.py';
+  const LAUNCH = 'sandboxes/openrind-shell/openclaw-launch.sh';
+  const bridge = readFileSync(`../${BRIDGE}`, 'utf8');
+  const launch = readFileSync(`../${LAUNCH}`, 'utf8');
+  let ok = true;
+  const bad = (file, message) => {
+    fail(file, message);
+    ok = false;
+  };
+
+  // pi-tui's forced full redraw emits ESC[2J ESC[H ESC[3J. Both halves have to
+  // be handled, or the banner and the launch log are gone for good.
+  if (!/CLEAR_AND_HOME\s*=\s*b"\\x1b\[2J\\x1b\[H"/.test(bridge)) {
+    bad(BRIDGE, 'must match the exact ESC[2J ESC[H pair pi-tui emits — a bare ESC[2J must stay untouched, because ED does not move the cursor');
+  }
+  if (!/ERASE_SCROLLBACK\s*=\s*b"\\x1b\[3J"/.test(bridge)) {
+    bad(BRIDGE, 'must drop ESC[3J — the agent never needs to erase the user scrollback for its own rendering to be correct');
+  }
+
+  // A linefeed on the bottom row is the ONLY sequence that pushes a line into
+  // scrollback. CSI S and ESC[2J both discard it, so neither can replace it.
+  if (!/b"\\n"\s*\*\s*used/.test(bridge)) {
+    bad(BRIDGE, 'the clear rewrite must scroll with one linefeed per row — CSI S and ESC[2J discard the lines instead of pushing them into scrollback');
+  }
+  // Only the DRAWN rows may be pushed. Scrolling a full screen also pushes the
+  // blank tail, which buried the banner 29 lines above the viewport (13 now).
+  if (!/_used_rows/.test(bridge)) {
+    bad(BRIDGE, 'the rewrite must push only the rows the agent drew, not a whole screen of mostly-blank lines');
+  }
+  // The trailing erase is what makes the row estimate safe to get wrong: too
+  // short and the erase cleans up, too long and we pushed a few blank lines.
+  if (!/erase whatever remains/.test(bridge)) {
+    bad(BRIDGE, 'the rewrite must end with ESC[2J so a short row estimate still leaves the agent a blank screen');
+  }
+  if (/\\x1b\[%d\s*S/.test(bridge) || /\\x1b\[\d+S/.test(bridge)) {
+    bad(BRIDGE, 'uses CSI S to scroll — xterm.js implements it as a line delete, so the preserved content is destroyed anyway');
+  }
+
+  // The filter buffers partial sequences, so every exit path has to release them.
+  if (!/_keeper\.flush\(\)/.test(bridge) || !/_keeper\.expired\(\)/.test(bridge)) {
+    bad(BRIDGE, 'held-back bytes must be released by both expired() (idle) and flush() (teardown), or the agent last output can be swallowed');
+  }
+
+  // Raw passthrough must stay byte-transparent: an external terminal is the
+  // user's to manage, exactly like TERMINAL_RESET.
+  if (!/if _mode == "framed":\s*\n\s*write_all\(1, _keeper\.feed\(chunk\)\)/.test(bridge)) {
+    bad(BRIDGE, 'the rewrite must be gated on framed mode — raw passthrough has to stay byte-transparent');
+  }
+
+  // The launcher's own wipe has to be written in the order the filter matches,
+  // otherwise the progress log is erased instead of scrolled away.
+  if (!/clear_screen\(\)\s*\{\s*printf '\\033\[3J\\033\[2J\\033\[H'/.test(launch)) {
+    bad(LAUNCH, "clear_screen must emit ESC[3J ESC[2J ESC[H in that order — 'home then ED-2' is the same state but is not the pair the bridge rewrites");
+  }
+
+  // OpenClaw strips every decorative glyph unless the terminal is on its list.
+  if (!/TERM_PROGRAM=vscode/.test(launch)) {
+    bad(LAUNCH, 'must declare TERM_PROGRAM=vscode (xterm.js) or OpenClaw supportsDecorativeEmoji() strips the lobster from the banner and every tagline');
+  }
+  if (!/if \[ -z "\$\{TERM_PROGRAM:-\}" \]/.test(launch)) {
+    bad(LAUNCH, 'must not override a TERM_PROGRAM the user terminal already declared');
+  }
+
+  if (ok) pass('PTY bridge preserves banner + launch log in the scrollback');
+} catch (err) {
+  if (err?.code === 'ENOENT') {
+    pass('PTY bridge scrollback lint skipped (scripts not found)');
+  } else {
+    fail('PTY bridge scrollback', err?.message || String(err));
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Summary
 // ---------------------------------------------------------------------------
 
