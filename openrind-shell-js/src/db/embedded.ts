@@ -11,6 +11,10 @@ import type { DbPool } from "./pool.js";
 /**
  * Get a database pool connected to the PostgreSQL instance at DATABASE_URL.
  * Throws if DATABASE_URL is not set.
+ *
+ * Retries transient connection failures (e.g. Supavisor timeouts while a
+ * paused instance is waking up) to prevent the setup script from bailing
+ * out too early.
  */
 export async function getDatabaseConnection(): Promise<{
   pool: DbPool;
@@ -26,15 +30,45 @@ export async function getDatabaseConnection(): Promise<{
   }
 
   const pool = createPool(process.env.DATABASE_URL);
+  
   let client;
-  try {
-    client = await pool.connect();
-    await client.query("SELECT 1");
-  } catch (err) {
-    await pool.end().catch(() => {});
-    throw annotateConnectionError(err, process.env.DATABASE_URL);
+  let lastErr;
+  
+  // Try up to 6 times for connection issues (giving paused instances ~2 minutes to wake up)
+  for (let attempt = 1; attempt <= 6; attempt++) {
+    try {
+      client = await pool.connect();
+      await client.query("SELECT 1");
+      lastErr = null;
+      break;
+    } catch (err) {
+      lastErr = err;
+      const msg = err instanceof Error ? err.message : String(err);
+      
+      // If it's a Supavisor timeout or ECONNREFUSED, we can retry
+      if (/\{:error,\s*:timeout\}|ECONNREFUSED|ECONNRESET/i.test(msg)) {
+        if (client) {
+          try { client.release(); } catch {}
+          client = undefined;
+        }
+        if (attempt < 6) {
+          console.log(`[db] Connection attempt ${attempt} failed, retrying in 5s...`);
+          await new Promise(resolve => setTimeout(resolve, 5000));
+          continue;
+        }
+      } else {
+        // Not a transient error, break and throw
+        break;
+      }
+    }
   }
-  client.release();
+
+  if (lastErr) {
+    await pool.end().catch(() => {});
+    throw annotateConnectionError(lastErr, process.env.DATABASE_URL);
+  }
+  
+  client!.release();
   return {
     pool,
     connectionString: process.env.DATABASE_URL,
@@ -53,6 +87,8 @@ export async function getDatabaseConnection(): Promise<{
  * the connection reaches Supavisor (so it's not a network/policy problem) but
  * the tenant lookup fails. The raw error gives no hint that the *host* is wrong,
  * which sends people chasing credentials/networking instead.
+ *
+ * Also annotates `{:error, :timeout}` to explicitly mention paused instances.
  */
 function annotateConnectionError(
   err: unknown,
@@ -60,26 +96,36 @@ function annotateConnectionError(
 ): Error {
   const original = err instanceof Error ? err : new Error(String(err));
   const message = original.message || "";
-  if (!/tenant or user not found|tenant\/user .* not found/i.test(message)) {
+  let hint = "";
+
+  if (/tenant or user not found|tenant\/user .* not found/i.test(message)) {
+    let host = "(unparseable host)";
+    try {
+      host = new URL(connectionString).host;
+    } catch {
+      /* leave placeholder */
+    }
+
+    hint =
+      `\n\nThis is a Supabase connection-pooler "tenant not found" error, which almost ` +
+      `always means DATABASE_URL points at the wrong pooler host for your project ` +
+      `(current host: ${host}).\n` +
+      `The connection DID reach Supabase, so this is NOT a network or firewall problem.\n` +
+      `Fix: open your Supabase dashboard → Connect → "Connection pooling", and copy the ` +
+      `exact host. Check the shard (aws-0-... vs aws-1-...) and region match your project ` +
+      `— e.g. a project on aws-0-ap-south-1 will fail on aws-1-ap-south-1. The username ` +
+      `must stay in the "postgres.<project-ref>" form.`;
+  } else if (/\{:error,\s*:timeout\}/.test(message)) {
+    hint =
+      `\n\nThe connection reached the Supabase connection pooler, but the pooler timed ` +
+      `out trying to reach the underlying database.\n` +
+      `If your Supabase project is on the Free plan, it may have been paused due to ` +
+      `inactivity. Open your Supabase dashboard to wake it up, which typically takes 1-3 minutes.`;
+  }
+
+  if (!hint) {
     return original;
   }
-
-  let host = "(unparseable host)";
-  try {
-    host = new URL(connectionString).host;
-  } catch {
-    /* leave placeholder */
-  }
-
-  const hint =
-    `\n\nThis is a Supabase connection-pooler "tenant not found" error, which almost ` +
-    `always means DATABASE_URL points at the wrong pooler host for your project ` +
-    `(current host: ${host}).\n` +
-    `The connection DID reach Supabase, so this is NOT a network or firewall problem.\n` +
-    `Fix: open your Supabase dashboard → Connect → "Connection pooling", and copy the ` +
-    `exact host. Check the shard (aws-0-... vs aws-1-...) and region match your project ` +
-    `— e.g. a project on aws-0-ap-south-1 will fail on aws-1-ap-south-1. The username ` +
-    `must stay in the "postgres.<project-ref>" form.`;
 
   const annotated = new Error(message + hint);
   annotated.stack = original.stack;
