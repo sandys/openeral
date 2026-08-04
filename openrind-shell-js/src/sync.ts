@@ -74,6 +74,15 @@ export const HOME_SYNC_EXCLUDE_PATH_PREFIXES = [
   // Memory-core data (`/.openclaw/memory`, agent knowledge) is deliberately NOT
   // excluded, so the agent still retains context across sandboxes — it is the
   // verbatim transcript replay that is unwanted, not the memory.
+  // Legacy memory indices and migration markers. OpenClaw migrated its global
+  // memory index to a per-agent structure, but because `/.openclaw/memory` is
+  // on the sync path, the legacy file and its `.migrated` sidecar were
+  // restored into every new sandbox. OpenClaw saw them, re-ran the migration,
+  // failed to write the sidecar (it already existed), and printed ~10 lines of
+  // migration and doctor warnings at startup — pushing the version banner off
+  // the screen. Exclude them so the legacy state finally ages out.
+  '/.openclaw/memory/main.sqlite',
+  '/.openclaw/memory/main.sqlite.migrated',
   '/.openclaw/agents/*/sessions',
   '/.openclaw/sessions', // legacy/alternate layout — harmless if absent
 ];
