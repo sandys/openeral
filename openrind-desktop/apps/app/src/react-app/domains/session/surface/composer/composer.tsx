@@ -12,6 +12,7 @@ import {
   type ReactComposerNotice as ReactComposerNoticeData,
 } from "./notice";
 import { MicButton } from "./voice/mic-button";
+import { VoiceEngineMenu } from "./voice/voice-engine-menu";
 
 // Append a voice transcript to the existing prompt draft, inserting a single
 // separating space unless the draft already ends in whitespace.
@@ -1374,6 +1375,8 @@ export function ReactSessionComposer(props: ComposerProps) {
               <span className="truncate leading-tight">{props.modelLabel}</span>
               <ChevronDown size={13} className="shrink-0 ml-0.5" />
             </button>
+
+            <VoiceEngineMenu direction="up" align="left" />
 
             {props.modelBehaviorOptions?.length ? (
               <div ref={variantMenuRef} className="relative">

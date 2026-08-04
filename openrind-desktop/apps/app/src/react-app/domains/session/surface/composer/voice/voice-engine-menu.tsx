@@ -52,7 +52,7 @@ export function VoiceEngineMenu(props: VoiceEngineMenuProps) {
     <div ref={ref} className="relative">
       <button
         type="button"
-        className="flex items-center gap-1 rounded-md px-2 py-1.5 text-[12px] font-medium text-gray-10 transition-colors hover:bg-gray-2/70 hover:text-dls-text"
+        className="flex min-w-0 items-center gap-1 rounded-md px-1.5 py-1 text-[12px] font-medium text-gray-10 transition-colors hover:bg-gray-3 hover:text-gray-12"
         onClick={() => setOpen((value) => !value)}
         onMouseDown={(e) => e.preventDefault()}
         aria-haspopup="menu"
@@ -60,36 +60,43 @@ export function VoiceEngineMenu(props: VoiceEngineMenuProps) {
         title={`Voice engine: ${current.label} (${current.hint}). Click to change.`}
       >
         <span>{current.label}</span>
-        <ChevronDown size={12} className={props.direction === "up" ? "rotate-180" : ""} />
+        <ChevronDown size={13} className="shrink-0 ml-0.5" />
       </button>
       {open ? (
         <div
-          className={`absolute ${vertical} ${horizontal} z-30 w-52 rounded-2xl border border-dls-border bg-dls-surface p-1.5 shadow-[var(--dls-shell-shadow)]`}
+          className={`absolute ${vertical} ${horizontal} z-30 w-64 overflow-hidden rounded-[18px] border border-dls-border bg-dls-surface shadow-[var(--dls-shell-shadow)]`}
           role="menu"
         >
-          {ENGINE_OPTIONS.map((option) => {
-            const active = option.value === provider;
-            return (
-              <button
-                key={option.value}
-                type="button"
-                role="menuitemradio"
-                aria-checked={active}
-                className="flex w-full items-center justify-between gap-2 rounded-xl px-3 py-2 text-left transition-colors hover:bg-gray-2"
-                onMouseDown={(e) => e.preventDefault()}
-                onClick={() => {
-                  local.setPrefs((prev) => ({ ...prev, voiceProvider: option.value }));
-                  setOpen(false);
-                }}
-              >
-                <span className="flex flex-col">
-                  <span className="text-sm text-gray-12">{option.label}</span>
-                  <span className="text-[11px] text-gray-9">{option.hint}</span>
-                </span>
-                {active ? <Check size={15} className="shrink-0 text-dls-text" /> : null}
-              </button>
-            );
-          })}
+          <div className="border-b border-dls-border px-3 pb-1 pt-2 text-[10px] font-semibold uppercase tracking-[0.2em] text-gray-10">
+            Voice
+          </div>
+          <div className="space-y-1 p-2">
+            {ENGINE_OPTIONS.map((option) => {
+              const active = option.value === provider;
+              return (
+                <button
+                  key={option.value}
+                  type="button"
+                  role="menuitemradio"
+                  aria-checked={active}
+                  className={`flex w-full items-center justify-between gap-2 rounded-lg px-3 py-2 text-left transition-colors ${
+                    active ? "bg-gray-2 text-gray-12" : "text-gray-11 hover:bg-gray-2/70"
+                  }`}
+                  onMouseDown={(e) => e.preventDefault()}
+                  onClick={() => {
+                    local.setPrefs((prev) => ({ ...prev, voiceProvider: option.value }));
+                    setOpen(false);
+                  }}
+                >
+                  <span className="flex flex-col">
+                    <span className="text-xs font-medium">{option.label}</span>
+                    <span className="text-[10px] text-gray-9">{option.hint}</span>
+                  </span>
+                  {active ? <Check size={14} className="shrink-0 text-gray-10" /> : null}
+                </button>
+              );
+            })}
+          </div>
         </div>
       ) : null}
     </div>
