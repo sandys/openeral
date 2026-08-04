@@ -131,11 +131,15 @@ test("getCredentialStatus: all unset on a fresh dir", async () => {
 
 test("getCredentialStatus: reflects mixed state", async () => {
   await creds.setCredential("databaseUrl", "DB");
-  await creds.setCredential("openrindGatewayApiKey", "SK");
+  await creds.setCredential("openrindGatewayApiKey", "sk-st-gateway-key-1234");
   const status = await creds.getCredentialStatus();
   assert.equal(status.databaseUrl, "set");
   assert.equal(status.anthropicApiKey, "unset");
   assert.equal(status.openrindGatewayApiKey, "set");
+  assert.equal(status.databaseUrl_masked, "••••••");
+  assert.equal(status.openrindGatewayApiKey_masked, "sk••••34");
+  assert.ok(status.databaseUrl_updatedAt > 0);
+  assert.ok(status.openrindGatewayApiKey_updatedAt > 0);
 });
 
 test("getCredentialStatus: encryptionAvailable is true in test mode", async () => {

@@ -1,6 +1,6 @@
 /** @jsxImportSource react */
-import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
-import { Eye, EyeOff, Plus, RefreshCw, Trash2, X } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Plus, RefreshCw, X } from "lucide-react";
 
 import type { OpenrindDesktopServerClient } from "../../../../app/lib/openrind-desktop-server";
 import {
@@ -12,12 +12,12 @@ import { Button } from "../../../design-system/button";
 import { ConfirmModal } from "../../../design-system/modals/confirm-modal";
 import { TextInput } from "../../../design-system/text-input";
 import { clearOpenrindDesktopEnvSystemContextCache } from "../../session/sync/env-context";
+import type {
+  OpenrindShellCredentialKey,
+  OpenrindShellCredentialStatus,
+} from "../state/openshell-state";
 
 const settingsPanelClass = "rounded-[28px] border border-dls-border bg-dls-surface p-5 md:p-6";
-const rowIconButtonClass =
-  "inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-gray-7/80 bg-gray-2 text-gray-11 shadow-sm transition-colors hover:border-gray-8 hover:bg-gray-4 hover:text-gray-12 focus:outline-none focus:ring-2 focus:ring-[rgba(var(--dls-accent-rgb),0.25)] disabled:cursor-not-allowed disabled:opacity-50";
-const rowDangerIconButtonClass =
-  "inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-red-7/75 bg-red-3/40 text-red-10 shadow-sm transition-colors hover:border-red-8 hover:bg-red-4/80 hover:text-red-11 focus:outline-none focus:ring-2 focus:ring-red-7/30 disabled:cursor-not-allowed disabled:opacity-50";
 
 const KEY_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const RESERVED_PREFIXES = ["OPENRIND_DESKTOP_", "OPENCODE_"] as const;
@@ -33,7 +33,56 @@ export type EnvironmentViewProps = {
   applyBlocked?: boolean;
   applyBlockedReason?: string | null;
   runtimeKey?: string | null;
+
+  // Integrated Sandbox Credentials
+  credentialStatus?: OpenrindShellCredentialStatus | null;
+  credentialBusy?: boolean;
+  onSetCredential?: (key: OpenrindShellCredentialKey, value: string) => Promise<void>;
+  onClearCredential?: (key: OpenrindShellCredentialKey) => Promise<void>;
 };
+
+type PredefinedCredentialDef = {
+  statusKey: OpenrindShellCredentialKey;
+  envVarName: string;
+  label: string;
+  description: string;
+  placeholder: string;
+};
+
+const PREDEFINED_CREDENTIALS: PredefinedCredentialDef[] = [
+  {
+    statusKey: "databaseUrl",
+    envVarName: "DATABASE_URL",
+    label: "DATABASE_URL",
+    description:
+      "PostgreSQL connection string (Supabase / Neon / firm-internal). Required for any Openrind Shell sandbox.",
+    placeholder: "postgresql://user:password@host:5432/dbname",
+  },
+  {
+    statusKey: "anthropicApiKey",
+    envVarName: "ANTHROPIC_API_KEY",
+    label: "ANTHROPIC_API_KEY",
+    description:
+      "Anthropic API key (sk-ant-...). Required for the OpenClaw agent; Claude Code can use it directly or via the OpenShell provider system.",
+    placeholder: "sk-ant-...",
+  },
+  {
+    statusKey: "openrindGatewayApiKey",
+    envVarName: "OPENRIND_GATEWAY_API_KEY",
+    label: "OPENRIND_GATEWAY_API_KEY",
+    description:
+      "Routes Claude Code API calls through a Openrind Gateway proxy for token + cost metering. Leave unset to talk to Anthropic directly.",
+    placeholder: "sk-st-...",
+  },
+  {
+    statusKey: "elevenLabsApiKey",
+    envVarName: "ELEVENLABS_API_KEY",
+    label: "ELEVENLABS_API_KEY",
+    description:
+      "ElevenLabs API key for the Scribe speech-to-text model. Only needed when the ElevenLabs voice engine is selected in Settings → Sandbox.",
+    placeholder: "sk_...",
+  },
+];
 
 function maskValue(value: string): string {
   if (!value) return "";
@@ -62,15 +111,32 @@ function validateKey(key: string): string | null {
 export function EnvironmentView(props: EnvironmentViewProps) {
   const { client, isRemoteWorkspace, onStatusMessage } = props;
   const canEdit = !isRemoteWorkspace && client !== null;
-  const editorTitleId = useId();
 
+  // Custom environment items from workspace server
   const [items, setItems] = useState<EnvItem[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [revealed, setRevealed] = useState<Record<string, boolean>>({});
-  const [editor, setEditor] = useState<{ mode: "add" | "edit"; key: string; value: string } | null>(null);
-  const [editorError, setEditorError] = useState<string | null>(null);
-  const [saving, setSaving] = useState(false);
+
+  // Predefined sandbox credentials state
+  const [editingPredefinedKey, setEditingPredefinedKey] = useState<OpenrindShellCredentialKey | null>(null);
+  const [predefinedValue, setPredefinedValue] = useState("");
+  const [predefinedError, setPredefinedError] = useState<string | null>(null);
+  const [predefinedSaving, setPredefinedSaving] = useState(false);
+
+  // Custom variable inline edit state
+  const [editingCustomKey, setEditingCustomKey] = useState<string | null>(null);
+  const [customEditValue, setCustomEditValue] = useState("");
+  const [customEditError, setCustomEditError] = useState<string | null>(null);
+  const [savingCustom, setSavingCustom] = useState(false);
+
+  // Inline "Add variable" state
+  const [isAddingInline, setIsAddingInline] = useState(false);
+  const [newKey, setNewKey] = useState("");
+  const [newValue, setNewValue] = useState("");
+  const [addError, setAddError] = useState<string | null>(null);
+  const [savingAdd, setSavingAdd] = useState(false);
+
+  // Deletion & Apply states
   const [deleteCandidate, setDeleteCandidate] = useState<EnvItem | null>(null);
   const [deletingKey, setDeletingKey] = useState<string | null>(null);
   const [pendingChanges, setPendingChanges] = useState(() =>
@@ -79,6 +145,7 @@ export function EnvironmentView(props: EnvironmentViewProps) {
   const [applyConfirmOpen, setApplyConfirmOpen] = useState(false);
   const [applyBusy, setApplyBusy] = useState(false);
   const [applyError, setApplyError] = useState<string | null>(null);
+
   const refreshRequestId = useRef(0);
   const applyBlockedReason = props.applyBlocked
     ? props.applyBlockedReason ?? t("settings.environment.apply_blocked_active_tasks")
@@ -88,7 +155,6 @@ export function EnvironmentView(props: EnvironmentViewProps) {
     const requestId = ++refreshRequestId.current;
     if (!client || isRemoteWorkspace) {
       setItems([]);
-      setRevealed({});
       setError(null);
       setLoading(false);
       return;
@@ -117,33 +183,14 @@ export function EnvironmentView(props: EnvironmentViewProps) {
 
   useEffect(() => {
     if (canEdit) return;
-    setEditor(null);
-    setEditorError(null);
+    setEditingPredefinedKey(null);
+    setEditingCustomKey(null);
+    setIsAddingInline(false);
     setDeleteCandidate(null);
     setDeletingKey(null);
     setApplyConfirmOpen(false);
     setApplyError(null);
   }, [canEdit]);
-
-  const existingKeys = useMemo(() => new Set(items.map((item) => item.key)), [items]);
-
-  const openAdd = () => {
-    if (!canEdit) return;
-    setEditorError(null);
-    setEditor({ mode: "add", key: "", value: "" });
-  };
-
-  const openEdit = (item: EnvItem) => {
-    if (!canEdit) return;
-    setEditorError(null);
-    setEditor({ mode: "edit", key: item.key, value: item.value });
-  };
-
-  const closeEditor = () => {
-    if (saving) return;
-    setEditor(null);
-    setEditorError(null);
-  };
 
   const markChangesPending = () => {
     clearOpenrindDesktopEnvSystemContextCache();
@@ -153,41 +200,152 @@ export function EnvironmentView(props: EnvironmentViewProps) {
     onStatusMessage(t("settings.environment.restart_required"));
   };
 
-  useEffect(() => {
-    if (!editor) return;
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") closeEditor();
-    };
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [editor, saving]);
+  // Predefined Sandbox Credentials handlers
+  const startEditPredefined = (key: OpenrindShellCredentialKey) => {
+    if (!canEdit) return;
+    setEditingPredefinedKey(key);
+    setPredefinedValue("");
+    setPredefinedError(null);
+  };
 
-  const submitEditor = async () => {
-    if (!editor || !client) return;
-    const keyError = validateKey(editor.key);
-    if (keyError) {
-      setEditorError(keyError);
-      return;
-    }
-    if (editor.mode === "add" && existingKeys.has(editor.key.trim())) {
-      setEditorError(t("settings.environment.validation_duplicate"));
-      return;
-    }
-    setSaving(true);
-    setEditorError(null);
+  const cancelEditPredefined = () => {
+    setEditingPredefinedKey(null);
+    setPredefinedValue("");
+    setPredefinedError(null);
+  };
+
+  const submitPredefined = async (key: OpenrindShellCredentialKey) => {
+    if (!props.onSetCredential || !predefinedValue.trim()) return;
+    setPredefinedSaving(true);
+    setPredefinedError(null);
     try {
-      await client.upsertUserEnv([{ key: editor.key.trim(), value: editor.value }]);
+      await props.onSetCredential(key, predefinedValue.trim());
       markChangesPending();
-      closeEditor();
-      await refresh();
+      cancelEditPredefined();
     } catch (err) {
-      setEditorError(err instanceof Error ? err.message : t("app.unknown_error"));
+      setPredefinedError(err instanceof Error ? err.message : String(err));
     } finally {
-      setSaving(false);
+      setPredefinedSaving(false);
     }
   };
 
-  const confirmDelete = async () => {
+  const handleClearPredefined = async (key: OpenrindShellCredentialKey) => {
+    if (!props.onClearCredential) return;
+    setPredefinedSaving(true);
+    try {
+      await props.onClearCredential(key);
+      markChangesPending();
+      cancelEditPredefined();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setPredefinedSaving(false);
+    }
+  };
+
+  // Custom environment variable edit handlers
+  const startEditCustom = (item: EnvItem) => {
+    if (!canEdit) return;
+    setEditingCustomKey(item.key);
+    setCustomEditValue(item.value);
+    setCustomEditError(null);
+  };
+
+  const cancelCustomEdit = () => {
+    setEditingCustomKey(null);
+    setCustomEditValue("");
+    setCustomEditError(null);
+  };
+
+  const submitCustomEdit = async (key: string) => {
+    if (!client) return;
+    setSavingCustom(true);
+    setCustomEditError(null);
+    try {
+      await client.upsertUserEnv([{ key, value: customEditValue }]);
+      markChangesPending();
+      cancelCustomEdit();
+      await refresh();
+    } catch (err) {
+      setCustomEditError(err instanceof Error ? err.message : t("app.unknown_error"));
+    } finally {
+      setSavingCustom(false);
+    }
+  };
+
+  // Inline "Add variable" handlers
+  const openAddInline = () => {
+    if (!canEdit) return;
+    setIsAddingInline(true);
+    setNewKey("");
+    setNewValue("");
+    setAddError(null);
+  };
+
+  const closeAddInline = () => {
+    if (savingAdd) return;
+    setIsAddingInline(false);
+    setNewKey("");
+    setNewValue("");
+    setAddError(null);
+  };
+
+  const submitInlineAdd = async () => {
+    const trimmedKey = newKey.trim();
+    if (!trimmedKey) {
+      setAddError(t("settings.environment.validation_empty"));
+      return;
+    }
+
+    // Check if key matches a predefined credential
+    const matchedPredefined = PREDEFINED_CREDENTIALS.find(
+      (p) => p.envVarName.toUpperCase() === trimmedKey.toUpperCase(),
+    );
+
+    if (matchedPredefined && props.onSetCredential) {
+      setSavingAdd(true);
+      setAddError(null);
+      try {
+        await props.onSetCredential(matchedPredefined.statusKey, newValue);
+        markChangesPending();
+        closeAddInline();
+      } catch (err) {
+        setAddError(err instanceof Error ? err.message : String(err));
+      } finally {
+        setSavingAdd(false);
+      }
+      return;
+    }
+
+    // Validate custom key
+    const keyErr = validateKey(trimmedKey);
+    if (keyErr) {
+      setAddError(keyErr);
+      return;
+    }
+
+    const existingKeys = new Set(items.map((i) => i.key));
+    if (existingKeys.has(trimmedKey)) {
+      setAddError(t("settings.environment.validation_duplicate"));
+      return;
+    }
+
+    if (!client) return;
+    setSavingAdd(true);
+    setAddError(null);
+    try {
+      await client.upsertUserEnv([{ key: trimmedKey, value: newValue }]);
+      markChangesPending();
+      closeAddInline();
+      await refresh();
+    } catch (err) {
+      setAddError(err instanceof Error ? err.message : t("app.unknown_error"));
+    } finally {
+      setSavingAdd(false);
+    }
+  };
+
+  const confirmDeleteCustom = async () => {
     if (!client || !deleteCandidate || deletingKey) return;
     const key = deleteCandidate.key;
     setDeletingKey(key);
@@ -229,23 +387,30 @@ export function EnvironmentView(props: EnvironmentViewProps) {
     }
   };
 
+  // Filter out any custom user items that duplicate predefined env var names
+  const customItems = useMemo(() => {
+    const predefinedNames = new Set(PREDEFINED_CREDENTIALS.map((p) => p.envVarName));
+    return items.filter((item) => !predefinedNames.has(item.key));
+  }, [items]);
+
   return (
     <div className="space-y-6">
-      <div className={`${settingsPanelClass} space-y-4`}>
+      <div className={`${settingsPanelClass} space-y-5`}>
+        {/* Header */}
         <div className="flex items-start justify-between gap-4">
           <div className="min-w-0">
             <div className="text-sm font-medium text-gray-12">
               {t("settings.environment.title")}
             </div>
-            <p className="mt-1 max-w-[52ch] text-xs text-gray-10">
-              {t("settings.environment.description")}
+            <p className="mt-1 max-w-[58ch] text-xs text-gray-10 leading-relaxed">
+              Save API keys, credentials, and tokens for local agents, skills, sandboxes, and MCP servers. Secrets stay on this device.
             </p>
           </div>
           {canEdit ? (
             <Button
               variant="primary"
               className="h-8 shrink-0 px-3 py-0 text-xs"
-              onClick={openAdd}
+              onClick={openAddInline}
             >
               <Plus size={13} className="mr-1.5" />
               {t("settings.environment.add_button")}
@@ -253,18 +418,28 @@ export function EnvironmentView(props: EnvironmentViewProps) {
           ) : null}
         </div>
 
+        {/* Remote workspace notice */}
         {isRemoteWorkspace ? (
           <div className="rounded-lg border border-dls-border/60 bg-dls-surface-muted/40 px-3 py-2 text-xs text-gray-10">
             {t("settings.environment.remote_workspace_hint")}
           </div>
         ) : null}
 
+        {/* OS Keyring warning */}
+        {props.credentialStatus && props.credentialStatus.encryptionAvailable === false ? (
+          <div className="rounded-xl border border-amber-7/50 bg-amber-2/30 p-3 text-xs text-amber-12">
+            The OS keyring isn&apos;t available in this session. Openrind Shell credentials cannot be stored securely until you launch from a graphical session (or install gnome-keyring / kwallet on Linux).
+          </div>
+        ) : null}
+
+        {/* General error message */}
         {error ? (
           <div className="rounded-lg border border-red-7 bg-red-3/40 px-3 py-2 text-xs text-red-11">
             {error}
           </div>
         ) : null}
 
+        {/* Pending restart banner */}
         {pendingChanges && !isRemoteWorkspace ? (
           <div className="rounded-xl border border-amber-7/50 bg-amber-3/30 px-3 py-3">
             <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
@@ -316,167 +491,257 @@ export function EnvironmentView(props: EnvironmentViewProps) {
           </div>
         ) : null}
 
-        {isRemoteWorkspace ? null : loading && items.length === 0 ? (
-          <div className="py-6 text-center text-xs text-gray-10">
-            {t("settings.environment.loading")}
-          </div>
-        ) : items.length === 0 ? (
-          <div className="rounded-2xl border border-dashed border-dls-border/60 px-4 py-8 text-center">
-            <div className="text-sm text-gray-12">
-              {t("settings.environment.empty_title")}
-            </div>
-            <p className="mx-auto mt-1 max-w-[42ch] text-xs text-gray-10">
-              {t("settings.environment.empty_body")}
-            </p>
-          </div>
-        ) : (
-          <div className="divide-y divide-dls-border/60 overflow-hidden rounded-2xl border border-dls-border/60">
-            {items.map((item) => {
-              const isRevealed = Boolean(revealed[item.key]);
-              const displayValue = isRevealed ? item.value : maskValue(item.value);
-              return (
-                <div
-                  key={item.key}
-                  className="flex items-center gap-3 px-4 py-3 text-sm"
-                >
-                  <div className="min-w-0 flex-1">
-                    <button
-                      type="button"
-                      onClick={() => canEdit && openEdit(item)}
-                      disabled={!canEdit}
-                      className="font-mono text-[13px] text-gray-12 hover:underline disabled:cursor-default disabled:no-underline"
-                      title={canEdit ? t("settings.environment.click_to_edit") : ""}
-                    >
-                      {item.key}
-                    </button>
-                    <div className="mt-0.5 flex items-center gap-2 text-[11px] text-gray-8">
-                      <span className="font-mono">{displayValue || t("settings.environment.empty_value")}</span>
-                      <span>·</span>
-                      <span>{formatUpdatedAt(item.updatedAt)}</span>
+        {/* Unified Environment Variables List */}
+        <div className="space-y-3">
+          {/* Predefined Sandbox Credentials Rows */}
+          {PREDEFINED_CREDENTIALS.map((cred) => {
+            const isSet = props.credentialStatus?.[cred.statusKey] === "set";
+            const isEditing = editingPredefinedKey === cred.statusKey;
+            const isBusy = props.credentialBusy || predefinedSaving;
+
+            return (
+              <div key={cred.envVarName} className="rounded-2xl border border-dls-border bg-dls-surface p-3.5 sm:p-4">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0 space-y-1">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="font-mono text-sm font-semibold text-gray-12">{cred.label}</span>
                     </div>
+                    {isSet ? (
+                      <div className="mt-0.5 flex items-center gap-2 text-xs text-gray-8">
+                        <span className="font-mono">
+                          {props.credentialStatus?.[`${cred.statusKey}_masked`] || "••••••"}
+                        </span>
+                        {(() => {
+                          const ts = props.credentialStatus?.[`${cred.statusKey}_updatedAt`];
+                          if (!ts) return null;
+                          return (
+                            <>
+                              <span>·</span>
+                              <span>{formatUpdatedAt(ts)}</span>
+                            </>
+                          );
+                        })()}
+                      </div>
+                    ) : null}
+                    <div className="text-xs text-gray-9 max-w-[65ch] leading-relaxed">{cred.description}</div>
                   </div>
-                  <div className="flex shrink-0 items-center gap-1">
-                    <button
-                      type="button"
-                      className={rowIconButtonClass}
-                      onClick={() =>
-                        setRevealed((current) => ({ ...current, [item.key]: !current[item.key] }))
-                      }
-                      title={isRevealed ? t("settings.environment.hide") : t("settings.environment.reveal")}
-                      aria-pressed={isRevealed}
-                      aria-label={(isRevealed
-                        ? t("settings.environment.hide_value")
-                        : t("settings.environment.reveal_value")
-                      ).replace("{key}", item.key)}
-                    >
-                      {isRevealed ? <EyeOff className="h-4 w-4" strokeWidth={2.1} /> : <Eye className="h-4 w-4" strokeWidth={2.1} />}
-                    </button>
-                    {canEdit ? (
-                      <button
-                        type="button"
-                        className={rowDangerIconButtonClass}
-                        onClick={() => setDeleteCandidate(item)}
-                        disabled={deletingKey === item.key}
-                        title={t("settings.environment.delete")}
-                        aria-label={t("settings.environment.delete_variable").replace("{key}", item.key)}
-                      >
-                        <Trash2 className="h-4 w-4" strokeWidth={2.1} />
-                      </button>
+                  <div className="flex shrink-0 items-center gap-2">
+                    {!isEditing ? (
+                      <>
+                        <Button
+                          variant="outline"
+                          className="h-7 rounded-full px-3 text-xs"
+                          onClick={() => startEditPredefined(cred.statusKey)}
+                          disabled={!canEdit || isBusy}
+                        >
+                          {isSet ? "Update" : "Configure"}
+                        </Button>
+                        {isSet && props.onClearCredential ? (
+                          <Button
+                            variant="outline"
+                            className="h-7 rounded-full border-red-7/50 px-3 text-xs text-red-12 hover:bg-red-2/30"
+                            onClick={() => void handleClearPredefined(cred.statusKey)}
+                            disabled={!canEdit || isBusy}
+                          >
+                            Clear
+                          </Button>
+                        ) : null}
+                      </>
                     ) : null}
                   </div>
                 </div>
-              );
-            })}
-          </div>
-        )}
 
+                {isEditing ? (
+                  <div className="mt-3 space-y-2 pt-3 border-t border-dls-border/40">
+                    <input
+                      type="password"
+                      className="w-full rounded-lg border border-dls-border bg-dls-surface px-3 py-2 font-mono text-xs text-dls-text shadow-sm focus:outline-none focus:ring-2 focus:ring-[rgba(var(--dls-accent-rgb),0.25)]"
+                      value={predefinedValue}
+                      placeholder={cred.placeholder}
+                      autoFocus
+                      onChange={(e) => setPredefinedValue(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") void submitPredefined(cred.statusKey);
+                        if (e.key === "Escape") cancelEditPredefined();
+                      }}
+                    />
+                    <div className="flex items-center gap-2">
+                      <Button
+                        variant="primary"
+                        className="h-7 rounded-full px-3 text-xs"
+                        onClick={() => void submitPredefined(cred.statusKey)}
+                        disabled={isBusy || !predefinedValue.trim()}
+                      >
+                        Save
+                      </Button>
+                      <Button
+                        variant="outline"
+                        className="h-7 rounded-full px-3 text-xs"
+                        onClick={cancelEditPredefined}
+                        disabled={isBusy}
+                      >
+                        Cancel
+                      </Button>
+                    </div>
+                    {predefinedError ? (
+                      <div className="text-xs text-red-11 mt-1">{predefinedError}</div>
+                    ) : null}
+                  </div>
+                ) : null}
+              </div>
+            );
+          })}
+
+          {/* Custom User Environment Variables Rows */}
+          {customItems.map((item) => {
+            const displayValue = maskValue(item.value);
+            const isEditing = editingCustomKey === item.key;
+
+            return (
+              <div key={item.key} className="rounded-2xl border border-dls-border bg-dls-surface p-3.5 sm:p-4">
+                <div className="flex items-center justify-between gap-3">
+                  <div className="min-w-0">
+                    <div className="font-mono text-sm font-semibold text-gray-12">{item.key}</div>
+                    <div className="mt-0.5 flex items-center gap-2 text-xs text-gray-8">
+                      <span className="font-mono">{displayValue || t("settings.environment.empty_value")}</span>
+                      {item.updatedAt ? (
+                        <>
+                          <span>·</span>
+                          <span>{formatUpdatedAt(item.updatedAt)}</span>
+                        </>
+                      ) : null}
+                    </div>
+                  </div>
+                  <div className="flex shrink-0 items-center gap-2">
+                    {canEdit && !isEditing ? (
+                      <>
+                        <Button
+                          variant="outline"
+                          className="h-7 rounded-full px-3 text-xs"
+                          onClick={() => startEditCustom(item)}
+                          disabled={savingCustom}
+                        >
+                          Update
+                        </Button>
+                        <Button
+                          variant="outline"
+                          className="h-7 rounded-full border-red-7/50 px-3 text-xs text-red-12 hover:bg-red-2/30"
+                          onClick={() => setDeleteCandidate(item)}
+                          disabled={deletingKey === item.key || savingCustom}
+                        >
+                          Clear
+                        </Button>
+                      </>
+                    ) : null}
+                  </div>
+                </div>
+
+                {isEditing ? (
+                  <div className="mt-3 space-y-2 pt-3 border-t border-dls-border/40">
+                    <textarea
+                      value={customEditValue}
+                      onChange={(e) => setCustomEditValue(e.target.value)}
+                      disabled={savingCustom}
+                      rows={2}
+                      spellCheck={false}
+                      autoComplete="off"
+                      className="w-full rounded-lg border border-dls-border bg-dls-surface px-3 py-2 font-mono text-xs text-dls-text shadow-sm focus:outline-none focus:ring-2 focus:ring-[rgba(var(--dls-accent-rgb),0.2)]"
+                      autoFocus
+                    />
+                    <div className="flex items-center gap-2">
+                      <Button
+                        variant="primary"
+                        className="h-7 rounded-full px-3 text-xs"
+                        onClick={() => void submitCustomEdit(item.key)}
+                        disabled={savingCustom}
+                      >
+                        {savingCustom ? t("settings.environment.saving") : t("settings.environment.save")}
+                      </Button>
+                      <Button
+                        variant="outline"
+                        className="h-7 rounded-full px-3 text-xs"
+                        onClick={cancelCustomEdit}
+                        disabled={savingCustom}
+                      >
+                        Cancel
+                      </Button>
+                    </div>
+                    {customEditError ? (
+                      <div className="text-xs text-red-11 mt-1">{customEditError}</div>
+                    ) : null}
+                  </div>
+                ) : null}
+              </div>
+            );
+          })}
+
+          {/* Generated Inline Input Row for "+ Add variable" */}
+          {isAddingInline ? (
+            <div className="rounded-2xl border border-dls-accent/50 bg-dls-surface p-4 shadow-md space-y-3">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-semibold text-gray-12">{t("settings.environment.add_title")}</span>
+                <Button variant="ghost" className="h-6 w-6 p-0" onClick={closeAddInline} disabled={savingAdd}>
+                  <X size={14} />
+                </Button>
+              </div>
+              <div className="space-y-3">
+                <TextInput
+                  label={t("settings.environment.key_label")}
+                  hint={t("settings.environment.key_hint")}
+                  value={newKey}
+                  onChange={(e) => setNewKey(e.target.value)}
+                  disabled={savingAdd}
+                  autoFocus
+                  placeholder="e.g. GOOGLE_API_KEY"
+                />
+                <label className="block">
+                  <div className="mb-1 text-xs font-medium text-dls-secondary">
+                    {t("settings.environment.value_label")}
+                  </div>
+                  <textarea
+                    value={newValue}
+                    onChange={(e) => setNewValue(e.target.value)}
+                    disabled={savingAdd}
+                    rows={2}
+                    spellCheck={false}
+                    autoComplete="off"
+                    placeholder="Enter secret or key value..."
+                    className="w-full rounded-lg border border-dls-border bg-dls-surface px-3 py-2 font-mono text-xs text-dls-text shadow-sm focus:outline-none focus:ring-2 focus:ring-[rgba(var(--dls-accent-rgb),0.2)]"
+                  />
+                </label>
+                {addError ? (
+                  <div className="rounded-lg border border-red-7 bg-red-3/40 px-3 py-2 text-xs text-red-11">
+                    {addError}
+                  </div>
+                ) : null}
+              </div>
+              <div className="flex justify-end gap-2 pt-1">
+                <Button variant="outline" className="h-7 px-3 text-xs" onClick={closeAddInline} disabled={savingAdd}>
+                  {t("settings.environment.cancel")}
+                </Button>
+                <Button
+                  variant="primary"
+                  className="h-7 px-3 text-xs"
+                  onClick={() => void submitInlineAdd()}
+                  disabled={savingAdd || !newKey.trim()}
+                >
+                  {savingAdd ? t("settings.environment.saving") : t("settings.environment.save")}
+                </Button>
+              </div>
+            </div>
+          ) : null}
+        </div>
+
+        {/* Footer Hints */}
         {!isRemoteWorkspace ? (
-          <div className="space-y-1 text-[11px] text-gray-8">
+          <div className="space-y-1 text-[11px] text-gray-8 pt-1">
             <div>{t("settings.environment.footer_hint")}</div>
             <div>{t("settings.environment.override_hint")}</div>
           </div>
         ) : null}
       </div>
 
-      {editor ? (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-          <div className="absolute inset-0 bg-gray-1/60 backdrop-blur-sm" onClick={closeEditor} />
-          <div
-            className="relative w-full max-w-md rounded-2xl border border-gray-6 bg-gray-2 p-5 shadow-2xl"
-            onClick={(event) => event.stopPropagation()}
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby={editorTitleId}
-          >
-            <div className="flex items-center justify-between">
-              <div id={editorTitleId} className="text-sm font-medium text-gray-12">
-                {editor.mode === "add"
-                  ? t("settings.environment.add_title")
-                  : t("settings.environment.edit_title")}
-              </div>
-              <Button
-                variant="ghost"
-                className="h-7 w-7 p-0"
-                onClick={closeEditor}
-                aria-label={t("settings.environment.close_editor")}
-                title={t("settings.environment.close_editor")}
-              >
-                <X size={14} />
-              </Button>
-            </div>
-
-            <div className="mt-4 space-y-3">
-              <TextInput
-                label={t("settings.environment.key_label")}
-                hint={t("settings.environment.key_hint")}
-                value={editor.key}
-                onChange={(event) =>
-                  setEditor((current) => (current ? { ...current, key: event.target.value } : current))
-                }
-                disabled={editor.mode === "edit" || saving}
-                autoFocus={editor.mode === "add"}
-                placeholder="ANTHROPIC_API_KEY"
-              />
-              <label className="block">
-                <div className="mb-1 text-xs font-medium text-dls-secondary">
-                  {t("settings.environment.value_label")}
-                </div>
-                <textarea
-                  value={editor.value}
-                  onChange={(event) =>
-                    setEditor((current) => (current ? { ...current, value: event.target.value } : current))
-                  }
-                  disabled={saving}
-                  rows={3}
-                  spellCheck={false}
-                  autoComplete="off"
-                  className="w-full rounded-lg border border-dls-border bg-dls-surface px-3 py-2 font-mono text-[13px] text-dls-text shadow-sm focus:outline-none focus:ring-2 focus:ring-[rgba(var(--dls-accent-rgb),0.2)]"
-                />
-              </label>
-              {editorError ? (
-                <div className="rounded-lg border border-red-7 bg-red-3/40 px-3 py-2 text-xs text-red-11">
-                  {editorError}
-                </div>
-              ) : null}
-            </div>
-
-            <div className="mt-5 flex justify-end gap-2">
-              <Button variant="outline" className="h-8 px-3 text-xs" onClick={closeEditor} disabled={saving}>
-                {t("settings.environment.cancel")}
-              </Button>
-              <Button
-                variant="primary"
-                className="h-8 px-3 text-xs"
-                onClick={() => void submitEditor()}
-                disabled={saving}
-              >
-                {saving ? t("settings.environment.saving") : t("settings.environment.save")}
-              </Button>
-            </div>
-          </div>
-        </div>
-      ) : null}
-
+      {/* Delete Confirmation Modal */}
       <ConfirmModal
         open={deleteCandidate !== null}
         title={t("settings.environment.delete_title")}
@@ -485,12 +750,13 @@ export function EnvironmentView(props: EnvironmentViewProps) {
         cancelLabel={t("settings.environment.cancel")}
         variant="danger"
         confirmButtonVariant="danger"
-        onConfirm={() => void confirmDelete()}
+        onConfirm={() => void confirmDeleteCustom()}
         onCancel={() => {
           if (!deletingKey) setDeleteCandidate(null);
         }}
       />
 
+      {/* Apply Restart Confirmation Modal */}
       <ConfirmModal
         open={applyConfirmOpen}
         title={t("settings.environment.apply_title")}

@@ -166,18 +166,34 @@ export function SandboxView(props: SandboxViewProps) {
                 key={option.value}
                 className={`flex cursor-pointer items-start gap-3 rounded-2xl border p-3 transition-colors ${
                   checked
-                    ? "border-dls-text/70 bg-gray-3/50"
+                    ? "bg-gray-3/50"
                     : "border-dls-border bg-dls-surface hover:bg-gray-2/30"
                 }`}
+                style={checked ? { borderColor: "#3b82f6" } : undefined}
               >
                 <input
                   type="radio"
                   name="sandbox-backend"
-                  className="mt-1"
+                  className="sr-only"
                   value={option.value}
                   checked={checked}
                   onChange={() => props.onSelectBackend(option.value)}
                 />
+                <div
+                  className={`mt-1 flex h-4 w-4 shrink-0 items-center justify-center rounded-full border transition-colors ${
+                    checked
+                      ? "bg-transparent"
+                      : "border-gray-400 dark:border-gray-600 bg-transparent"
+                  }`}
+                  style={checked ? { borderColor: "#3b82f6" } : undefined}
+                >
+                  {checked ? (
+                    <div
+                      className="h-2 w-2 rounded-full"
+                      style={{ backgroundColor: "#3b82f6" }}
+                    />
+                  ) : null}
+                </div>
                 <div className="space-y-1">
                   <div className="flex items-center gap-2">
                     <span className="text-sm font-medium text-gray-12">{option.label}</span>

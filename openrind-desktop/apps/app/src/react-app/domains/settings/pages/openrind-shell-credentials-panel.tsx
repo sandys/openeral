@@ -68,11 +68,10 @@ export function CredentialRow(props: CredentialRowProps) {
           <div className="flex items-center gap-2">
             <span className="text-sm font-medium text-gray-12">{props.label}</span>
             <span
-              className={`rounded-full border px-2 py-0.5 text-[10px] font-medium uppercase tracking-wider ${
-                isSet
+              className={`rounded-full border px-2 py-0.5 text-[10px] font-medium uppercase tracking-wider ${isSet
                   ? "border-green-7/60 bg-green-3/30 text-green-12"
                   : "border-gray-7/50 bg-gray-2/40 text-gray-10"
-              }`}
+                }`}
             >
               {isSet ? "Set" : "Not set"}
             </span>
@@ -174,7 +173,7 @@ export function OpenrindShellCredentialsPanel(props: OpenrindShellCredentialsPan
       ) : null}
       <CredentialRow
         label="DATABASE_URL"
-        description="PostgreSQL connection string (Supabase / Neon / firm-internal). Required for any Openrind Shell sandbox. Raw TCP — do not use the OpenShell generic provider for this."
+        description="PostgreSQL connection string (Supabase / Neon / firm-internal). Required for any Openrind Shell sandbox."
         placeholder="postgresql://user:password@host:5432/dbname"
         statusKey="databaseUrl"
         status={props.credentialStatus}
@@ -193,8 +192,8 @@ export function OpenrindShellCredentialsPanel(props: OpenrindShellCredentialsPan
         onClear={() => props.onClearCredential("anthropicApiKey")}
       />
       <CredentialRow
-        label="OPENRIND_GATEWAY_API_KEY (optional)"
-        description="Routes Claude Code API calls through a OpenrindGateway proxy for token + cost metering. Leave unset to talk to Anthropic directly."
+        label="OPENRIND_GATEWAY_API_KEY"
+        description="Routes Claude Code API calls through a Openrind Gateway proxy for token + cost metering. Leave unset to talk to Anthropic directly."
         placeholder="sk-st-..."
         statusKey="openrindGatewayApiKey"
         status={props.credentialStatus}
@@ -203,7 +202,7 @@ export function OpenrindShellCredentialsPanel(props: OpenrindShellCredentialsPan
         onClear={() => props.onClearCredential("openrindGatewayApiKey")}
       />
       <CredentialRow
-        label="ELEVENLABS_API_KEY (optional)"
+        label="ELEVENLABS_API_KEY"
         description="ElevenLabs API key for the Scribe speech-to-text model. Only needed when the ElevenLabs voice engine is selected in Settings → Sandbox."
         placeholder="sk_..."
         statusKey="elevenLabsApiKey"
