@@ -153,9 +153,26 @@ try {
 } catch {
   installedPlugins = null; // unknown (not the sandbox image) -> do not filter
 }
-const denyPlugins = installedPlugins
-  ? requestedDeny.filter((p) => installedPlugins.has(p))
-  : requestedDeny;
+/**
+ * Drop ids the installed build does not ship.
+ *
+ * Applied to the FINAL deny list, not just to our own additions. The restored
+ * config carries whatever a previous (fuller) OpenClaw denied, and 2026.7.x
+ * ships 69 extensions where older builds shipped far more — so the union kept
+ * ~40 dead ids alive and OpenClaw printed
+ *   plugins.deny: plugin not found: <id> (stale config entry ignored; remove it
+ *   from plugins config)
+ * for every one of them, on every launch. That wall of warnings is what pushed
+ * the version banner off the top of the screen.
+ *
+ * Safe with respect to the union invariant below: an id the build does not ship
+ * cannot be loaded, so removing it re-enables nothing. It is exactly the
+ * "remove it from plugins config" that OpenClaw's own warning asks for.
+ */
+const keepInstalled = (ids) =>
+  installedPlugins ? ids.filter((p) => installedPlugins.has(p)) : ids;
+
+const denyPlugins = keepInstalled(requestedDeny);
 
 const isPlainObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
 
@@ -368,10 +385,20 @@ const merged = deepMerge(existing, overlayForTier(tier));
 //   - clobbering a restored deny list re-enables ~100 plugins the user disabled;
 //   - opting out (DENY_PLUGINS="") must leave the existing list alone, not write
 //     an empty array that re-enables everything.
-if (tier === 'full' && denyPlugins.length > 0) {
+if (tier === 'full') {
   const previous = Array.isArray(existing?.plugins?.deny) ? existing.plugins.deny : [];
-  merged.plugins = isPlainObject(merged.plugins) ? merged.plugins : {};
-  merged.plugins.deny = [...new Set([...previous, ...denyPlugins])].sort();
+  const union = [...new Set([...previous, ...denyPlugins])];
+  // Prune stale ids from the WHOLE list, not just from our additions — see
+  // keepInstalled(). Runs even when denyPlugins is empty (DENY_PLUGINS="") so
+  // opting out still cleans a restored list rather than leaving it to warn.
+  const pruned = keepInstalled(union).sort();
+  if (pruned.length > 0) {
+    merged.plugins = isPlainObject(merged.plugins) ? merged.plugins : {};
+    merged.plugins.deny = pruned;
+  } else if (isPlainObject(merged.plugins) && Array.isArray(merged.plugins.deny)) {
+    // Nothing left to deny: drop the key instead of writing an empty array.
+    delete merged.plugins.deny;
+  }
 }
 
 const removed = ALWAYS_UNSET.filter((path) => unsetPath(merged, path));
