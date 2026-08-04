@@ -18,7 +18,7 @@ export type PaletteItem = {
   action: () => void;
 };
 
-type PaletteMode = "root" | "sessions";
+type PaletteMode = "root" | "sessions" | "sandboxes";
 
 export type SessionOption = {
   workspaceId: string;
@@ -28,6 +28,17 @@ export type SessionOption = {
   updatedAt: number;
   searchText: string;
   isActive: boolean;
+};
+
+export type SandboxOption = {
+  name: string;
+  title: string;
+  /** Resolved status label, already localized by the caller. */
+  statusLabel: string;
+  /** True when this sandbox is blocked or broken. */
+  needsAttention: boolean;
+  isActive: boolean;
+  searchText: string;
 };
 
 export type CommandPaletteProps = {
@@ -43,6 +54,12 @@ export type CommandPaletteProps = {
   onOpenUrl?: (url: string) => void;
   /** Optional: sessions for the second mode. */
   sessions: SessionOption[];
+  /** Sandboxes for the sandboxes submode. Empty hides the entry entirely. */
+  sandboxes?: SandboxOption[];
+  /** Called when a sandbox row is chosen. */
+  onOpenSandbox?: (name: string) => void;
+  /** Called when "New sandbox" is chosen. */
+  onNewSandbox?: () => void;
 };
 
 /**
@@ -105,6 +122,40 @@ export function CommandPalette(props: CommandPaletteProps) {
           window.setTimeout(() => inputRef.current?.focus(), 0);
         },
       },
+      // Sandbox entries are only offered when they can do something. A palette
+      // that lists actions which immediately fail is worse than a shorter one.
+      ...(props.onNewSandbox
+        ? [
+            {
+              id: "new-sandbox",
+              title: t("sandbox.new_sandbox"),
+              detail: t("settings.tab_description_sandbox"),
+              meta: t("session.cmd_new_session_meta"),
+              action: () => {
+                props.onClose();
+                props.onNewSandbox?.();
+              },
+            } satisfies PaletteItem,
+          ]
+        : []),
+      ...((props.sandboxes?.length ?? 0) > 0
+        ? [
+            {
+              id: "sandboxes",
+              title: t("sandbox.cmd_search_title"),
+              detail: t("sandbox.cmd_search_detail", undefined, {
+                count: (props.sandboxes?.length ?? 0).toLocaleString(),
+              }),
+              meta: t("session.cmd_sessions_meta"),
+              action: () => {
+                setMode("sandboxes");
+                setQuery("");
+                setActiveIndex(0);
+                window.setTimeout(() => inputRef.current?.focus(), 0);
+              },
+            } satisfies PaletteItem,
+          ]
+        : []),
       {
         id: "open-settings",
         title: t("settings.tab_general"),
@@ -195,6 +246,28 @@ export function CommandPalette(props: CommandPaletteProps) {
     );
   }, [props, query]);
 
+  const sandboxItems = useMemo<PaletteItem[]>(() => {
+    const list = props.sandboxes ?? [];
+    const q = query.trim().toLowerCase();
+    const candidates = q ? list.filter((item) => item.searchText.includes(q)) : list;
+    return candidates.slice(0, 80).map((item) => ({
+      id: `sandbox:${item.name}`,
+      title: item.title,
+      // The status is the reason you are looking for a sandbox at all, so it is
+      // the detail line rather than something hidden behind a hover.
+      detail: item.statusLabel,
+      meta: item.isActive
+        ? t("session.cmd_current_workspace")
+        : item.needsAttention
+          ? t("sidebar.needs_attention")
+          : t("session.cmd_switch"),
+      action: () => {
+        props.onClose();
+        props.onOpenSandbox?.(item.name);
+      },
+    }));
+  }, [props, query]);
+
   const sessionItems = useMemo<PaletteItem[]>(() => {
     const q = query.trim().toLowerCase();
     const candidates = q
@@ -214,7 +287,8 @@ export function CommandPalette(props: CommandPaletteProps) {
     }));
   }, [props, query]);
 
-  const items = mode === "sessions" ? sessionItems : rootItems;
+  const items =
+    mode === "sessions" ? sessionItems : mode === "sandboxes" ? sandboxItems : rootItems;
 
   useEffect(() => {
     if (activeIndex >= items.length) setActiveIndex(0);
@@ -269,12 +343,16 @@ export function CommandPalette(props: CommandPaletteProps) {
   const placeholder =
     mode === "sessions"
       ? t("session.palette_placeholder_sessions")
-      : t("session.palette_placeholder_actions");
+      : mode === "sandboxes"
+        ? t("sandbox.search_placeholder")
+        : t("session.palette_placeholder_actions");
 
   const title =
     mode === "sessions"
       ? t("session.palette_title_sessions")
-      : t("session.palette_title_actions");
+      : mode === "sandboxes"
+        ? t("sandbox.cmd_search_title")
+        : t("session.palette_title_actions");
 
   return (
     <div

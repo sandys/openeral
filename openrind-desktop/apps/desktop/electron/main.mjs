@@ -538,6 +538,8 @@ function emitOpenrindShellPtyExit(sessionId, exitCode, signal) {
   }
 }
 
+
+
 /**
  * Dump a PTY session's retained scrollback to disk as BOTH a byte-exact `.raw`
  * file and a replayable asciinema-v2 `.cast`.
@@ -2610,6 +2612,7 @@ async function handleDesktopInvoke(event, command, ...args) {
     }
     case "openrindPtyList":
       return openrindPty.listSessions();
+
     case "openrindEnsureSandbox": {
       // Same as openrindStartSession but WITHOUT launching an external
       // terminal — the renderer's xterm.js component connects via the

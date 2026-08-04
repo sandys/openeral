@@ -28,8 +28,9 @@ import { AppearanceView } from "../domains/settings/pages/appearance-view";
 import { DebugView } from "../domains/settings/pages/debug-view";
 import { DenView } from "../domains/settings/pages/den-view";
 import { EnvironmentView } from "../domains/settings/pages/environment-view";
-import { OpenrindShellCredentialsPanel } from "../domains/settings/pages/openrind-shell-credentials-panel";
-import { SandboxSessionList } from "../domains/session/sidebar/sandbox-session-list";
+import { SandboxPanel } from "../domains/session/sidebar/sandbox-panel";
+import { useSandboxRows } from "../domains/session/sidebar/use-sandbox-rows";
+import type { SidebarTab } from "../domains/session/sidebar/sidebar-tabs";
 import { ExtensionsView } from "../domains/settings/pages/extensions-view";
 import { McpView } from "../domains/settings/pages/mcp-view";
 import { RecoveryView } from "../domains/settings/pages/recovery-view";
@@ -68,6 +69,7 @@ import { useCheckDesktopRestriction, useDesktopConfig } from "../domains/cloud/d
 import { useCloudProviderAutoSync } from "../domains/cloud/use-cloud-provider-auto-sync";
 import { isDesktopRuntime, isElectronRuntime, isMacPlatform, normalizeDirectoryPath, safeStringify } from "../../app/utils";
 import { CreateWorkspaceModal } from "../domains/workspace/create-workspace-modal";
+import { CreateSandboxModal } from "../domains/session/modals/create-sandbox-modal";
 import { ModelPickerModal } from "../domains/session/modals/model-picker-modal";
 import type { ModelOption, ModelRef } from "../../app/types";
 import { recordInspectorEvent } from "./app-inspector";
@@ -357,6 +359,7 @@ export function SettingsRoute() {
   const [revealConfigBusy, setRevealConfigBusy] = useState(false);
   const [resetConfigBusy, setResetConfigBusy] = useState(false);
   const [createWorkspaceOpen, setCreateWorkspaceOpen] = useState(false);
+  const [createSandboxOpen, setCreateSandboxOpen] = useState(false);
   const [createWorkspaceBusy, setCreateWorkspaceBusy] = useState(false);
   const [createWorkspaceError, setCreateWorkspaceError] = useState<string | null>(null);
   const [createWorkspaceRemoteBusy, setCreateWorkspaceRemoteBusy] = useState(false);
@@ -480,6 +483,26 @@ export function SettingsRoute() {
     selectedWorkspace?.id,
     selectedWorkspaceId,
   ]);
+
+  // Sidebar object-type switcher + the shared sandbox poller, so the settings
+  // sidebar is the same one as everywhere else rather than reverting to the old
+  // bottom strip.
+  const [sidebarTab, setSidebarTab] = useState<SidebarTab>(() => {
+    try {
+      const saved = localStorage.getItem("openrind-shell-sidebar-tab");
+      if (saved === "sessions" || saved === "sandboxes") return saved;
+    } catch {}
+    return "sessions";
+  });
+
+  const handleSetSidebarTab = useCallback((tab: SidebarTab) => {
+    setSidebarTab(tab);
+    try {
+      localStorage.setItem("openrind-shell-sidebar-tab", tab);
+    } catch {}
+  }, []);
+
+  const sandboxRows = useSandboxRows();
 
   const shellLayout = useWorkspaceShellLayout({
     expandedRightWidth: 320,
@@ -1331,35 +1354,24 @@ export function SettingsRoute() {
           />
         );
       case "environment":
-        // One page for every key the app uses. The two panels are separate
-        // stores on purpose: workspace env vars live in the Openrind Desktop server
-        // and are injected into chat engine runs, while the sandbox
-        // credentials below stay OS-keyring-encrypted and are decrypted only
-        // in the main process when a sandbox is provisioned.
         return (
-          <div className="space-y-6">
-            <EnvironmentView
-              client={openrindDesktopServerSnapshot.openrindDesktopServerClient}
-              isRemoteWorkspace={isRemoteWorkspace}
-              onStatusMessage={setConfigActionStatus}
-              onApplyChanges={isDesktopRuntime() && !isRemoteWorkspace ? handleApplyEnvironmentChanges : undefined}
-              applyBlocked={activeReloadBlockingSessions.length > 0}
-              applyBlockedReason={
-                activeReloadBlockingSessions.length > 0
-                  ? t("settings.environment.apply_blocked_active_tasks")
-                  : null
-              }
-              runtimeKey={environmentRuntimeKey}
-            />
-            {isDesktopRuntime() ? (
-              <OpenrindShellCredentialsPanel
-                credentialStatus={openshellState.credentialStatus}
-                actionBusy={openshellState.actionBusy}
-                onSetCredential={(key, value) => openshellState.setCredential(key, value)}
-                onClearCredential={(key) => openshellState.clearCredential(key)}
-              />
-            ) : null}
-          </div>
+          <EnvironmentView
+            client={openrindDesktopServerSnapshot.openrindDesktopServerClient}
+            isRemoteWorkspace={isRemoteWorkspace}
+            onStatusMessage={setConfigActionStatus}
+            onApplyChanges={isDesktopRuntime() && !isRemoteWorkspace ? handleApplyEnvironmentChanges : undefined}
+            applyBlocked={activeReloadBlockingSessions.length > 0}
+            applyBlockedReason={
+              activeReloadBlockingSessions.length > 0
+                ? t("settings.environment.apply_blocked_active_tasks")
+                : null
+            }
+            runtimeKey={environmentRuntimeKey}
+            credentialStatus={openshellState.credentialStatus}
+            credentialBusy={openshellState.actionBusy}
+            onSetCredential={(key, value) => openshellState.setCredential(key, value)}
+            onClearCredential={(key) => openshellState.clearCredential(key)}
+          />
         );
       case "debug":
         return <DebugView {...debugViewProps} />;
@@ -1377,23 +1389,29 @@ export function SettingsRoute() {
         selectedWorkspaceName={selectedWorkspaceName}
         headerStatus={routeOpenrindDesktopStatus}
         busyHint={loading ? t("session.loading_detail") : busyLabel}
+        sidebarTab={sidebarTab}
+        onSidebarTabChange={handleSetSidebarTab}
+        sandboxWarningCount={sandboxRows.warningCount}
+        sandboxSidebar={
+          // Same panel as the session sidebar. Picking a sandbox hands off to
+          // the session route (the same location.state mechanism the
+          // /sandboxes manager uses), which mounts its terminal with the entry
+          // selected.
+          <SandboxPanel
+            state={sandboxRows}
+            selectedSandboxName={null}
+            onSelectSandbox={(row) =>
+              navigate("/session", {
+                state: {
+                  openrindSandbox: { name: row.name, profile: row.profile },
+                },
+              })
+            }
+            onOpenManager={() => setCreateSandboxOpen(true)}
+            onOpenSettings={() => navigate("/settings/sandbox")}
+          />
+        }
         workspaceSessionListProps={{
-          // Same sandbox section as the session sidebar. Picking a
-          // sandbox hands off to the session route (the same
-          // location.state mechanism the /sandboxes manager uses), which
-          // mounts its terminal with the entry selected.
-          beforeFooter: (
-            <SandboxSessionList
-              selectedSandboxName={null}
-              onSelectSandbox={(name, profile) =>
-                navigate("/session", {
-                  state: { openrindSandbox: { name, profile } },
-                })
-              }
-              onOpenManager={() => navigate("/sandboxes")}
-              onOpenSettings={() => navigate("/settings/sandbox")}
-            />
-          ),
           workspaceSessionGroups,
           selectedWorkspaceId,
           developerMode,
@@ -1511,6 +1529,11 @@ export function SettingsRoute() {
         onBehaviorChange={() => {}}
         onOpenSettings={() => {}}
         onClose={() => setModelPickerOpen(false)}
+      />
+      <CreateSandboxModal
+        open={createSandboxOpen}
+        onClose={() => setCreateSandboxOpen(false)}
+        existingNames={sandboxRows.rows.map((r) => r.name)}
       />
     </>
   );

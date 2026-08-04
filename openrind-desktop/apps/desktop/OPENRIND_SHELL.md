@@ -77,8 +77,7 @@ regular chat experience — the create-workspace flow deliberately coerces any
 Openrind Shell profile back to the Openrind Desktop image, so there is no launch-profile
 choice there (and none in Settings either).
 
-Open the **sandbox manager** (**Sandboxes → ⋯ → open the manager**, or the
-`/sandboxes` route):
+Open the **sandbox manager** (**Sandboxes → ⋯ → New sandbox**):
 
 - Choose the agent: **Claude Code** or **OpenClaw**
 - Name the sandbox

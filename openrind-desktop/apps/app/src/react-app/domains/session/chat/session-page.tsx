@@ -23,6 +23,7 @@ import { PermissionApprovalModal } from "./permission-approval-modal";
 import { QuestionModal } from "../modals/question-modal";
 import { RenameSessionModal } from "../modals/rename-session-modal";
 import { WorkspaceSessionList } from "../sidebar/workspace-session-list";
+import { SidebarTabs, type SidebarTab } from "../sidebar/sidebar-tabs";
 import { SessionSurface, type SessionSurfaceProps } from "../surface/session-surface";
 import { ShareWorkspaceModal } from "../../workspace/share-workspace-modal";
 import { StatusBar, type StatusBarProps } from "./status-bar";
@@ -98,8 +99,19 @@ export type SessionPageProps = {
   sessionSurfaceOverride?: ReactNode;
   /** Optional extra sidebar section rendered below the workspace/session
    *  list — the Openrind Shell sandbox list. Kept as an opaque node so the chat
-   *  page stays decoupled from the sandbox domain. */
+   *  page stays decoupled from the sandbox domain.
+   *
+   *  Rendered as a FULL-HEIGHT sibling of the session list behind a segmented
+   *  switcher, not stacked under it. Sessions and sandboxes have independent
+   *  lifecycles and neither should be squeezed into whatever height the other
+   *  leaves over. */
   sandboxSidebar?: ReactNode;
+  /** Drives the sandboxes tab's error dot. */
+  sandboxWarningCount?: number;
+  /** Which sidebar object type is showing. Owned by the route so deep links
+   *  and the command palette can switch to a sandbox directly. */
+  sidebarTab?: SidebarTab;
+  onSidebarTabChange?: (tab: SidebarTab) => void;
   selectedWorkspaceRoot: string;
   runtimeWorkspaceId: string | null;
   workspaces: WorkspaceInfo[];
@@ -170,6 +182,8 @@ export function SessionPage(props: SessionPageProps) {
     defaultLeftWidth: DEFAULT_WORKSPACE_LEFT_SIDEBAR_WIDTH,
     expandedRightWidth: 280,
   });
+  // Default to sessions when the route does not drive the tab.
+  const sidebarTab: SidebarTab = props.sidebarTab ?? "sessions";
   useReactRenderWatchdog("SessionPage", {
     selectedSessionId: props.selectedSessionId,
     selectedWorkspaceId: props.selectedWorkspaceId,
@@ -292,7 +306,14 @@ export function SessionPage(props: SessionPageProps) {
           className="relative hidden min-h-0 shrink-0 overflow-hidden rounded-[24px] border border-dls-border bg-dls-sidebar shadow-[var(--dls-shell-shadow)] lg:flex lg:flex-col"
           style={{ width: leftSidebarWidth }}
         >
-          <div className="flex min-h-0 flex-1">
+          {props.sandboxSidebar ? (
+            <SidebarTabs
+              value={sidebarTab}
+              onChange={(tab) => props.onSidebarTabChange?.(tab)}
+              sandboxWarningCount={props.sandboxWarningCount}
+            />
+          ) : null}
+          <div className={`flex min-h-0 flex-1 ${sidebarTab === "sandboxes" ? "hidden" : ""}`}>
             <WorkspaceSessionList
               workspaceSessionGroups={props.sidebar.workspaceSessionGroups}
               selectedWorkspaceId={props.sidebar.selectedWorkspaceId}
@@ -318,9 +339,18 @@ export function SessionPage(props: SessionPageProps) {
               onEditWorkspaceConnection={props.sidebar.onEditWorkspaceConnection}
               onForgetWorkspace={props.sidebar.onForgetWorkspace}
               onOpenCreateWorkspace={props.sidebar.onOpenCreateWorkspace}
-              beforeFooter={props.sandboxSidebar}
             />
           </div>
+          {/* Kept mounted while hidden so the sandbox poller, its retry/backoff
+              and any open menu survive a tab switch. Remounting on every switch
+              would restart the gateway warm-up the list depends on. */}
+          {props.sandboxSidebar ? (
+            <div
+              className={`flex min-h-0 flex-1 ${sidebarTab === "sandboxes" ? "" : "hidden"}`}
+            >
+              {props.sandboxSidebar}
+            </div>
+          ) : null}
           <div
             className="absolute right-0 top-3 hidden h-[calc(100%-24px)] w-2 translate-x-1/2 cursor-col-resize rounded-full bg-transparent transition-colors hover:bg-gray-6/40 lg:block"
             onPointerDown={startLeftSidebarResize}
