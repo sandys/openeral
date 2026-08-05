@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
   ExternalLink,
+  FileText,
   Loader2,
   MessageSquare,
   Mic,
@@ -12,6 +13,8 @@ import {
   Settings,
   Square,
   Trash2,
+  Upload,
+  X,
 } from "lucide-react";
 
 // REQUIRED, not cosmetic. Every bit of xterm's layout lives in this stylesheet:
@@ -28,6 +31,8 @@ import type { SandboxProfile } from "../../../../app/lib/desktop";
 import { Button } from "../../../design-system/button";
 import { useVoiceInput } from "./composer/voice/use-voice-input";
 import { VoiceEngineMenu } from "./composer/voice/voice-engine-menu";
+import { formatBytes } from "../../../../app/utils";
+import { useStatusToasts } from "../../shell-feedback/status-toasts";
 
 // Shared flat "ghost" toolbar button, matching the chat session header so the
 // Openrind Shell terminal toolbar reads as the same product surface.
@@ -334,6 +339,77 @@ export function OpenrindShellTerminal(props: OpenrindShellTerminalProps) {
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [popoutBusy, setPopoutBusy] = useState(false);
   const [popoutError, setPopoutError] = useState<string | null>(null);
+
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const [uploadBusy, setUploadBusy] = useState(false);
+  const { showToast } = useStatusToasts();
+  const [uploadedFiles, setUploadedFiles] = useState<{ id: string; name: string; size: number }[]>([]);
+
+  const handleUploadClick = useCallback(() => {
+    fileInputRef.current?.click();
+  }, []);
+
+  const handleFileChange = useCallback(async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const files = event.target.files;
+    if (!files || files.length === 0) return;
+    const effectiveName = sandboxName ?? lastKnownSandboxNameRef.current;
+    if (!effectiveName) return;
+
+    setUploadBusy(true);
+    try {
+      const uploadedNames: string[] = [];
+      const newFiles: { id: string; name: string; size: number }[] = [];
+      for (let i = 0; i < files.length; i++) {
+        const file = files[i];
+        await new Promise<void>((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = async () => {
+            try {
+              const base64 = (reader.result as string).split(",")[1];
+              await invoke("openrindShellUpload", effectiveName, base64, file.name);
+              uploadedNames.push(file.name);
+              newFiles.push({
+                id: `${file.name}-${file.lastModified}-${Math.random().toString(36).slice(2)}`,
+                name: file.name,
+                size: file.size,
+              });
+              resolve();
+            } catch (err) {
+              reject(err);
+            }
+          };
+          reader.onerror = reject;
+          reader.readAsDataURL(file);
+        });
+      }
+      
+      setUploadedFiles((prev) => [...prev, ...newFiles]);
+
+      const summary = uploadedNames.join(", ");
+      showToast({
+        title: uploadedNames.length === 1 ? `Uploaded ${uploadedNames[0]} to the shared folder and inserted a link.` : `Uploaded ${uploadedNames.length} files to the shared folder and inserted a link.`,
+        description: uploadedNames.length > 1 ? summary : undefined,
+        tone: "success",
+      });
+      
+    } catch (err) {
+      console.error("Upload failed", err);
+      showToast({
+        title: err instanceof Error ? err.message : "Upload failed",
+        tone: "warning",
+      });
+    } finally {
+      setUploadBusy(false);
+      // Reset input so the same file can be uploaded again
+      if (fileInputRef.current) {
+        fileInputRef.current.value = "";
+      }
+    }
+  }, [sandboxName]);
+
+  const removeUploadedFile = useCallback((id: string) => {
+    setUploadedFiles((prev) => prev.filter((f) => f.id !== id));
+  }, []);
 
   // Overflow ("⋮") menu for secondary/management actions, so the main toolbar
   // stays to its essentials.
@@ -1395,7 +1471,28 @@ export function OpenrindShellTerminal(props: OpenrindShellTerminalProps) {
             </button>
           ) : null}
 
-
+          {phase === "connected" ? (
+            <>
+              <button
+                type="button"
+                className={TOOLBAR_BTN}
+                onClick={handleUploadClick}
+                disabled={uploadBusy}
+                onMouseDown={(e) => e.preventDefault()}
+                title="Upload file to the sandbox"
+              >
+                {uploadBusy ? <Loader2 className="animate-spin" size={16} /> : <Upload size={16} />}
+                <span className="hidden lg:inline">Upload</span>
+              </button>
+              <input
+                type="file"
+                ref={fileInputRef}
+                style={{ display: "none" }}
+                multiple
+                onChange={handleFileChange}
+              />
+            </>
+          ) : null}
 
           {/* Overflow menu for secondary / management actions. onMouseDown
               preventDefault keeps keyboard focus on xterm.js. */}
@@ -1537,6 +1634,35 @@ export function OpenrindShellTerminal(props: OpenrindShellTerminalProps) {
           </div>
         ) : null}
       </div>
+
+      {uploadedFiles.length > 0 && (
+        <div className="flex flex-wrap gap-2 px-4 md:px-6 py-3 border-t border-dls-border bg-dls-surface shrink-0">
+          {uploadedFiles.map((file) => (
+            <div key={file.id} className="flex items-center gap-2 rounded-2xl border border-gray-6 bg-gray-2 px-3 py-2 text-xs text-gray-10">
+              <FileText size={14} className="text-gray-9" />
+              <div className="max-w-[160px] min-w-0">
+                <div className="truncate text-[12px] font-medium text-gray-11">{file.name}</div>
+                <div className="flex items-center gap-1.5 text-[11px] text-gray-10">
+                  <span>File</span>
+                  <span>·</span>
+                  <span>{formatBytes(file.size)}</span>
+                </div>
+              </div>
+              <button
+                type="button"
+                className="ml-1 flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-gray-9 hover:bg-gray-4 hover:text-gray-11 transition-colors"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  removeUploadedFile(file.id);
+                }}
+                aria-label={`Remove ${file.name}`}
+              >
+                <X size={14} />
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

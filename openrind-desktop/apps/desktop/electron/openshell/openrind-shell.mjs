@@ -700,7 +700,7 @@ function buildWslEnvForwarding(extra) {
  * always rides as a single bash token even if it contains spaces or
  * shell metachars.
  */
-function shellQuote(value) {
+export function shellQuote(value) {
   return `'${String(value).replace(/'/g, "'\\''")}'`;
 }
 

@@ -2560,6 +2560,36 @@ async function handleDesktopInvoke(event, command, ...args) {
       if (!id) throw new Error("sessionId is required");
       return openrindPty.detachSession(id);
     }
+    case "openrindShellUpload": {
+      const sandboxName = String(args[0] ?? "").trim();
+      const base64Data = String(args[1] ?? "");
+      const filename = String(args[2] ?? "").trim();
+      if (!sandboxName || !base64Data || !filename) {
+        throw new Error("sandboxName, base64Data, and filename are required");
+      }
+
+      // We upload to /home/agent/inbox so that the sync daemon picks it up and
+      // it persists in the workspace.
+      const destPath = `/home/agent/inbox/${filename}`;
+      // Execute the command in the sandbox to decode base64 from stdin
+      // wsl.exe uses openshell sandbox exec to run the command inside the container.
+      const bashCmd = `mkdir -p /home/agent/inbox && base64 -d > ${openrindShell.shellQuote(destPath)}`;
+
+      const result = await wslRun([
+        "-d", OPENSHELL_DISTRO_NAME,
+        "--",
+        "openshell", "sandbox", "exec", "--name", sandboxName,
+        "--", "bash", "-c", bashCmd
+      ], {
+        stdin: base64Data
+      });
+
+      if (result.exitCode !== 0) {
+        throw new Error(`Upload failed with code ${result.exitCode}. Stderr: ${result.stderr}`);
+      }
+
+      return { success: true };
+    }
     case "openrindPtyWrite": {
       const input = args[0] ?? {};
       const id = String(input.sessionId ?? "").trim();
