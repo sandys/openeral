@@ -27,14 +27,22 @@ const SOCKET_PATH = '/tmp/openrind-shell-bash.sock';
 const HOME_DIR = process.env.OPENRIND_SHELL_HOME || '/home/agent';
 const syncModulePromise = import('/opt/openrind-shell/dist/sync.js');
 
+let syncMutex = Promise.resolve();
+function runWithSyncMutex(fn) {
+  const current = syncMutex;
+  let resolveNext;
+  syncMutex = new Promise(r => resolveNext = r);
+  return current.then(fn).finally(resolveNext);
+}
+
 async function syncFromRealFs(pool, workspaceId) {
   const { syncFromFs, createHomeSyncOptions } = await syncModulePromise;
-  return syncFromFs(pool, workspaceId, HOME_DIR, createHomeSyncOptions({ prune: true }));
+  return runWithSyncMutex(() => syncFromFs(pool, workspaceId, HOME_DIR, createHomeSyncOptions({ prune: true })));
 }
 
 async function syncToRealFs(pool, workspaceId) {
   const { syncToFs, createHomeSyncOptions } = await syncModulePromise;
-  return syncToFs(pool, workspaceId, HOME_DIR, createHomeSyncOptions({ prune: true }));
+  return runWithSyncMutex(() => syncToFs(pool, workspaceId, HOME_DIR, createHomeSyncOptions({ prune: true })));
 }
 
 function formatError(err, label) {

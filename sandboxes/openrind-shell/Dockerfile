@@ -388,8 +388,9 @@ RUN chmod 755 /opt/openrind-shell/setup.sh \
 # Override the upstream base policy
 COPY sandboxes/openrind-shell/policy.yaml /etc/openshell/policy.yaml
 
-# Skills for Claude Code
-COPY .claude/skills/ /sandbox/.skills/
+# Skills for Claude Code and OpenClaw (seeded into the home directory)
+COPY --chown=sandbox:sandbox .claude/skills/ /home/agent/.claude/skills/
+COPY --chown=sandbox:sandbox .claude/skills/ /home/agent/.config/opencode/skills/
 
 # Workspace directory — must be owned by sandbox user so setup.sh can write .npmrc
 RUN mkdir -p /home/agent && chown sandbox:sandbox /home/agent

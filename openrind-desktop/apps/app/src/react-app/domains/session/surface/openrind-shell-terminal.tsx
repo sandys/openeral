@@ -2,6 +2,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
+  Copy,
   ExternalLink,
   FileText,
   Loader2,
@@ -47,7 +48,7 @@ const TOOLBAR_BTN =
 // (SETTLE) — or a hard cap so we never hang the overlay forever. A tiny early
 // paint (e.g. just the empty composer box) stays under MIN, so the overlay
 // waits for the full UI.
-const AGENT_PAINT_MIN_BYTES = 2048;
+const AGENT_PAINT_MIN_BYTES = 512;
 const AGENT_PAINT_SETTLE_MS = 700;
 const AGENT_PAINT_CAP_MS = 75_000;
 
@@ -407,31 +408,38 @@ export function OpenrindShellTerminal(props: OpenrindShellTerminalProps) {
     }
   }, [sandboxName]);
 
-  const removeUploadedFile = useCallback((id: string) => {
-    setUploadedFiles((prev) => prev.filter((f) => f.id !== id));
-  }, []);
+  const removeUploadedFile = useCallback(async (id: string, filename: string) => {
+    const effectiveName = sandboxName ?? lastKnownSandboxNameRef.current;
+    if (!effectiveName) return;
+    try {
+      await invoke("openrindShellDeleteFile", effectiveName, filename);
+      setUploadedFiles((prev) => prev.filter((f) => f.id !== id));
+      showToast({
+        title: `Removed ${filename} from sandbox`,
+        tone: "success",
+      });
+    } catch (err) {
+      showToast({
+        title: err instanceof Error ? err.message : "Failed to remove file",
+        tone: "warning",
+      });
+    }
+  }, [sandboxName, showToast]);
 
   // Overflow ("⋮") menu for secondary/management actions, so the main toolbar
   // stays to its essentials.
-  const [menuOpen, setMenuOpen] = useState(false);
+  const [filesModalOpen, setFilesModalOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement | null>(null);
   useEffect(() => {
-    if (!menuOpen) return;
-    const onPointerDown = (event: MouseEvent) => {
-      if (menuRef.current && !menuRef.current.contains(event.target as Node)) {
-        setMenuOpen(false);
-      }
-    };
+    if (!filesModalOpen) return;
     const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setMenuOpen(false);
+      if (event.key === "Escape") setFilesModalOpen(false);
     };
-    document.addEventListener("mousedown", onPointerDown);
     document.addEventListener("keydown", onKey);
     return () => {
-      document.removeEventListener("mousedown", onPointerDown);
       document.removeEventListener("keydown", onKey);
     };
-  }, [menuOpen]);
+  }, [filesModalOpen]);
 
   // User-editable display name for the sandbox. The actual sandbox name
   // used by openshell never changes — this is purely cosmetic.
@@ -1494,71 +1502,19 @@ export function OpenrindShellTerminal(props: OpenrindShellTerminalProps) {
             </>
           ) : null}
 
-          {/* Overflow menu for secondary / management actions. onMouseDown
-              preventDefault keeps keyboard focus on xterm.js. */}
-          <div ref={menuRef} className="relative">
+          {phase === "connected" ? (
             <button
               type="button"
-              className="flex h-8 w-8 items-center justify-center rounded-md text-gray-9 transition-colors hover:bg-gray-2/70 hover:text-dls-text"
-              aria-label="More actions"
-              aria-haspopup="menu"
-              aria-expanded={menuOpen}
-              onClick={() => setMenuOpen((open) => !open)}
+              className={TOOLBAR_BTN}
+              aria-label="Files"
+              onClick={() => setFilesModalOpen(true)}
               onMouseDown={(e) => e.preventDefault()}
+              title="View uploaded files"
             >
-              <MoreHorizontal size={16} />
+              <FileText size={16} />
+              <span className="hidden lg:inline">Files{uploadedFiles.length > 0 ? ` (${uploadedFiles.length})` : ""}</span>
             </button>
-            {menuOpen ? (
-              <div className="absolute right-0 top-[calc(100%+6px)] z-20 w-52 rounded-[18px] border border-dls-border bg-dls-surface p-1.5 shadow-[var(--dls-shell-shadow)]">
-                <button
-                  type="button"
-                  className="flex w-full items-center gap-2.5 rounded-xl px-3 py-2 text-left text-sm text-gray-11 transition-colors hover:bg-gray-2 disabled:cursor-not-allowed disabled:opacity-50"
-                  disabled={
-                    (!sandboxName && !lastKnownSandboxNameRef.current) ||
-                    popoutBusy
-                  }
-                  onClick={() => {
-                    setMenuOpen(false);
-                    void popOut();
-                  }}
-                >
-                  {popoutBusy ? (
-                    <Loader2 size={15} className="animate-spin" />
-                  ) : (
-                    <ExternalLink size={15} />
-                  )}
-                  Open in OS terminal
-                </button>
-
-                {props.onOpenSettings ? (
-                  <button
-                    type="button"
-                    className="flex w-full items-center gap-2.5 rounded-xl px-3 py-2 text-left text-sm text-gray-11 transition-colors hover:bg-gray-2"
-                    onClick={() => {
-                      setMenuOpen(false);
-                      props.onOpenSettings?.("sandbox");
-                    }}
-                  >
-                    <Settings size={15} />
-                    Sandbox settings
-                  </button>
-                ) : null}
-                <div className="my-1 h-px bg-dls-border" />
-                <button
-                  type="button"
-                  className="flex w-full items-center gap-2.5 rounded-xl px-3 py-2 text-left text-sm text-red-11 transition-colors hover:bg-red-1/40 disabled:cursor-not-allowed disabled:opacity-50"
-                  disabled={!sandboxName && !lastKnownSandboxNameRef.current}
-                  onClick={() => {
-                    setMenuOpen(false);
-                    void deleteSandbox();
-                  }}
-                >
-                  <Trash2 size={15} />
-                  Delete sandbox
-                </button>
-              </div>
-            ) : null}
-          </div>
+          ) : null}
         </div>
       </div>
       {popoutError ? (
@@ -1635,34 +1591,100 @@ export function OpenrindShellTerminal(props: OpenrindShellTerminalProps) {
         ) : null}
       </div>
 
-      {uploadedFiles.length > 0 && (
-        <div className="flex flex-wrap gap-2 px-4 md:px-6 py-3 border-t border-dls-border bg-dls-surface shrink-0">
-          {uploadedFiles.map((file) => (
-            <div key={file.id} className="flex items-center gap-2 rounded-2xl border border-gray-6 bg-gray-2 px-3 py-2 text-xs text-gray-10">
-              <FileText size={14} className="text-gray-9" />
-              <div className="max-w-[160px] min-w-0">
-                <div className="truncate text-[12px] font-medium text-gray-11">{file.name}</div>
-                <div className="flex items-center gap-1.5 text-[11px] text-gray-10">
-                  <span>File</span>
-                  <span>·</span>
-                  <span>{formatBytes(file.size)}</span>
-                </div>
-              </div>
+      {filesModalOpen ? (
+        <div className="fixed inset-0 z-[60] bg-gray-1/70 backdrop-blur-sm flex items-center justify-center p-4" onClick={() => setFilesModalOpen(false)}>
+          <div className="bg-gray-2 border border-gray-6/70 w-full max-w-lg rounded-2xl shadow-2xl overflow-hidden flex flex-col" onClick={(e) => e.stopPropagation()}>
+            <div className="p-4 border-b border-gray-6/70 flex items-center justify-between">
+              <h3 className="text-sm font-medium text-gray-12 flex items-center gap-2">
+                <FileText size={16} className="text-gray-9" />
+                Uploaded Files
+              </h3>
               <button
                 type="button"
-                className="ml-1 flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-gray-9 hover:bg-gray-4 hover:text-gray-11 transition-colors"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  removeUploadedFile(file.id);
-                }}
-                aria-label={`Remove ${file.name}`}
+                className="flex items-center justify-center h-7 w-7 rounded-full hover:bg-gray-4 text-gray-10 hover:text-gray-12 transition-colors"
+                onClick={() => setFilesModalOpen(false)}
               >
-                <X size={14} />
+                <X size={16} />
               </button>
             </div>
-          ))}
+            <div className="p-2 max-h-[60vh] overflow-y-auto">
+              {uploadedFiles.length === 0 ? (
+                <div className="p-6 text-center text-sm text-gray-10">No files uploaded.</div>
+              ) : (
+                <div className="flex flex-col gap-1">
+                  {uploadedFiles.map((file) => (
+                    <div key={file.id} className="flex items-center gap-3 rounded-xl px-4 py-3 transition-colors hover:bg-gray-3/50 group">
+                      <div className="flex-1 min-w-0">
+                        <div className="truncate text-[13px] font-medium text-gray-11 flex items-baseline gap-2">
+                          {file.name}
+                          <span className="text-[11px] font-normal text-gray-9">{formatBytes(file.size)}</span>
+                        </div>
+                        <div className="truncate text-[11px] text-gray-10 mt-0.5">/home/agent/inbox/{file.name}</div>
+                      </div>
+                      <div className="flex items-center gap-1 opacity-100">
+                        <button
+                          type="button"
+                          className="flex h-7 w-7 items-center justify-center rounded-md text-gray-10 hover:bg-gray-4 hover:text-gray-12 transition-colors"
+                          title="Copy path"
+                          onClick={async (e) => {
+                            e.stopPropagation();
+                            const path = `/home/agent/inbox/${file.name}`;
+                            try {
+                              if (navigator.clipboard && navigator.clipboard.writeText) {
+                                await navigator.clipboard.writeText(path);
+                              } else {
+                                throw new Error("Clipboard API not available");
+                              }
+                              showToast({
+                                title: "Path copied to clipboard",
+                                tone: "success",
+                              });
+                            } catch (err) {
+                              try {
+                                const input = document.createElement("input");
+                                input.setAttribute("value", path);
+                                document.body.appendChild(input);
+                                input.select();
+                                document.execCommand("copy");
+                                document.body.removeChild(input);
+                                showToast({
+                                  title: "Path copied to clipboard",
+                                  tone: "success",
+                                });
+                              } catch (fallbackErr) {
+                                showToast({
+                                  title: "Failed to copy path",
+                                  tone: "warning",
+                                });
+                              }
+                            }
+                          }}
+                        >
+                          <Copy size={15} />
+                        </button>
+                        <button
+                          type="button"
+                          className="flex h-7 w-7 items-center justify-center rounded-md text-gray-10 hover:bg-red-3 hover:text-red-11 transition-colors"
+                          title="Delete file"
+                          onClick={(e) => {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            void removeUploadedFile(file.id, file.name);
+                            if (uploadedFiles.length === 1) setFilesModalOpen(false);
+                          }}
+                        >
+                          <Trash2 size={15} />
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
         </div>
-      )}
+      ) : null}
+
     </div>
   );
 }

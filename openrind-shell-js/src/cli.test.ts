@@ -90,7 +90,7 @@ echo "connected to: $DATABASE_URL"
     require('fs').writeFileSync(pgPath, script);
     require('fs').chmodSync(pgPath, 0o755);
 
-    const out = execSync(`DATABASE_URL=test://db bash ${pgPath} "SELECT 1"`, { encoding: 'utf8' });
+    const out = execSync(`bash "${pgPath}" "SELECT 1"`, { encoding: 'utf8', env: { ...process.env, DATABASE_URL: 'test://db' } });
     expect(out.trim()).toBe('connected to: test://db');
 
     rmSync(tmpDir, { recursive: true });

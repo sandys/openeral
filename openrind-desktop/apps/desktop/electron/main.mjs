@@ -2570,25 +2570,58 @@ async function handleDesktopInvoke(event, command, ...args) {
 
       // We upload to /home/agent/inbox so that the sync daemon picks it up and
       // it persists in the workspace.
+      const destDir = `/home/agent/inbox`;
+      const destPath = `${destDir}/${filename}`;
+
+      // We use a multi-step bash command to safely construct the file.
+      // 1. Write the raw base64 data to a text file using `cat`
+      // 2. Decode the text file into the binary file
+      // 3. Ensure destination dir exists in the sandbox
+      // 4. Run openshell sandbox upload
+      // 5. Cleanup
+      const tmpTxt = `/tmp/openrind_upload_${Date.now()}_tmp.txt`;
+      const tmpBin = `/tmp/openrind_upload_${Date.now()}_${filename.replace(/[^a-zA-Z0-9.-]/g, "_")}`;
+
+      const bashCmd = [
+        "mkdir -p /tmp",
+        `cat > ${openrindShell.shellQuote(tmpTxt)}`,
+        `base64 -d < ${openrindShell.shellQuote(tmpTxt)} > ${openrindShell.shellQuote(tmpBin)}`,
+        `openshell sandbox exec --name ${openrindShell.shellQuote(sandboxName)} -- bash -c "mkdir -p ${openrindShell.shellQuote(destDir)}"`,
+        `openshell sandbox upload ${openrindShell.shellQuote(sandboxName)} ${openrindShell.shellQuote(tmpBin)} ${openrindShell.shellQuote(destPath)}`,
+        `rm -f ${openrindShell.shellQuote(tmpTxt)} ${openrindShell.shellQuote(tmpBin)}`
+      ].join(" && ");
+
+      const result = await wslRun([
+        "-d", OPENSHELL_DISTRO_NAME,
+        "--",
+        "bash", "-c", bashCmd
+      ], {
+        stdin: base64Data
+      });
+      if (result.exitCode !== 0) {
+        throw new Error(`openshell sandbox upload failed with exit code ${result.exitCode}: ${result.stderr || result.stdout}`);
+      }
+      return true;
+    }
+    case "openrindShellDeleteFile": {
+      const sandboxName = String(args[0] ?? "").trim();
+      const filename = String(args[1] ?? "").trim();
+      if (!sandboxName || !filename) {
+        throw new Error("sandboxName and filename are required");
+      }
       const destPath = `/home/agent/inbox/${filename}`;
-      // Execute the command in the sandbox to decode base64 from stdin
-      // wsl.exe uses openshell sandbox exec to run the command inside the container.
-      const bashCmd = `mkdir -p /home/agent/inbox && base64 -d > ${openrindShell.shellQuote(destPath)}`;
+      const bashCmd = `rm -f ${openrindShell.shellQuote(destPath)}`;
 
       const result = await wslRun([
         "-d", OPENSHELL_DISTRO_NAME,
         "--",
         "openshell", "sandbox", "exec", "--name", sandboxName,
         "--", "bash", "-c", bashCmd
-      ], {
-        stdin: base64Data
-      });
-
+      ]);
       if (result.exitCode !== 0) {
-        throw new Error(`Upload failed with code ${result.exitCode}. Stderr: ${result.stderr}`);
+        throw new Error(`openshell exec failed with exit code ${result.exitCode}`);
       }
-
-      return { success: true };
+      return true;
     }
     case "openrindPtyWrite": {
       const input = args[0] ?? {};

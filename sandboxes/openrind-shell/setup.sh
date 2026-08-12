@@ -431,6 +431,11 @@ let s = {};
 try { s = JSON.parse(fs.readFileSync(file, 'utf8')); } catch(e) {}
 if (!s.env) s.env = {};
 s.env.ANTHROPIC_BASE_URL = process.env.OPENRIND_GATEWAY_PROXY_URL;
+if(!s.env.ANTHROPIC_DEFAULT_SONNET_MODEL)s.env.ANTHROPIC_DEFAULT_SONNET_MODEL='openrouter/free';
+if(!s.env.ANTHROPIC_DEFAULT_OPUS_MODEL)s.env.ANTHROPIC_DEFAULT_OPUS_MODEL='openrouter/free';
+if(!s.env.ANTHROPIC_DEFAULT_HAIKU_MODEL)s.env.ANTHROPIC_DEFAULT_HAIKU_MODEL='openrouter/free';
+if(!s.env.ANTHROPIC_DEFAULT_FABLE_MODEL)s.env.ANTHROPIC_DEFAULT_FABLE_MODEL='openrouter/free';
+if(!s.env.CLAUDE_CODE_SUBAGENT_MODEL)s.env.CLAUDE_CODE_SUBAGENT_MODEL='openrouter/free';
 // Key present -> the key is the auth mode; the placeholder token would only
 // create a conflict. Key absent -> the token is what keeps Claude from
 // prompting for login. Never both.
@@ -547,6 +552,17 @@ try {
 
   // Seed root, agent config dirs, and default security settings.
   const defaultSettings = JSON.stringify({
+    env: {
+      ANTHROPIC_BASE_URL: "https://openrouter.ai/api",
+      ANTHROPIC_API_KEY: "",
+      ANTHROPIC_AUTH_TOKEN: "",
+      CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY: "1",
+      ANTHROPIC_DEFAULT_SONNET_MODEL: "openrouter/free",
+      ANTHROPIC_DEFAULT_OPUS_MODEL: "openrouter/free",
+      ANTHROPIC_DEFAULT_HAIKU_MODEL: "openrouter/free",
+      ANTHROPIC_DEFAULT_FABLE_MODEL: "openrouter/free",
+      CLAUDE_CODE_SUBAGENT_MODEL: "openrouter/free"
+    },
     permissions: {
       allow: [
         'Bash(npm run *)',
@@ -606,6 +622,16 @@ rm -f "$OPENRIND_SHELL_DB_BOOTSTRAP"
 
 fi  # end: skip-when-already-bootstrapped
 
+# Auto-restore .claude.json backup if it's missing but a backup exists.
+# Claude Code refuses to start if .claude.json is missing but a backup is present.
+if [ "$OPENRIND_SHELL_AGENT" != "openclaw" ] && [ ! -f /home/agent/.claude.json ] && [ -d /home/agent/.claude/backups ]; then
+  LATEST_BACKUP=$(ls -t /home/agent/.claude/backups/.claude.json.backup.* 2>/dev/null | head -1)
+  if [ -n "$LATEST_BACKUP" ]; then
+    cp "$LATEST_BACKUP" /home/agent/.claude.json
+    echo "setup.sh: restored missing .claude.json from backup"
+  fi
+fi
+
 # Re-apply git URL rewrites after the workspace restore. syncToFs is authoritative
 # and may overwrite /home/agent/.gitconfig with an older version that lacks the
 # ssh-to-https rewrites. Writing them again here guarantees the pre-stage
@@ -631,6 +657,11 @@ let s = {};
 try { s = JSON.parse(fs.readFileSync(file, 'utf8')); } catch(e) {}
 if (!s.env) s.env = {};
 s.env.ANTHROPIC_BASE_URL = process.env.OPENRIND_GATEWAY_PROXY_URL;
+if(!s.env.ANTHROPIC_DEFAULT_SONNET_MODEL)s.env.ANTHROPIC_DEFAULT_SONNET_MODEL='openrouter/free';
+if(!s.env.ANTHROPIC_DEFAULT_OPUS_MODEL)s.env.ANTHROPIC_DEFAULT_OPUS_MODEL='openrouter/free';
+if(!s.env.ANTHROPIC_DEFAULT_HAIKU_MODEL)s.env.ANTHROPIC_DEFAULT_HAIKU_MODEL='openrouter/free';
+if(!s.env.ANTHROPIC_DEFAULT_FABLE_MODEL)s.env.ANTHROPIC_DEFAULT_FABLE_MODEL='openrouter/free';
+if(!s.env.CLAUDE_CODE_SUBAGENT_MODEL)s.env.CLAUDE_CODE_SUBAGENT_MODEL='openrouter/free';
 if (process.env.ANTHROPIC_API_KEY) delete s.env.ANTHROPIC_AUTH_TOKEN;
 else s.env.ANTHROPIC_AUTH_TOKEN = 'dummy';
 delete s.env.ANTHROPIC_API_KEY;
@@ -689,6 +720,9 @@ let s = {};
 try { s = JSON.parse(fs.readFileSync(file, 'utf8')); } catch(e) { process.exit(0); }
 if (!s.env) process.exit(0);
 const had = ('ANTHROPIC_BASE_URL' in s.env) || ('ANTHROPIC_AUTH_TOKEN' in s.env);
+const isDummy = s.env.ANTHROPIC_AUTH_TOKEN === 'dummy';
+const isProxy = (s.env.ANTHROPIC_BASE_URL || '').includes('openrind') || (s.env.ANTHROPIC_BASE_URL || '').includes('proxy');
+if (!isDummy && !isProxy) process.exit(0);
 delete s.env.ANTHROPIC_BASE_URL;
 delete s.env.ANTHROPIC_AUTH_TOKEN;
 if (Object.keys(s.env).length === 0) delete s.env;
