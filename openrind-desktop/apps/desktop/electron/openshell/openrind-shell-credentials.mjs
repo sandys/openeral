@@ -112,7 +112,7 @@ export async function setCredential(key, value) {
   const encrypted = safeStorage.encryptString(plaintext);
   const blob = await loadBlob();
   blob[key] = encrypted.toString("base64");
-  if (!blob.updatedAt) {
+  if (!blob.updatedAt || typeof blob.updatedAt !== "object" || Array.isArray(blob.updatedAt)) {
     blob.updatedAt = {};
   }
   blob.updatedAt[key] = Date.now();
@@ -136,7 +136,7 @@ export async function clearCredential(key) {
   const blob = await loadBlob();
   if (key in blob) {
     delete blob[key];
-    if (blob.updatedAt && key in blob.updatedAt) {
+    if (blob.updatedAt && typeof blob.updatedAt === "object" && !Array.isArray(blob.updatedAt) && key in blob.updatedAt) {
       delete blob.updatedAt[key];
     }
     await saveBlob(blob);

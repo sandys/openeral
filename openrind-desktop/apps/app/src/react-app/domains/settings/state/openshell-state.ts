@@ -312,6 +312,7 @@ export function useOpenShellState(options: { active: boolean } = { active: false
         if (isMountedRef.current) setCredentialStatus(status);
       } catch (err) {
         setActionError(err instanceof Error ? err.message : String(err));
+        throw err;
       } finally {
         setActionBusy(false);
       }

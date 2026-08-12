@@ -5,7 +5,7 @@ import { ChevronDown, ChevronRight, Loader2, MoreHorizontal, Plus, Search, Trian
 import { t } from "../../../../i18n";
 import { Button } from "../../../design-system/button";
 import { formatSandboxAge, needsUserAttention, type SandboxStatus } from "./sandbox-status";
-import { sandboxAgentLabel } from "./sandbox-status-labels";
+import { sandboxAgentLabel, sandboxStatusLabel } from "./sandbox-status-labels";
 import type { SandboxListRow, SandboxRowsState } from "./use-sandbox-rows";
 
 /**
@@ -77,17 +77,17 @@ export function SandboxPanel(props: SandboxPanelProps) {
   const menuRef = useRef<HTMLDivElement | null>(null);
   const listRef = useRef<HTMLDivElement | null>(null);
 
+  const showSearch = rows.length >= SEARCH_THRESHOLD;
+
   const filtered = useMemo(() => {
     const needle = query.trim().toLowerCase();
-    if (!needle) return rows;
+    if (!needle || !showSearch) return rows;
     return rows.filter(
       (row) =>
         row.displayName.toLowerCase().includes(needle) ||
         row.name.toLowerCase().includes(needle),
     );
-  }, [rows, query]);
-
-  const showSearch = rows.length >= SEARCH_THRESHOLD;
+  }, [rows, query, showSearch]);
 
   // Agent grouping and collapse states
   const [expandedAgents, setExpandedAgents] = useState<Record<string, boolean>>({
@@ -155,6 +155,13 @@ export function SandboxPanel(props: SandboxPanelProps) {
                 <Loader2 size={12} className="shrink-0 animate-spin text-gray-9" />
               ) : null}
             </div>
+            <div className={`mt-0.5 flex items-center gap-1.5 text-[11px] ${attention ? (row.status === "failed" ? "text-red-11" : "text-orange-11") : "text-gray-9"}`}>
+              <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${statusDotClass(row.status)}`} />
+              <span className="truncate">
+                {sandboxStatusLabel(row.status)}
+                {row.created ? ` • ${formatSandboxAge(row.created)}` : ""}
+              </span>
+            </div>
           </div>
 
           <button
@@ -182,8 +189,10 @@ export function SandboxPanel(props: SandboxPanelProps) {
           >
             <button
               type="button"
-              className="w-full rounded-xl px-3 py-2 text-left text-sm text-gray-11 transition-colors hover:bg-gray-2"
+              className="w-full rounded-xl px-3 py-2 text-left text-sm text-gray-11 transition-colors hover:bg-gray-2 disabled:opacity-50"
+              disabled={row.busy || renamingFor === row.name}
               onClick={() => {
+                if (row.busy || renamingFor === row.name) return;
                 setRowMenuFor(null);
                 props.onSelectSandbox(row);
               }}

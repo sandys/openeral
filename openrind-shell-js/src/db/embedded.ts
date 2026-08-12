@@ -34,8 +34,10 @@ export async function getDatabaseConnection(): Promise<{
   let client;
   let lastErr;
   
-  // Try up to 6 times for connection issues (giving paused instances ~2 minutes to wake up)
-  for (let attempt = 1; attempt <= 6; attempt++) {
+  const deadline = Date.now() + 120000;
+  
+  // Try for connection issues up to an overall deadline (giving paused instances ~2 minutes to wake up)
+  for (let attempt = 1; Date.now() < deadline; attempt++) {
     try {
       client = await pool.connect();
       await client.query("SELECT 1");
@@ -48,16 +50,22 @@ export async function getDatabaseConnection(): Promise<{
       // If it's a Supavisor timeout or ECONNREFUSED, we can retry
       if (/\{:error,\s*:timeout\}|ECONNREFUSED|ECONNRESET/i.test(msg)) {
         if (client) {
-          try { client.release(); } catch {}
+          try { client.release(err instanceof Error ? err : true); } catch {}
           client = undefined;
         }
-        if (attempt < 6) {
+        if (Date.now() + 5000 < deadline) {
           console.log(`[db] Connection attempt ${attempt} failed, retrying in 5s...`);
           await new Promise(resolve => setTimeout(resolve, 5000));
           continue;
+        } else {
+          break;
         }
       } else {
         // Not a transient error, break and throw
+        if (client) {
+          try { client.release(err instanceof Error ? err : true); } catch {}
+          client = undefined;
+        }
         break;
       }
     }

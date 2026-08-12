@@ -138,7 +138,7 @@ export function CommandPalette(props: CommandPaletteProps) {
             } satisfies PaletteItem,
           ]
         : []),
-      ...((props.sandboxes?.length ?? 0) > 0
+      ...((props.sandboxes?.length ?? 0) > 0 && props.onOpenSandbox
         ? [
             {
               id: "sandboxes",

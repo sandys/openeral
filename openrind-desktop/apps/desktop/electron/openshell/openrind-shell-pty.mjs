@@ -796,6 +796,7 @@ export function listSessions() {
     openedAt: s.openedAt,
     pid: s.pty.pid ?? null,
     paused: s.paused,
+    exited: !!s.exitInfo,
   }));
 }
 

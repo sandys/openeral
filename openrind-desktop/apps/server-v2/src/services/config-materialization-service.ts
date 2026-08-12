@@ -637,19 +637,34 @@ export function createConfigMaterializationService(input: {
 
     const syncSkillsToDir = (rootDir: string | null, skillsToMaterialize: Map<string, string>) => {
       if (!rootDir) return;
-      if (!fs.existsSync(rootDir)) {
+      
+      let rootStats;
+      try {
+        rootStats = fs.lstatSync(rootDir);
+      } catch (e) {
+        rootStats = null;
+      }
+      
+      if (rootStats && !rootStats.isDirectory()) {
+        fs.rmSync(rootDir, { force: true, recursive: true });
+        rootStats = null;
+      }
+      
+      if (!rootStats) {
         if (skillsToMaterialize.size > 0) {
           fs.mkdirSync(rootDir, { recursive: true });
         } else {
           return;
         }
       }
+
       const existing = fs.readdirSync(rootDir, { withFileTypes: true });
       for (const entry of existing) {
-        if (!skillsToMaterialize.has(entry.name)) {
+        if (!skillsToMaterialize.has(entry.name) || !entry.isDirectory()) {
           fs.rmSync(path.join(rootDir, entry.name), { force: true, recursive: true });
         }
       }
+      
       for (const [skillKey, content] of skillsToMaterialize.entries()) {
         const destination = path.join(rootDir, skillKey, "SKILL.md");
         const targetDir = path.dirname(destination);

@@ -122,7 +122,7 @@ export function statusFromPhase(phase: string | undefined): SandboxStatus {
  */
 export function resolveSandboxStatus(input: SandboxStatusInput): SandboxStatus {
   const base = statusFromPhase(input.phase);
-  if (base === "starting" || base === "deleting" || base === "failed") return base;
+  if (base === "starting" || base === "deleting" || base === "failed" || base === "stopped") return base;
   if (input.unhealthy) return "unhealthy";
   if (base === "idle") return input.hasLiveSession ? "active" : "idle";
   return base;
@@ -163,9 +163,25 @@ export function formatSandboxAge(
   now: number = Date.now(),
 ): string | null {
   if (!created) return null;
+  const trimmed = created.trim();
+
+  // The desktop CLI list parser might supply relative age text like "2 minutes ago".
+  const match = trimmed.toLowerCase().match(/^(?:about )?(?:a |an |(\d+)\s+)?(second|minute|hour|day|week|month|year)s?\s+ago$/);
+  if (match) {
+    const value = match[1] ? parseInt(match[1], 10) : 1;
+    const unit = match[2];
+    if (unit === "second") return `${value}s`;
+    if (unit === "minute") return `${value}m`;
+    if (unit === "hour") return `${value}h`;
+    if (unit === "day") return `${value}d`;
+    if (unit === "week") return `${value}w`;
+    if (unit === "month") return `${value}mo`;
+    if (unit === "year") return `${value}y`;
+  }
+
   // `openshell sandbox list` prints local time without a zone ("2026-07-27
   // 09:01:33"), which Date.parse reads as local on every engine we target.
-  const normalized = created.trim().replace(" ", "T");
+  const normalized = trimmed.replace(" ", "T");
   const parsed = Date.parse(normalized);
   if (!Number.isFinite(parsed)) return null;
   const seconds = Math.max(0, Math.floor((now - parsed) / 1000));

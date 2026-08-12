@@ -78,51 +78,56 @@ export function useSandboxRows(options?: {
   // Bumped on rename so the memo below recomputes; display names live in
   // localStorage rather than in this state.
   const [labelVersion, setLabelVersion] = useState(0);
-  const refreshInFlight = useRef(false);
+  const refreshPromise = useRef<Promise<boolean> | null>(null);
   const onDeletedRef = useRef(options?.onDeleted);
   onDeletedRef.current = options?.onDeleted;
 
   const refresh = useCallback(async (): Promise<boolean> => {
     const currentBridge = getBridge();
     if (!currentBridge?.invokeDesktop) return false;
-    if (refreshInFlight.current) return true;
-    refreshInFlight.current = true;
-    try {
-      const list = (await currentBridge.invokeDesktop(
-        "openrindListSandboxes",
-      )) as RawSandboxRow[];
-      if (Array.isArray(list)) {
-        setRaw(
-          list.filter(
-            (row) => typeof row?.name === "string" && row.name.startsWith(NAME_PREFIX),
-          ),
-        );
-      }
-      // Best-effort: a failure here only costs the "live session" dot, so it
-      // must never fail the whole refresh.
+    if (refreshPromise.current) return refreshPromise.current;
+
+    const doRefresh = async (): Promise<boolean> => {
       try {
-        const sessions = (await currentBridge.invokeDesktop("openrindPtyList")) as Array<{
-          sandboxName?: string;
-        }>;
-        if (Array.isArray(sessions)) {
-          setLiveSessions(
-            new Set(
-              sessions
-                .map((entry) => entry?.sandboxName)
-                .filter((name): name is string => typeof name === "string"),
+        const list = (await currentBridge!.invokeDesktop!(
+          "openrindListSandboxes",
+        )) as RawSandboxRow[];
+        if (Array.isArray(list)) {
+          setRaw(
+            list.filter(
+              (row) => typeof row?.name === "string" && row.name.startsWith(NAME_PREFIX),
             ),
           );
         }
-      } catch {
-        /* leave the previous set in place */
+        // Best-effort: a failure here only costs the "live session" dot, so it
+        // must never fail the whole refresh.
+        try {
+          const sessions = (await currentBridge!.invokeDesktop!("openrindPtyList")) as Array<{
+            sandboxName?: string;
+            exited?: boolean;
+          }>;
+          if (Array.isArray(sessions)) {
+            setLiveSessions(
+              new Set(
+                sessions
+                  .filter((entry) => entry && !entry.exited)
+                  .map((entry) => entry.sandboxName)
+                  .filter((name): name is string => typeof name === "string"),
+              ),
+            );
+          }
+        } catch {
+          /* leave the previous set in place */
+        }
+        setLoaded(true);
+        return true;
+      } finally {
+        refreshPromise.current = null;
       }
-      setLoaded(true);
-      return true;
-    } catch {
-      return false;
-    } finally {
-      refreshInFlight.current = false;
-    }
+    };
+
+    refreshPromise.current = doRefresh();
+    return refreshPromise.current;
   }, []);
 
   useEffect(() => {

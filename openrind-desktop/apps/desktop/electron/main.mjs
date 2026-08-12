@@ -2620,8 +2620,11 @@ async function handleDesktopInvoke(event, command, ...args) {
       const sandboxName = String(args[0] ?? "").trim();
       const base64Data = String(args[1] ?? "");
       const filename = String(args[2] ?? "").trim();
-      if (!sandboxName || !base64Data || !filename) {
+      if (!sandboxName || typeof base64Data !== "string" || !filename) {
         throw new Error("sandboxName, base64Data, and filename are required");
+      }
+      if (/[/\\]/.test(filename) || filename.includes("..")) {
+        throw new Error("Invalid filename");
       }
 
       // We upload to /home/agent/inbox so that the sync daemon picks it up and
@@ -2639,12 +2642,12 @@ async function handleDesktopInvoke(event, command, ...args) {
       const tmpBin = `/tmp/openrind_upload_${Date.now()}_${filename.replace(/[^a-zA-Z0-9.-]/g, "_")}`;
 
       const bashCmd = [
+        `trap 'rm -f ${openrindShell.shellQuote(tmpTxt)} ${openrindShell.shellQuote(tmpBin)}' EXIT`,
         "mkdir -p /tmp",
         `cat > ${openrindShell.shellQuote(tmpTxt)}`,
         `base64 -d < ${openrindShell.shellQuote(tmpTxt)} > ${openrindShell.shellQuote(tmpBin)}`,
         `openshell sandbox exec --name ${openrindShell.shellQuote(sandboxName)} -- bash -c "mkdir -p ${openrindShell.shellQuote(destDir)}"`,
-        `openshell sandbox upload ${openrindShell.shellQuote(sandboxName)} ${openrindShell.shellQuote(tmpBin)} ${openrindShell.shellQuote(destPath)}`,
-        `rm -f ${openrindShell.shellQuote(tmpTxt)} ${openrindShell.shellQuote(tmpBin)}`
+        `openshell sandbox upload ${openrindShell.shellQuote(sandboxName)} ${openrindShell.shellQuote(tmpBin)} ${openrindShell.shellQuote(destPath)}`
       ].join(" && ");
 
       const result = await wslRun([
@@ -2664,6 +2667,9 @@ async function handleDesktopInvoke(event, command, ...args) {
       const filename = String(args[1] ?? "").trim();
       if (!sandboxName || !filename) {
         throw new Error("sandboxName and filename are required");
+      }
+      if (/[/\\]/.test(filename) || filename.includes("..")) {
+        throw new Error("Invalid filename");
       }
       const destPath = `/home/agent/inbox/${filename}`;
       const bashCmd = `rm -f ${openrindShell.shellQuote(destPath)}`;

@@ -35,14 +35,22 @@ function runWithSyncMutex(fn) {
   return current.then(fn).finally(resolveNext);
 }
 
-async function syncFromRealFs(pool, workspaceId) {
+async function syncFromRealFsInner(pool, workspaceId) {
   const { syncFromFs, createHomeSyncOptions } = await syncModulePromise;
-  return runWithSyncMutex(() => syncFromFs(pool, workspaceId, HOME_DIR, createHomeSyncOptions({ prune: true })));
+  return syncFromFs(pool, workspaceId, HOME_DIR, createHomeSyncOptions({ prune: true }));
+}
+
+async function syncToRealFsInner(pool, workspaceId) {
+  const { syncToFs, createHomeSyncOptions } = await syncModulePromise;
+  return syncToFs(pool, workspaceId, HOME_DIR, createHomeSyncOptions({ prune: true }));
+}
+
+async function syncFromRealFs(pool, workspaceId) {
+  return runWithSyncMutex(() => syncFromRealFsInner(pool, workspaceId));
 }
 
 async function syncToRealFs(pool, workspaceId) {
-  const { syncToFs, createHomeSyncOptions } = await syncModulePromise;
-  return runWithSyncMutex(() => syncToFs(pool, workspaceId, HOME_DIR, createHomeSyncOptions({ prune: true })));
+  return runWithSyncMutex(() => syncToRealFsInner(pool, workspaceId));
 }
 
 function formatError(err, label) {
@@ -58,57 +66,59 @@ function appendStderr(stderr, detail) {
 }
 
 async function execCommandWithSync(shell, pool, workspaceId, command, syncWatch = null) {
-  const shouldPreSync = !syncWatch || !syncWatch.isWatching() || syncWatch.isDirty();
-  if (shouldPreSync) {
+  return runWithSyncMutex(async () => {
+    const shouldPreSync = !syncWatch || !syncWatch.isWatching() || syncWatch.isDirty();
+    if (shouldPreSync) {
+      try {
+        await syncFromRealFsInner(pool, workspaceId);
+        syncWatch?.markClean();
+      } catch (err) {
+        return {
+          stdout: '',
+          stderr: `${formatError(err, 'openrind-shell-bash: syncFromFs failed')}\n`,
+          exitCode: 1,
+        };
+      }
+    }
+
+    let result;
+    let commandError = null;
     try {
-      await syncFromRealFs(pool, workspaceId);
-      syncWatch?.markClean();
+      result = await shell.exec(command);
     } catch (err) {
+      commandError = err;
+    }
+
+    let syncToError = null;
+    try {
+      if (syncWatch && syncWatch.isWatching()) {
+        await syncWatch.suspend(() => syncToRealFsInner(pool, workspaceId));
+        syncWatch.markClean();
+      } else {
+        await syncToRealFsInner(pool, workspaceId);
+      }
+    } catch (err) {
+      syncToError = err;
+    }
+
+    if (commandError) {
+      const detail = formatError(commandError, 'openrind-shell-bash: command failed');
+      const stderr = syncToError
+        ? appendStderr(`${detail}\n`, formatError(syncToError, 'openrind-shell-bash: syncToFs failed'))
+        : `${detail}\n`;
+      return { stdout: '', stderr, exitCode: 1 };
+    }
+
+    if (syncToError) {
       return {
-        stdout: '',
-        stderr: `${formatError(err, 'openrind-shell-bash: syncFromFs failed')}\n`,
-        exitCode: 1,
+        stdout: result.stdout,
+        stderr: appendStderr(result.stderr, formatError(syncToError, 'openrind-shell-bash: syncToFs failed')),
+        exitCode: result.exitCode === 0 ? 1 : result.exitCode,
       };
     }
-  }
 
-  let result;
-  let commandError = null;
-  try {
-    result = await shell.exec(command);
-  } catch (err) {
-    commandError = err;
-  }
-
-  let syncToError = null;
-  try {
-    if (syncWatch && syncWatch.isWatching()) {
-      await syncWatch.suspend(() => syncToRealFs(pool, workspaceId));
-      syncWatch.markClean();
-    } else {
-      await syncToRealFs(pool, workspaceId);
-    }
-  } catch (err) {
-    syncToError = err;
-  }
-
-  if (commandError) {
-    const detail = formatError(commandError, 'openrind-shell-bash: command failed');
-    const stderr = syncToError
-      ? appendStderr(`${detail}\n`, formatError(syncToError, 'openrind-shell-bash: syncToFs failed'))
-      : `${detail}\n`;
-    return { stdout: '', stderr, exitCode: 1 };
-  }
-
-  if (syncToError) {
-    return {
-      stdout: result.stdout,
-      stderr: appendStderr(result.stderr, formatError(syncToError, 'openrind-shell-bash: syncToFs failed')),
-      exitCode: result.exitCode === 0 ? 1 : result.exitCode,
-    };
-  }
-
-  return result;
+    return result;
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -145,7 +155,7 @@ async function startDaemon() {
   if (!isOpenclaw) {
     try {
       const { watchAndSync, createHomeSyncOptions } = await syncModulePromise;
-      syncWatch = watchAndSync(pool, workspaceId, HOME_DIR, createHomeSyncOptions({ prune: true }));
+      syncWatch = watchAndSync(pool, workspaceId, HOME_DIR, { ...createHomeSyncOptions({ prune: true }), syncFn: syncFromRealFs });
     } catch (err) {
       process.stderr.write(`${formatError(err, 'openrind-shell-bash: watcher failed')}\n`);
     }

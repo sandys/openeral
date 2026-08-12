@@ -3,6 +3,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Boxes, Settings, X } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 
+import { t } from "../../../../i18n";
 import type { SandboxProfile } from "../../../../app/lib/desktop";
 import {
   modalBodyClass,
@@ -21,6 +22,7 @@ import { deriveSandboxName } from "../../session/sidebar/use-sandbox-rows";
 
 type CredentialStatus = {
   databaseUrl: "set" | "unset" | "unknown";
+  anthropicApiKey: "set" | "unset" | "unknown";
   openrindShellAgent: string | null;
   openrindGatewayApiBase: string | null;
 };
@@ -54,7 +56,13 @@ export function CreateSandboxModal(props: CreateSandboxModalProps) {
   }, [props.open]);
 
   const dbReady = creds?.databaseUrl === "set";
-  const dbBlocked = creds !== null && !dbReady;
+  const anthropicReady = creds?.anthropicApiKey === "set";
+  const openclawNeedsKey = profile === "openrind-shell-openclaw";
+  
+  const dbBlocked = !dbReady;
+  const authBlocked = openclawNeedsKey && !anthropicReady;
+  
+  const isBlocked = dbBlocked || authBlocked;
 
   const previewName = useMemo(() => deriveSandboxName(newName), [newName]);
   const nameTaken = useMemo(
@@ -62,7 +70,7 @@ export function CreateSandboxModal(props: CreateSandboxModalProps) {
     [previewName, props.existingNames]
   );
 
-  const canCreate = Boolean(previewName) && !nameTaken && !dbBlocked;
+  const canCreate = Boolean(previewName) && !nameTaken && creds !== null && !isBlocked;
 
   const handleCreate = () => {
     if (!canCreate) return;
@@ -87,9 +95,9 @@ export function CreateSandboxModal(props: CreateSandboxModalProps) {
               <Boxes size={20} />
             </div>
             <div>
-              <h2 className={modalTitleClass}>New sandbox</h2>
+              <h2 className={modalTitleClass}>{t("sandbox.new_sandbox")}</h2>
               <div className="mt-1 text-[13px] text-dls-secondary">
-                Initialize a new persistent, postgres-backed agent sandbox.
+                {t("sandbox.new_sandbox_desc")}
               </div>
             </div>
           </div>
@@ -102,13 +110,13 @@ export function CreateSandboxModal(props: CreateSandboxModalProps) {
           </button>
         </header>
         <div className={modalBodyClass}>
-          {creds !== null && !dbReady ? (
+          {creds !== null && dbBlocked ? (
             <div className="mb-6 flex items-start gap-3 rounded-2xl border border-amber-7/40 bg-amber-2/20 p-4 text-amber-12">
               <Settings size={16} className="mt-0.5 shrink-0" />
               <div className="flex-1 text-[13px]">
-                <div className="font-medium">DATABASE_URL is not configured</div>
+                <div className="font-medium">{t("sandbox.db_missing_title")}</div>
                 <div className="opacity-90 mt-1">
-                  Openrind Shell sandboxes need a PostgreSQL connection for persistence. Set it before creating one.
+                  {t("sandbox.db_missing_desc")}
                 </div>
               </div>
               <button
@@ -119,14 +127,34 @@ export function CreateSandboxModal(props: CreateSandboxModalProps) {
                   navigate("/settings/environment");
                 }}
               >
-                Configure
+                {t("settings.configure")}
+              </button>
+            </div>
+          ) : creds !== null && authBlocked ? (
+            <div className="mb-6 flex items-start gap-3 rounded-2xl border border-amber-7/40 bg-amber-2/20 p-4 text-amber-12">
+              <Settings size={16} className="mt-0.5 shrink-0" />
+              <div className="flex-1 text-[13px]">
+                <div className="font-medium">{t("sandbox.auth_missing_title")}</div>
+                <div className="opacity-90 mt-1">
+                  {t("sandbox.auth_missing_desc")}
+                </div>
+              </div>
+              <button
+                type="button"
+                className={`${pillGhostClass} border-amber-7/50 text-amber-12 hover:bg-amber-2/40`}
+                onClick={() => {
+                  props.onClose();
+                  navigate("/settings/environment");
+                }}
+              >
+                {t("settings.configure")}
               </button>
             </div>
           ) : null}
 
           <div className="space-y-4">
             <div>
-              <label className={`mb-1.5 block ${inputLabelClass}`}>Sandbox name</label>
+              <label className={`mb-1.5 block ${inputLabelClass}`}>{t("sandbox.name_label")}</label>
               <input
                 className={inputClass}
                 placeholder="my-project"
@@ -139,23 +167,23 @@ export function CreateSandboxModal(props: CreateSandboxModalProps) {
               />
               {nameTaken ? (
                 <div className="mt-2 text-[13px] text-amber-11">
-                  A sandbox with this name already exists.
+                  {t("sandbox.name_taken")}
                 </div>
               ) : previewName ? (
                 <div className="mt-2 text-[13px] text-dls-secondary">
-                  Creates <code className="rounded bg-gray-2/40 px-1 py-0.5 text-[11px]">{previewName}</code>
+                  {t("sandbox.creates_name")} <code className="rounded bg-gray-2/40 px-1 py-0.5 text-[11px]">{previewName}</code>
                 </div>
               ) : null}
             </div>
             <div>
-              <label className={`mb-1.5 block ${inputLabelClass}`}>Agent</label>
+              <label className={`mb-1.5 block ${inputLabelClass}`}>{t("sandbox.agent_label")}</label>
               <select
                 className={inputClass}
                 value={profile}
                 onChange={(e) => setProfile(e.target.value as SandboxProfile)}
               >
-                <option value="openrind-shell-claude">Claude Code</option>
-                <option value="openrind-shell-openclaw">OpenClaw</option>
+                <option value="openrind-shell-claude">{t("sandbox.agent_claude")}</option>
+                <option value="openrind-shell-openclaw">{t("sandbox.agent_openclaw")}</option>
               </select>
             </div>
           </div>
@@ -166,7 +194,7 @@ export function CreateSandboxModal(props: CreateSandboxModalProps) {
             className="rounded-full px-4 py-2 text-[13px] font-medium text-dls-secondary transition-colors hover:bg-dls-hover hover:text-dls-text"
             onClick={props.onClose}
           >
-            Cancel
+            {t("common.cancel")}
           </button>
           <button
             type="button"
@@ -174,7 +202,7 @@ export function CreateSandboxModal(props: CreateSandboxModalProps) {
             onClick={handleCreate}
             disabled={!canCreate}
           >
-            Create &amp; launch
+            {t("sandbox.create_launch")}
           </button>
         </div>
       </div>

@@ -931,33 +931,12 @@ export function SessionRoute() {
   const [selectedSandbox, setSelectedSandbox] = React.useState<{
     name: string;
     profile: SandboxProfile;
-  } | null>(() => {
-    try {
-      const saved = localStorage.getItem("openrind-shell-selected-sandbox");
-      if (saved) {
-        const parsed = JSON.parse(saved);
-        if (parsed && typeof parsed === "object" && parsed.name) {
-          return parsed;
-        }
-      }
-    } catch {}
-    return null;
-  });
+  } | null>(null);
 
   const handleSetSelectedSandbox = React.useCallback((
     sandbox: { name: string; profile: SandboxProfile } | null | ((current: { name: string; profile: SandboxProfile } | null) => { name: string; profile: SandboxProfile } | null)
   ) => {
-    setSelectedSandbox((current) => {
-      const next = typeof sandbox === "function" ? sandbox(current) : sandbox;
-      try {
-        if (next) {
-          localStorage.setItem("openrind-shell-selected-sandbox", JSON.stringify(next));
-        } else {
-          localStorage.removeItem("openrind-shell-selected-sandbox");
-        }
-      } catch {}
-      return next;
-    });
+    setSelectedSandbox(sandbox);
   }, []);
 
   // One poller shared by the sidebar panel, the command palette and the
@@ -981,6 +960,13 @@ export function SessionRoute() {
         openrindSandbox?: { name?: string; profile?: string };
       } | null
     )?.openrindSandbox;
+    const openModal = (location.state as any)?.openCreateSandboxModal;
+    if (openModal) {
+      setCreateSandboxOpen(true);
+      navigate(location.pathname, { replace: true, state: null });
+      return;
+    }
+
     if (!handoff?.name) return;
     handleSetSelectedSandbox({
       name: handoff.name,
@@ -1916,16 +1902,18 @@ export function SessionRoute() {
       onSidebarTabChange={handleSetSidebarTab}
       sandboxWarningCount={sandboxRows.warningCount}
       sandboxSidebar={
-        <SandboxPanel
-          state={sandboxRows}
-          selectedSandboxName={selectedSandbox?.name ?? null}
-          focusedSandboxName={selectedSandbox?.name ?? null}
-          onSelectSandbox={(row) =>
-            handleSetSelectedSandbox({ name: row.name, profile: row.profile })
-          }
-          onOpenManager={() => setCreateSandboxOpen(true)}
-          onOpenSettings={() => navigate("/settings/sandbox")}
-        />
+        typeof window !== "undefined" && Boolean((window as any).__OPENRIND_DESKTOP_ELECTRON__) ? (
+          <SandboxPanel
+            state={sandboxRows}
+            selectedSandboxName={selectedSandbox?.name ?? null}
+            focusedSandboxName={selectedSandbox?.name ?? null}
+            onSelectSandbox={(row) =>
+              handleSetSelectedSandbox({ name: row.name, profile: row.profile })
+            }
+            onOpenManager={() => setCreateSandboxOpen(true)}
+            onOpenSettings={() => navigate("/settings/sandbox")}
+          />
+        ) : undefined
       }
       selectedWorkspaceDisplay={selectedWorkspace ? {
         id: selectedWorkspace.id,

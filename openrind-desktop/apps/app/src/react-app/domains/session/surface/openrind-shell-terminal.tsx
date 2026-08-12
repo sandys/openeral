@@ -346,6 +346,10 @@ export function OpenrindShellTerminal(props: OpenrindShellTerminalProps) {
   const { showToast } = useStatusToasts();
   const [uploadedFiles, setUploadedFiles] = useState<{ id: string; name: string; size: number }[]>([]);
 
+  useEffect(() => {
+    setUploadedFiles([]);
+  }, [props.workspaceId]);
+
   const handleUploadClick = useCallback(() => {
     fileInputRef.current?.click();
   }, []);
@@ -357,23 +361,25 @@ export function OpenrindShellTerminal(props: OpenrindShellTerminalProps) {
     if (!effectiveName) return;
 
     setUploadBusy(true);
+    const uploadedNames: string[] = [];
     try {
-      const uploadedNames: string[] = [];
-      const newFiles: { id: string; name: string; size: number }[] = [];
       for (let i = 0; i < files.length; i++) {
         const file = files[i];
         await new Promise<void>((resolve, reject) => {
           const reader = new FileReader();
           reader.onload = async () => {
             try {
-              const base64 = (reader.result as string).split(",")[1];
+              const base64 = (reader.result as string).split(",")[1] ?? "";
               await invoke("openrindShellUpload", effectiveName, base64, file.name);
               uploadedNames.push(file.name);
-              newFiles.push({
-                id: `${file.name}-${file.lastModified}-${Math.random().toString(36).slice(2)}`,
-                name: file.name,
-                size: file.size,
-              });
+              setUploadedFiles((prev) => [
+                ...prev,
+                {
+                  id: `${file.name}-${file.lastModified}-${Math.random().toString(36).slice(2)}`,
+                  name: file.name,
+                  size: file.size,
+                },
+              ]);
               resolve();
             } catch (err) {
               reject(err);
@@ -384,21 +390,27 @@ export function OpenrindShellTerminal(props: OpenrindShellTerminalProps) {
         });
       }
       
-      setUploadedFiles((prev) => [...prev, ...newFiles]);
-
       const summary = uploadedNames.join(", ");
       showToast({
-        title: uploadedNames.length === 1 ? `Uploaded ${uploadedNames[0]} to the shared folder and inserted a link.` : `Uploaded ${uploadedNames.length} files to the shared folder and inserted a link.`,
+        title: uploadedNames.length === 1 ? `Uploaded ${uploadedNames[0]} to the shared folder.` : `Uploaded ${uploadedNames.length} files to the shared folder.`,
         description: uploadedNames.length > 1 ? summary : undefined,
         tone: "success",
       });
       
     } catch (err) {
       console.error("Upload failed", err);
-      showToast({
-        title: err instanceof Error ? err.message : "Upload failed",
-        tone: "warning",
-      });
+      if (uploadedNames.length > 0) {
+        showToast({
+          title: `Upload partially failed`,
+          description: `Successfully uploaded ${uploadedNames.length} file(s), but a subsequent file failed.`,
+          tone: "warning",
+        });
+      } else {
+        showToast({
+          title: err instanceof Error ? err.message : "Upload failed",
+          tone: "warning",
+        });
+      }
     } finally {
       setUploadBusy(false);
       // Reset input so the same file can be uploaded again
@@ -408,9 +420,9 @@ export function OpenrindShellTerminal(props: OpenrindShellTerminalProps) {
     }
   }, [sandboxName]);
 
-  const removeUploadedFile = useCallback(async (id: string, filename: string) => {
+  const removeUploadedFile = useCallback(async (id: string, filename: string): Promise<boolean> => {
     const effectiveName = sandboxName ?? lastKnownSandboxNameRef.current;
-    if (!effectiveName) return;
+    if (!effectiveName) return false;
     try {
       await invoke("openrindShellDeleteFile", effectiveName, filename);
       setUploadedFiles((prev) => prev.filter((f) => f.id !== id));
@@ -418,11 +430,13 @@ export function OpenrindShellTerminal(props: OpenrindShellTerminalProps) {
         title: `Removed ${filename} from sandbox`,
         tone: "success",
       });
+      return true;
     } catch (err) {
       showToast({
         title: err instanceof Error ? err.message : "Failed to remove file",
         tone: "warning",
       });
+      return false;
     }
   }, [sandboxName, showToast]);
 
@@ -1666,11 +1680,11 @@ export function OpenrindShellTerminal(props: OpenrindShellTerminalProps) {
                           type="button"
                           className="flex h-7 w-7 items-center justify-center rounded-md text-gray-10 hover:bg-red-3 hover:text-red-11 transition-colors"
                           title="Delete file"
-                          onClick={(e) => {
+                          onClick={async (e) => {
                             e.preventDefault();
                             e.stopPropagation();
-                            void removeUploadedFile(file.id, file.name);
-                            if (uploadedFiles.length === 1) setFilesModalOpen(false);
+                            const success = await removeUploadedFile(file.id, file.name);
+                            if (success && uploadedFiles.length === 1) setFilesModalOpen(false);
                           }}
                         >
                           <Trash2 size={15} />

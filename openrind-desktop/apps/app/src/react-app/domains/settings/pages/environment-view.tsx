@@ -117,6 +117,8 @@ export function EnvironmentView(props: EnvironmentViewProps) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  const canEditCredentials = !!props.onSetCredential;
+
   // Predefined sandbox credentials state
   const [editingPredefinedKey, setEditingPredefinedKey] = useState<OpenrindShellCredentialKey | null>(null);
   const [predefinedValue, setPredefinedValue] = useState("");
@@ -182,15 +184,21 @@ export function EnvironmentView(props: EnvironmentViewProps) {
   }, [props.runtimeKey]);
 
   useEffect(() => {
-    if (canEdit) return;
-    setEditingPredefinedKey(null);
-    setEditingCustomKey(null);
-    setIsAddingInline(false);
-    setDeleteCandidate(null);
-    setDeletingKey(null);
-    setApplyConfirmOpen(false);
-    setApplyError(null);
+    if (!canEdit) {
+      setEditingCustomKey(null);
+      setIsAddingInline(false);
+      setDeleteCandidate(null);
+      setDeletingKey(null);
+      setApplyConfirmOpen(false);
+      setApplyError(null);
+    }
   }, [canEdit]);
+
+  useEffect(() => {
+    if (!canEditCredentials) {
+      setEditingPredefinedKey(null);
+    }
+  }, [canEditCredentials]);
 
   const markChangesPending = () => {
     clearOpenrindDesktopEnvSystemContextCache();
@@ -202,7 +210,7 @@ export function EnvironmentView(props: EnvironmentViewProps) {
 
   // Predefined Sandbox Credentials handlers
   const startEditPredefined = (key: OpenrindShellCredentialKey) => {
-    if (!canEdit) return;
+    if (!canEditCredentials) return;
     setEditingPredefinedKey(key);
     setPredefinedValue("");
     setPredefinedError(null);
@@ -387,11 +395,8 @@ export function EnvironmentView(props: EnvironmentViewProps) {
     }
   };
 
-  // Filter out any custom user items that duplicate predefined env var names
-  const customItems = useMemo(() => {
-    const predefinedNames = new Set(PREDEFINED_CREDENTIALS.map((p) => p.envVarName));
-    return items.filter((item) => !predefinedNames.has(item.key));
-  }, [items]);
+  // Expose all items so stranded predefined keys in the old server store remain visible for deletion
+  const customItems = items;
 
   return (
     <div className="space-y-6">
@@ -532,7 +537,7 @@ export function EnvironmentView(props: EnvironmentViewProps) {
                           variant="outline"
                           className="h-7 rounded-full px-3 text-xs"
                           onClick={() => startEditPredefined(cred.statusKey)}
-                          disabled={!canEdit || isBusy}
+                          disabled={!canEditCredentials || isBusy}
                         >
                           {isSet ? "Update" : "Configure"}
                         </Button>
@@ -541,7 +546,7 @@ export function EnvironmentView(props: EnvironmentViewProps) {
                             variant="outline"
                             className="h-7 rounded-full border-red-7/50 px-3 text-xs text-red-12 hover:bg-red-2/30"
                             onClick={() => void handleClearPredefined(cred.statusKey)}
-                            disabled={!canEdit || isBusy}
+                            disabled={!canEditCredentials || isBusy}
                           >
                             Clear
                           </Button>

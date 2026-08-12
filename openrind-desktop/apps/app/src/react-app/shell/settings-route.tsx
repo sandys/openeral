@@ -1402,23 +1402,25 @@ export function SettingsRoute() {
         onSidebarTabChange={handleSetSidebarTab}
         sandboxWarningCount={sandboxRows.warningCount}
         sandboxSidebar={
-          // Same panel as the session sidebar. Picking a sandbox hands off to
-          // the session route (the same location.state mechanism the
-          // /sandboxes manager uses), which mounts its terminal with the entry
-          // selected.
-          <SandboxPanel
-            state={sandboxRows}
-            selectedSandboxName={null}
-            onSelectSandbox={(row) =>
-              navigate("/session", {
-                state: {
-                  openrindSandbox: { name: row.name, profile: row.profile },
-                },
-              })
-            }
-            onOpenManager={() => setCreateSandboxOpen(true)}
-            onOpenSettings={() => navigate("/settings/sandbox")}
-          />
+          typeof window !== "undefined" && Boolean((window as any).__OPENRIND_DESKTOP_ELECTRON__) ? (
+            // Same panel as the session sidebar. Picking a sandbox hands off to
+            // the session route (the same location.state mechanism the
+            // /sandboxes manager uses), which mounts its terminal with the entry
+            // selected.
+            <SandboxPanel
+              state={sandboxRows}
+              selectedSandboxName={null}
+              onSelectSandbox={(row) =>
+                navigate("/session", {
+                  state: {
+                    openrindSandbox: { name: row.name, profile: row.profile },
+                  },
+                })
+              }
+              onOpenManager={() => setCreateSandboxOpen(true)}
+              onOpenSettings={() => navigate("/settings/sandbox")}
+            />
+          ) : undefined
         }
         workspaceSessionListProps={{
           workspaceSessionGroups,

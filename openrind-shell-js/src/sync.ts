@@ -556,9 +556,10 @@ export function watchAndSync(
   pool: pg.Pool,
   workspaceId: string,
   dir: string,
-  opts?: SyncOptions & { debounceMs?: number },
+  opts?: SyncOptions & { debounceMs?: number, syncFn?: (pool: pg.Pool, workspaceId: string, dir: string, syncOpts: SyncOptions) => Promise<void> },
 ): SyncWatchHandle {
   const debounceMs = opts?.debounceMs ?? 2000;
+  const syncFn = opts?.syncFn ?? syncFromFs;
   const syncOpts = normalizeSyncOptions(opts);
   let timer: ReturnType<typeof setTimeout> | null = null;
   let syncing = false;
@@ -581,7 +582,7 @@ export function watchAndSync(
     timer = setTimeout(() => {
       if (!dirty || syncing || suspended > 0) return;
       syncing = true;
-      void syncFromFs(pool, workspaceId, dir, syncOpts).then(() => {
+      void syncFn(pool, workspaceId, dir, syncOpts).then(() => {
         markClean();
       }).catch((err: unknown) => {
         process.stderr.write(`${formatSyncError(err, 'openrind-shell: sync error')}\n`);

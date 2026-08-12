@@ -58,6 +58,8 @@ describe("resolveSandboxStatus", () => {
     expect(resolveSandboxStatus({ phase: "Ready", unhealthy: true })).toBe("unhealthy");
     // Still starting is not yet unhealthy — the agent has not had its chance.
     expect(resolveSandboxStatus({ phase: "Provisioning", unhealthy: true })).toBe("starting");
+    // Stopped is not unhealthy — it's just stopped.
+    expect(resolveSandboxStatus({ phase: "Stopped", unhealthy: true })).toBe("stopped");
   });
 
   test("a failed sandbox stays failed even with a live session claim", () => {
@@ -153,6 +155,13 @@ describe("formatSandboxAge", () => {
 
   test("never renders a negative age from a clock skew", () => {
     expect(formatSandboxAge("2026-07-27 12:00:30", base)).toBe("0s");
+  });
+
+  test("parses relative age strings from CLI output", () => {
+    expect(formatSandboxAge("2 minutes ago", base)).toBe("2m");
+    expect(formatSandboxAge("about an hour ago", base)).toBe("1h");
+    expect(formatSandboxAge("3 days ago", base)).toBe("3d");
+    expect(formatSandboxAge("a minute ago", base)).toBe("1m");
   });
 
   test("returns null when there is nothing to show", () => {

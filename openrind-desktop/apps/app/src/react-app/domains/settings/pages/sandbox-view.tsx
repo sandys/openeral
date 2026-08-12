@@ -174,13 +174,13 @@ export function SandboxView(props: SandboxViewProps) {
                 <input
                   type="radio"
                   name="sandbox-backend"
-                  className="sr-only"
+                  className="peer sr-only"
                   value={option.value}
                   checked={checked}
                   onChange={() => props.onSelectBackend(option.value)}
                 />
                 <div
-                  className={`mt-1 flex h-4 w-4 shrink-0 items-center justify-center rounded-full border transition-colors ${
+                  className={`mt-1 flex h-4 w-4 shrink-0 items-center justify-center rounded-full border transition-colors peer-focus-visible:ring-2 peer-focus-visible:ring-blue-500 peer-focus-visible:ring-offset-2 peer-focus-visible:ring-offset-dls-surface ${
                     checked
                       ? "bg-transparent"
                       : "border-gray-400 dark:border-gray-600 bg-transparent"

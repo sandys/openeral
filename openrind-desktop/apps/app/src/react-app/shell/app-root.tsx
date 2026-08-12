@@ -115,9 +115,8 @@ function useNativeMenuActions() {
         case "open-sandboxes":
           // The /sandboxes route was removed in favor of a modal, but this action
           // is fired by the native menu. It used to navigate to /sandboxes.
-          // Since the sandbox panel is always visible in the sidebar on the session route,
-          // navigating to /session is a reasonable fallback.
-          navigate("/session");
+          // By passing openCreateSandboxModal, the session route will open the manager.
+          navigate("/session", { state: { openCreateSandboxModal: true } });
           break;
         case "about":
           navigate("/settings/updates");
