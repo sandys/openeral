@@ -103,7 +103,19 @@ const DESKTOP_PROTOCOL_SCHEME = "openrind-desktop";
 // Override via OPENRIND_DESKTOP_ELECTRON_USERDATA so dogfooders can isolate their
 // Electron install from the real Tauri app.
 app.setName("Openrind Desktop");
-if (app.isPackaged) {
+if (process.platform === "win32") {
+  if (app.isPackaged) {
+    app.setAsDefaultProtocolClient(DESKTOP_PROTOCOL_SCHEME);
+  } else {
+    // In Windows development mode, we must pass the path to our main script/folder so Windows launches electron.exe with our app,
+    // rather than trying to load the deep-link URL as the app entrypoint.
+    app.setAsDefaultProtocolClient(
+      DESKTOP_PROTOCOL_SCHEME,
+      process.execPath,
+      [path.resolve(process.argv[1])]
+    );
+  }
+} else {
   app.setAsDefaultProtocolClient(DESKTOP_PROTOCOL_SCHEME);
 }
 const userDataOverride = process.env.OPENRIND_DESKTOP_ELECTRON_USERDATA?.trim();
@@ -2241,6 +2253,50 @@ async function handleDesktopInvoke(event, command, ...args) {
       }
       openshellInstaller.abortController?.abort();
       return { status: "cancelling" };
+    }
+    case "openrindGatewayCheckout": {
+      const apiKey = await openrindCredentials.getCredential("openrindGatewayApiKey");
+      if (!apiKey) throw new Error("Gateway API Key not set.");
+      const gatewayUrl = process.env.OPENRIND_GATEWAY_URL || "https://app.openrind.com";
+      // To create a checkout session, we need the user's web session on the gateway,
+      // but wait! Since they are logged in on the web, if we just open the gateway billing setup page,
+      // or can we trigger checkout using the API key?
+      // Yes! Our NextJS API endpoint `POST /api/individual/billing/checkout` requires `getUser()` which is a web session.
+      // If we call it via API Key from the desktop app, how will NextJS know who the user is?
+      // Ah! We can authenticate the request with the API key instead of NextAuth getUser()!
+      // Yes! In `stringcost/web/app/api/individual/billing/checkout/route.ts`, we can support Auth headers!
+      // If the Authorization header has a Bearer API Key, we resolve the individual organization via that API key!
+      // That is incredibly robust.
+      const response = await fetch(`${gatewayUrl}/api/individual/billing/checkout`, {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${apiKey}`,
+          "Content-Type": "application/json",
+        },
+      });
+      if (!response.ok) {
+        const errBody = await response.json().catch(() => ({}));
+        throw new Error(errBody.error || `Failed to create checkout session: ${response.status}`);
+      }
+      const data = await response.json();
+      if (data.url) {
+        await openExternalSafe(data.url);
+      }
+      return data;
+    }
+    case "openrindGatewayGetStats": {
+      const apiKey = await openrindCredentials.getCredential("openrindGatewayApiKey");
+      if (!apiKey) throw new Error("Gateway API Key not set.");
+      const gatewayUrl = process.env.OPENRIND_GATEWAY_URL || "https://app.openrind.com";
+      const response = await fetch(`${gatewayUrl}/api/individual/billing/stats`, {
+        headers: {
+          "Authorization": `Bearer ${apiKey}`,
+        },
+      });
+      if (!response.ok) {
+        throw new Error(`Failed to fetch stats: ${response.status} ${response.statusText}`);
+      }
+      return await response.json();
     }
     case "openrindCredentialStatus":
       return openrindCredentials.getCredentialStatus();

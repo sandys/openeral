@@ -180,6 +180,7 @@ export type SettingsTab =
   | "sandbox"
   | "updates"
   | "recovery"
+  | "billing"
   | "debug";
 
 export type WorkspacePreset = "starter" | "automation" | "minimal";

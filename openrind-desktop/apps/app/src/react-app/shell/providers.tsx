@@ -5,6 +5,7 @@ import { isWebDeployment } from "../../app/lib/openrind-desktop-deployment";
 import { hydrateOpenrindDesktopServerSettingsFromEnv } from "../../app/lib/openrind-desktop-server";
 import { isDesktopRuntime } from "../../app/utils";
 import { DenAuthProvider } from "../domains/cloud/den-auth-provider";
+import { GatewayBillingProvider } from "../domains/cloud/gateway-billing-provider";
 import { DesktopConfigProvider } from "../domains/cloud/desktop-config-provider";
 import { RestrictionNoticeProvider } from "../domains/cloud/restriction-notice-provider";
 import { StatusToastsProvider } from "../domains/shell-feedback/status-toasts";
@@ -64,15 +65,17 @@ export function AppProviders({ children }: AppProvidersProps) {
       <ServerProvider defaultUrl={defaultUrl}>
         <DesktopRuntimeBoot />
         <DenAuthProvider>
-          <DesktopConfigProvider>
-            <RestrictionNoticeProvider>
-              <LocalProvider>
-                <StatusToastsProvider>
-                  <ReloadCoordinatorProvider>{children}</ReloadCoordinatorProvider>
-                </StatusToastsProvider>
-              </LocalProvider>
-            </RestrictionNoticeProvider>
-          </DesktopConfigProvider>
+          <GatewayBillingProvider>
+            <DesktopConfigProvider>
+              <RestrictionNoticeProvider>
+                <LocalProvider>
+                  <StatusToastsProvider>
+                    <ReloadCoordinatorProvider>{children}</ReloadCoordinatorProvider>
+                  </StatusToastsProvider>
+                </LocalProvider>
+              </RestrictionNoticeProvider>
+            </DesktopConfigProvider>
+          </GatewayBillingProvider>
         </DenAuthProvider>
         <MigrationPrompt />
       </ServerProvider>

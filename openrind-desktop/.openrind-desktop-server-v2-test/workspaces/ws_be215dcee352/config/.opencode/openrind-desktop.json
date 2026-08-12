@@ -1,0 +1,13 @@
+{
+  "authorizedRoots": [],
+  "blueprint": null,
+  "reload": null,
+  "version": 1,
+  "workspace": {
+    "configDir": "C:\\Users\\dines\\OneDrive\\Desktop\\work\\openeral\\openrind-desktop\\.openrind-desktop-server-v2-test\\workspaces\\ws_be215dcee352\\config",
+    "createdAt": 1786442629570,
+    "dataDir": "/tmp/workspace",
+    "name": "Local Workspace",
+    "preset": "starter"
+  }
+}

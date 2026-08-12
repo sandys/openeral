@@ -35,6 +35,8 @@ export type CredentialRowProps = {
   onSet: (value: string) => Promise<void>;
   onClear: () => Promise<void>;
   extra?: React.ReactNode;
+  configureLabel?: string;
+  verticalActions?: boolean;
 };
 
 export function CredentialRow(props: CredentialRowProps) {
@@ -78,7 +80,7 @@ export function CredentialRow(props: CredentialRowProps) {
           </div>
           <div className="text-xs text-gray-9">{props.description}</div>
         </div>
-        <div className="flex shrink-0 items-center gap-2">
+        <div className={`flex shrink-0 ${props.verticalActions ? "flex-col items-stretch sm:items-end gap-1.5" : "items-center gap-2"}`}>
           {props.extra}
           {!editing ? (
             <>
@@ -88,7 +90,7 @@ export function CredentialRow(props: CredentialRowProps) {
                 onClick={() => setEditing(true)}
                 disabled={props.busy}
               >
-                {isSet ? "Update" : "Configure"}
+                {isSet ? "Update" : (props.configureLabel || "Configure")}
               </Button>
               {isSet ? (
                 <Button
@@ -200,6 +202,20 @@ export function OpenrindShellCredentialsPanel(props: OpenrindShellCredentialsPan
         busy={props.actionBusy}
         onSet={(v) => props.onSetCredential("openrindGatewayApiKey", v)}
         onClear={() => props.onClearCredential("openrindGatewayApiKey")}
+        configureLabel="Already have a key"
+        verticalActions={true}
+        extra={
+          props.credentialStatus?.openrindGatewayApiKey === "unset" ? (
+            <Button
+              variant="outline"
+              className="h-7 rounded-full px-3 text-xs border-blue-7/50 bg-blue-3/10 text-blue-12 hover:bg-blue-3/30"
+              onClick={() => window.open("https://app.openrind.com/sign-in?intent=shell", "_blank")}
+              disabled={props.actionBusy}
+            >
+              Sign Up
+            </Button>
+          ) : null
+        }
       />
       <CredentialRow
         label="ELEVENLABS_API_KEY"

@@ -1,0 +1,13 @@
+{
+  "authorizedRoots": [],
+  "blueprint": null,
+  "reload": null,
+  "version": 1,
+  "workspace": {
+    "configDir": "C:\\Users\\dines\\OneDrive\\Desktop\\work\\openeral\\openrind-desktop\\.openrind-desktop-server-v2-test\\workspaces\\ws_b1b3de2c1f05\\config",
+    "createdAt": 1786442614100,
+    "dataDir": "/tmp/openrind-desktop-phase5-local",
+    "name": "Alpha Local",
+    "preset": "starter"
+  }
+}

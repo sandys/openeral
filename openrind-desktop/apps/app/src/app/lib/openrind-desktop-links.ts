@@ -19,6 +19,13 @@ export type DenAuthDeepLink = {
   denBaseUrl: string;
 };
 
+export type GatewayAuthDeepLink = {
+  apiKey: string;
+  status: string;
+  email?: string;
+  name?: string;
+};
+
 function isSupportedDeepLinkProtocol(protocol: string): boolean {
   const normalized = protocol.toLowerCase();
   return (
@@ -126,6 +133,45 @@ export function stripRemoteConnectQuery(rawUrl: string): string | null {
   return `${url.pathname}${search ? `?${search}` : ""}${url.hash}`;
 }
 
+export function parseGatewayAuthDeepLink(rawUrl: string): GatewayAuthDeepLink | null {
+  let url: URL;
+  try {
+    url = new URL(rawUrl);
+  } catch {
+    return null;
+  }
+
+  const protocol = url.protocol.toLowerCase();
+  // Restrict to secure registered desktop schemes only (prevent http/https browser injection attacks)
+  if (protocol !== "openrind-desktop:" && protocol !== "openrind-desktop-dev:") {
+    return null;
+  }
+
+  const routeHost = url.hostname.toLowerCase();
+  const routePath = url.pathname.replace(/^\/+/, "").toLowerCase();
+  const routeSegments = routePath.split("/").filter(Boolean);
+  const routeTail = routeSegments[routeSegments.length - 1] ?? "";
+  
+  if (
+    routeHost !== "auth" &&
+    routePath !== "auth" &&
+    routeTail !== "auth"
+  ) {
+    return null;
+  }
+
+  const apiKey = url.searchParams.get("api_key")?.trim() ?? "";
+  const rawStatus = url.searchParams.get("status")?.trim();
+  const status = rawStatus === "paid" ? "paid" : "unpaid"; // Validate exact allowed statuses, default to "unpaid"
+  const email = url.searchParams.get("email")?.trim() ?? "";
+  const name = url.searchParams.get("name")?.trim() ?? "";
+
+  if (!apiKey) {
+    return null;
+  }
+
+  return { apiKey, status, email, name };
+}
 export function parseDenAuthDeepLink(rawUrl: string): DenAuthDeepLink | null {
   let url: URL;
   try {

@@ -31,6 +31,8 @@ import { EnvironmentView } from "../domains/settings/pages/environment-view";
 import { SandboxPanel } from "../domains/session/sidebar/sandbox-panel";
 import { useSandboxRows } from "../domains/session/sidebar/use-sandbox-rows";
 import type { SidebarTab } from "../domains/session/sidebar/sidebar-tabs";
+import { OpenrindShellCredentialsPanel } from "../domains/settings/pages/openrind-shell-credentials-panel";
+import { GatewayBillingPanel } from "../domains/settings/pages/gateway-billing-panel";
 import { ExtensionsView } from "../domains/settings/pages/extensions-view";
 import { McpView } from "../domains/settings/pages/mcp-view";
 import { RecoveryView } from "../domains/settings/pages/recovery-view";
@@ -256,6 +258,7 @@ function parseSettingsPath(pathname: string): {
     case "sandbox":
     case "updates":
     case "recovery":
+    case "billing":
     case "debug":
       return { tab: head, redirectPath: null };
     case "extensions":
@@ -1372,6 +1375,12 @@ export function SettingsRoute() {
             onSetCredential={(key, value) => openshellState.setCredential(key, value)}
             onClearCredential={(key) => openshellState.clearCredential(key)}
           />
+        );
+      case "billing":
+        return (
+          <div className="space-y-6">
+            <GatewayBillingPanel />
+          </div>
         );
       case "debug":
         return <DebugView {...debugViewProps} />;

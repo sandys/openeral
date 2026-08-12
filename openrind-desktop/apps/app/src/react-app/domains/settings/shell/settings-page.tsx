@@ -5,6 +5,7 @@ import { RefreshCcw } from "lucide-react";
 import { t } from "../../../../i18n";
 import type { SettingsTab } from "../../../../app/types";
 import { Button } from "../../../design-system/button";
+import { isDesktopRuntime } from "../../../../app/utils";
 
 const settingsRailClass = "rounded-[24px] border border-dls-border bg-dls-sidebar p-3";
 const settingsPanelClass = "rounded-[28px] border border-dls-border bg-dls-surface p-5 md:p-6";
@@ -29,6 +30,8 @@ export function getSettingsTabLabel(tab: SettingsTab) {
       return t("settings.tab_updates");
     case "recovery":
       return t("settings.tab_recovery");
+    case "billing":
+      return t("settings.tab_billing");
     case "debug":
       return t("settings.tab_debug");
     default:
@@ -56,6 +59,8 @@ export function getSettingsTabDescription(tab: SettingsTab) {
       return t("settings.tab_description_updates");
     case "recovery":
       return t("settings.tab_description_recovery");
+    case "billing":
+      return t("settings.tab_description_billing");
     case "debug":
       return t("settings.tab_description_debug");
     default:
@@ -76,6 +81,11 @@ export function getGlobalSettingsTabs(developerMode: boolean): SettingsTab[] {
     "updates",
     "recovery",
   ];
+  
+  if (isDesktopRuntime()) {
+    tabs.unshift("billing");
+  }
+
   if (developerMode) tabs.push("debug");
   return tabs;
 }
