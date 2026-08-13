@@ -59,12 +59,6 @@ network_policies:
         tls: terminate
         enforcement: enforce
         access: full
-      - host: openrouter.ai
-        port: 443
-        protocol: rest
-        tls: terminate
-        enforcement: enforce
-        access: full
       - { host: statsig.anthropic.com, port: 443 }
       - { host: sentry.io, port: 443 }
       - { host: raw.githubusercontent.com, port: 443 }
@@ -89,12 +83,6 @@ network_policies:
     name: openclaw-anthropic
     endpoints:
       - host: api.anthropic.com
-        port: 443
-        protocol: rest
-        tls: terminate
-        enforcement: enforce
-        access: full
-      - host: openrouter.ai
         port: 443
         protocol: rest
         tls: terminate

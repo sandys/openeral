@@ -796,17 +796,8 @@ export function listSessions() {
     openedAt: s.openedAt,
     pid: s.pty.pid ?? null,
     paused: s.paused,
-    exited: !!s.exitInfo,
   }));
 }
-
-// NOTE: there is deliberately no BEL (\x07) → "needs attention" detection here.
-// It was tried and removed: Claude Code rings the bell during a perfectly
-// healthy startup, so every new session immediately claimed it was waiting for
-// the user. BEL is not a reliable "needs input" signal across these agents, and
-// a warning that fires on success is worse than no warning at all. If this is
-// revisited, it needs a per-agent signal that actually means "blocked", not a
-// bell count.
 
 /**
  * Replace data/exit handlers for a live session. Used when the renderer

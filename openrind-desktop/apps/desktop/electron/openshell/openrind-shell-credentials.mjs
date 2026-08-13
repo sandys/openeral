@@ -45,12 +45,6 @@ const CREDENTIAL_KEYS = /** @type {const} */ ([
   "elevenLabsApiKey",
 ]);
 
-function maskValue(value) {
-  if (!value) return "";
-  if (value.length <= 6) return "••••••";
-  return `${value.slice(0, 2)}••••${value.slice(-2)}`;
-}
-
 function isKnownKey(key) {
   return CREDENTIAL_KEYS.includes(key);
 }
@@ -112,10 +106,6 @@ export async function setCredential(key, value) {
   const encrypted = safeStorage.encryptString(plaintext);
   const blob = await loadBlob();
   blob[key] = encrypted.toString("base64");
-  if (!blob.updatedAt || typeof blob.updatedAt !== "object" || Array.isArray(blob.updatedAt)) {
-    blob.updatedAt = {};
-  }
-  blob.updatedAt[key] = Date.now();
   await saveBlob(blob);
 }
 
@@ -136,9 +126,6 @@ export async function clearCredential(key) {
   const blob = await loadBlob();
   if (key in blob) {
     delete blob[key];
-    if (blob.updatedAt && typeof blob.updatedAt === "object" && !Array.isArray(blob.updatedAt) && key in blob.updatedAt) {
-      delete blob.updatedAt[key];
-    }
     await saveBlob(blob);
   }
 }
@@ -184,13 +171,8 @@ export async function getCredentialStatus() {
   if (testDir) {
     for (const key of CREDENTIAL_KEYS) {
       try {
-        const filePath = path.join(testDir, key);
-        const val = await readFile(filePath, "utf8");
+        await readFile(path.join(testDir, key), "utf8");
         status[key] = "set";
-        status[`${key}_masked`] = maskValue(val);
-        const { stat } = await import("node:fs/promises");
-        const s = await stat(filePath).catch(() => null);
-        status[`${key}_updatedAt`] = s ? s.mtimeMs : Date.now();
       } catch {
         status[key] = "unset";
       }
@@ -199,20 +181,8 @@ export async function getCredentialStatus() {
     return status;
   }
   const blob = await loadBlob();
-  const { stat } = await import("node:fs/promises");
-  const fileStat = await stat(credentialsFile()).catch(() => null);
-  const fileMtime = fileStat ? fileStat.mtimeMs : Date.now();
-
   for (const key of CREDENTIAL_KEYS) {
-    const isSet = !!blob[key];
-    status[key] = isSet ? "set" : "unset";
-    if (isSet) {
-      const plaintext = await getCredential(key);
-      if (plaintext) {
-        status[`${key}_masked`] = maskValue(plaintext);
-      }
-      status[`${key}_updatedAt`] = (blob.updatedAt && blob.updatedAt[key]) || fileMtime;
-    }
+    status[key] = blob[key] ? "set" : "unset";
   }
   try {
     const safeStorage = await getSafeStorage();

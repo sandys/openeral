@@ -17,6 +17,7 @@ import { useDesktopFontZoomBehavior } from "./font-zoom";
 import { LoadingOverlay } from "./loading-overlay";
 import { DevProfiler, DevProfilerOverlay } from "./dev-profiler";
 import { ReactRenderWatchdogOverlay } from "./react-render-watchdog-overlay";
+import { SandboxesRoute } from "./sandboxes-route";
 import { SessionRoute } from "./session-route";
 import { SettingsRoute } from "./settings-route";
 import { WelcomeRoute } from "./welcome-route";
@@ -113,10 +114,7 @@ function useNativeMenuActions() {
           navigate("/settings");
           break;
         case "open-sandboxes":
-          // The /sandboxes route was removed in favor of a modal, but this action
-          // is fired by the native menu. It used to navigate to /sandboxes.
-          // By passing openCreateSandboxModal, the session route will open the manager.
-          navigate("/session", { state: { openCreateSandboxModal: true } });
+          navigate("/sandboxes");
           break;
         case "about":
           navigate("/settings/updates");
@@ -166,6 +164,14 @@ export function AppRoot() {
               element={
                 <DevProfiler id="SessionRoute">
                   <SessionRoute />
+                </DevProfiler>
+              }
+            />
+            <Route
+              path="/sandboxes"
+              element={
+                <DevProfiler id="SandboxesRoute">
+                  <SandboxesRoute />
                 </DevProfiler>
               }
             />

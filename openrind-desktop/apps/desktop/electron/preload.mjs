@@ -101,7 +101,6 @@ contextBridge.exposeInMainWorld("__OPENRIND_DESKTOP_ELECTRON__", {
         ipcRenderer.removeListener("openrind-shell:pty-exit", handler);
       };
     },
-
   },
   meta: {
     initialDeepLinks: [],

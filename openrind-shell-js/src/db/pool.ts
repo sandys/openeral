@@ -32,10 +32,7 @@ export function createPool(connectionString: string): DbPool {
   const poolConfig: pg.PoolConfig = {
     connectionString,
     max: 16,
-    // Increased from 15s to 60s because Supabase/Supavisor poolers can take a
-    // long time to wake up a paused compute instance, and 15s was timing out
-    // with `{:error, :timeout} code=08006` before the instance could resume.
-    connectionTimeoutMillis: 60000,
+    connectionTimeoutMillis: 15000,
   };
 
   if (useTunnel) {

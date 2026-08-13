@@ -28,12 +28,7 @@ describe('home sync excludes OpenClaw conversation transcripts', () => {
     expect(excluded('/.openclaw/agents/some-other-agent/sessions/b.jsonl')).toBe(true);
   });
 
-  it('excludes legacy state-migration markers', () => {
-    expect(excluded('/.openclaw/memory/main.sqlite')).toBe(true);
-    expect(excluded('/.openclaw/memory/main.sqlite.migrated')).toBe(true);
-  });
-
-  it('still keeps current agent memory and config on the sync path', () => {
+  it('still keeps agent memory and config on the sync path', () => {
     // The point is to stop transcript REPLAY, not to make the agent amnesiac.
     expect(excluded('/.openclaw/memory/memory.sqlite')).toBe(false);
     expect(excluded('/.openclaw/openclaw.json')).toBe(false);

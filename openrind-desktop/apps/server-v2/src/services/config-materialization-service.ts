@@ -155,14 +155,7 @@ function mergeObjects(base: JsonObject, patch: JsonObject): JsonObject {
 
 function writeJsonFile(filePath: string, value: unknown) {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
-  const finalContent = `${JSON.stringify(value, null, 2)}\n`;
-  if (fs.existsSync(filePath)) {
-    const existingContent = fs.readFileSync(filePath, "utf8");
-    if (existingContent === finalContent) {
-      return;
-    }
-  }
-  fs.writeFileSync(filePath, finalContent, "utf8");
+  fs.writeFileSync(filePath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
 }
 
 function readJsonFile(filePath: string) {
@@ -613,17 +606,24 @@ export function createConfigMaterializationService(input: {
   function materializeSkills(workspace: WorkspaceRecord) {
     const skills = listAssignedSkills(workspace.id);
     const roots = workspaceSkillRoots(workspace);
-
-    const managedSkills = new Map<string, string>();
-    const compatSkills = new Map<string, string>();
-
+    if (roots.managedConfig) {
+      fs.rmSync(roots.managedConfig, { force: true, recursive: true });
+      fs.mkdirSync(roots.managedConfig, { recursive: true });
+    }
+    if (roots.compatibility) {
+      fs.rmSync(roots.compatibility, { force: true, recursive: true });
+      fs.mkdirSync(roots.compatibility, { recursive: true });
+    }
     for (const skill of skills) {
       const content = typeof asObject(skill.config).content === "string" ? String(asObject(skill.config).content) : "";
-      if (!content) continue;
+      if (!content) {
+        continue;
+      }
       const skillKey = skill.key?.trim() || skill.id;
-      
       if (roots.managedConfig) {
-        managedSkills.set(skillKey, content);
+        const destination = path.join(roots.managedConfig, skillKey, "SKILL.md");
+        fs.mkdirSync(path.dirname(destination), { recursive: true });
+        fs.writeFileSync(destination, content.endsWith("\n") ? content : `${content}\n`, "utf8");
       }
       if (roots.compatibility) {
         const meta = asObject(skill.metadata);
@@ -631,63 +631,10 @@ export function createConfigMaterializationService(input: {
         if (originPath && workspace.dataDir && originPath.startsWith(workspace.dataDir)) {
           continue;
         }
-        compatSkills.set(skillKey, content);
+        const destination = path.join(roots.compatibility, skillKey, "SKILL.md");
+        fs.mkdirSync(path.dirname(destination), { recursive: true });
+        fs.writeFileSync(destination, content.endsWith("\n") ? content : `${content}\n`, "utf8");
       }
-    }
-
-    const syncSkillsToDir = (rootDir: string | null, skillsToMaterialize: Map<string, string>) => {
-      if (!rootDir) return;
-      
-      let rootStats;
-      try {
-        rootStats = fs.lstatSync(rootDir);
-      } catch (e) {
-        rootStats = null;
-      }
-      
-      if (rootStats && !rootStats.isDirectory()) {
-        fs.rmSync(rootDir, { force: true, recursive: true });
-        rootStats = null;
-      }
-      
-      if (!rootStats) {
-        if (skillsToMaterialize.size > 0) {
-          fs.mkdirSync(rootDir, { recursive: true });
-        } else {
-          return;
-        }
-      }
-
-      const existing = fs.readdirSync(rootDir, { withFileTypes: true });
-      for (const entry of existing) {
-        if (!skillsToMaterialize.has(entry.name) || !entry.isDirectory()) {
-          fs.rmSync(path.join(rootDir, entry.name), { force: true, recursive: true });
-        }
-      }
-      
-      for (const [skillKey, content] of skillsToMaterialize.entries()) {
-        const destination = path.join(rootDir, skillKey, "SKILL.md");
-        const targetDir = path.dirname(destination);
-        if (!fs.existsSync(targetDir)) {
-          fs.mkdirSync(targetDir, { recursive: true });
-        }
-        const finalContent = content.endsWith("\n") ? content : `${content}\n`;
-        let needsWrite = true;
-        if (fs.existsSync(destination)) {
-          const existingContent = fs.readFileSync(destination, "utf8");
-          if (existingContent === finalContent) {
-            needsWrite = false;
-          }
-        }
-        if (needsWrite) {
-          fs.writeFileSync(destination, finalContent, "utf8");
-        }
-      }
-    };
-
-    syncSkillsToDir(roots.managedConfig, managedSkills);
-    if (roots.compatibility && roots.compatibility !== roots.managedConfig) {
-      syncSkillsToDir(roots.compatibility, compatSkills);
     }
   }
 

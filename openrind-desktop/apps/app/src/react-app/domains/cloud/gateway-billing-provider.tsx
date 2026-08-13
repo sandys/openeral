@@ -234,7 +234,7 @@ export function GatewayBillingProvider({ children }: GatewayBillingProviderProps
             localStorage.setItem("openrind_gateway_billing_status", effectiveStatus);
             if (parsed.email) localStorage.setItem("openrind_gateway_email", parsed.email);
             if (parsed.name) localStorage.setItem("openrind_gateway_name", parsed.name);
-            setBillingStatus(effectiveStatus as BillingStatus);
+            setBillingStatus(effectiveStatus as MockBillingStatus);
             setApiKeySet(true);
             await refreshStatus();
             await refreshStats();

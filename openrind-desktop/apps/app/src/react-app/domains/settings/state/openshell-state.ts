@@ -58,14 +58,6 @@ export type OpenrindShellCredentialStatus = {
   openrindGatewayApiKey: "set" | "unset";
   elevenLabsApiKey: "set" | "unset";
   encryptionAvailable: boolean;
-  databaseUrl_masked?: string;
-  databaseUrl_updatedAt?: number;
-  anthropicApiKey_masked?: string;
-  anthropicApiKey_updatedAt?: number;
-  openrindGatewayApiKey_masked?: string;
-  openrindGatewayApiKey_updatedAt?: number;
-  elevenLabsApiKey_masked?: string;
-  elevenLabsApiKey_updatedAt?: number;
 };
 
 export type OpenrindShellSessionProgress = {
@@ -312,7 +304,6 @@ export function useOpenShellState(options: { active: boolean } = { active: false
         if (isMountedRef.current) setCredentialStatus(status);
       } catch (err) {
         setActionError(err instanceof Error ? err.message : String(err));
-        throw err;
       } finally {
         setActionBusy(false);
       }

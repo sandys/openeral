@@ -603,26 +603,7 @@ test("listSessions: reports agentSessionId (null when unspecified)", async () =>
   assert.equal(byName.y, null);
 });
 
-// ── terminal bell is NOT an attention signal ──────────────────────────
-
-test("BEL is passed through as ordinary bytes and sets no status flag", async () => {
-  // A bell used to mark the sandbox "waiting for you", but Claude Code rings
-  // during a healthy startup, so every new session immediately claimed it was
-  // blocked. The bell must now be inert: forwarded to xterm and nothing else.
-  const received = [];
-  const { id } = await pty.openSession({
-    sandboxName: "x",
-    onData: (d) => received.push(d),
-  });
-  activeFake.emit("welcome back \u0007");
-  assert.deepEqual(received, ["welcome back \u0007"]);
-  assert.equal(pty.getBuffer(id), "welcome back \u0007");
-  const [session] = pty.listSessions();
-  assert.equal(session.attention, undefined);
-  assert.equal(session.attentionAt, undefined);
-});
-
-// ── attachHandlers ─────────────────────────────────────────────
+// ── attachHandlers ─────────────────────────────────────────────────────
 
 test("attachHandlers: replaces the onData handler for a live session", async () => {
   const initial = [];

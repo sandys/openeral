@@ -71,15 +71,10 @@ import {
 import { CreateWorkspaceModal } from "../domains/workspace/create-workspace-modal";
 import { useRemoteAccessRestart } from "../domains/workspace/remote-access-restart";
 import { RenameWorkspaceModal } from "../domains/workspace/rename-workspace-modal";
-import { CreateSandboxModal } from "../domains/session/modals/create-sandbox-modal";
 import { useShareWorkspaceState } from "../domains/workspace/share-workspace-state";
 import { ModelPickerModal } from "../domains/session/modals/model-picker-modal";
 import { ConfirmModal } from "../design-system/modals/confirm-modal";
-import {
-  CommandPalette,
-  type SandboxOption as PaletteSandboxOption,
-  type SessionOption as PaletteSessionOption,
-} from "./command-palette";
+import { CommandPalette, type SessionOption as PaletteSessionOption } from "./command-palette";
 import { getDisplaySessionTitle } from "../../app/lib/session-title";
 import { useBootState } from "./boot-state";
 import {
@@ -102,11 +97,7 @@ import { useReloadCoordinator } from "./reload-coordinator";
 import { getReactQueryClient } from "../infra/query-client";
 import { useStatusToasts } from "../domains/shell-feedback/status-toasts";
 import { OpenrindShellTerminal } from "../domains/session/surface/openrind-shell-terminal";
-import { SandboxPanel } from "../domains/session/sidebar/sandbox-panel";
-import { useSandboxRows } from "../domains/session/sidebar/use-sandbox-rows";
-import { needsUserAttention } from "../domains/session/sidebar/sandbox-status";
-import { sandboxStatusLabel } from "../domains/session/sidebar/sandbox-status-labels";
-import type { SidebarTab } from "../domains/session/sidebar/sidebar-tabs";
+import { SandboxSessionList } from "../domains/session/sidebar/sandbox-session-list";
 
 type RouteWorkspace = OpenrindDesktopWorkspaceInfo & {
   displayNameResolved: string;
@@ -388,7 +379,6 @@ export function SessionRoute() {
   const startupRetryTimerRef = useRef<number | null>(null);
   const [retryingWorkspaceIds, setRetryingWorkspaceIds] = useState<string[]>([]);
   const [createWorkspaceOpen, setCreateWorkspaceOpen] = useState(false);
-  const [createSandboxOpen, setCreateSandboxOpen] = useState(false);
   const [createWorkspaceBusy, setCreateWorkspaceBusy] = useState(false);
   const [createWorkspaceError, setCreateWorkspaceError] = useState<string | null>(null);
   const [createWorkspaceRemoteBusy, setCreateWorkspaceRemoteBusy] = useState(false);
@@ -905,54 +895,10 @@ export function SessionRoute() {
   // The /sandboxes manager hands off a freshly created/opened sandbox via
   // location.state so it lands here already selected. Selection is NOT
   // persisted: opening the app always starts on the chat interface.
-  // Which object type the sidebar is showing. Owned here rather than in the
-  // page so a deep link, the palette, and the sandbox handoff below can all
-  // reveal the sandbox they just selected.
-  const [sidebarTab, setSidebarTab] = React.useState<SidebarTab>(() => {
-    try {
-      const saved = localStorage.getItem("openrind-shell-sidebar-tab");
-      if (saved === "sessions" || saved === "sandboxes") return saved;
-    } catch {}
-    return "sessions";
-  });
-
-  const handleSetSidebarTab = React.useCallback((tab: SidebarTab) => {
-    setSidebarTab(tab);
-    try {
-      localStorage.setItem("openrind-shell-sidebar-tab", tab);
-    } catch {}
-  }, []);
-
-  // Openrind Shell sandbox sessions are first-class sidebar entries, fully
-  // decoupled from workspaces (workspaces are always the regular chat UI).
-  // Selecting one swaps the session surface for that sandbox's terminal.
-  // The /sandboxes manager hands off a freshly created/opened sandbox via
-  // location.state so it lands here already selected.
   const [selectedSandbox, setSelectedSandbox] = React.useState<{
     name: string;
     profile: SandboxProfile;
   } | null>(null);
-
-  const handleSetSelectedSandbox = React.useCallback((
-    sandbox: { name: string; profile: SandboxProfile } | null | ((current: { name: string; profile: SandboxProfile } | null) => { name: string; profile: SandboxProfile } | null)
-  ) => {
-    setSelectedSandbox(sandbox);
-  }, []);
-
-  // One poller shared by the sidebar panel, the command palette and the
-  // attention shortcut.
-  const sandboxRows = useSandboxRows({
-    onDeleted: (name) =>
-      handleSetSelectedSandbox((current) => (current?.name === name ? null : current)),
-  });
-
-  // Selecting a sandbox anywhere reveals it in the sidebar. Without this the
-  // terminal would open while the sidebar still showed the session list, so
-  // there was no visible indication of WHICH sandbox was attached.
-  useEffect(() => {
-    if (selectedSandbox) handleSetSidebarTab("sandboxes");
-  }, [selectedSandbox, handleSetSidebarTab]);
-
   const location = useLocation();
   useEffect(() => {
     const handoff = (
@@ -960,15 +906,8 @@ export function SessionRoute() {
         openrindSandbox?: { name?: string; profile?: string };
       } | null
     )?.openrindSandbox;
-    const openModal = (location.state as any)?.openCreateSandboxModal;
-    if (openModal) {
-      setCreateSandboxOpen(true);
-      navigate(location.pathname, { replace: true, state: null });
-      return;
-    }
-
     if (!handoff?.name) return;
-    handleSetSelectedSandbox({
+    setSelectedSandbox({
       name: handoff.name,
       profile:
         handoff.profile === "openrind-shell-openclaw"
@@ -977,7 +916,7 @@ export function SessionRoute() {
     });
     // Consume the handoff so refresh / back never re-selects the sandbox.
     navigate(location.pathname, { replace: true, state: null });
-  }, [location.pathname, location.state, navigate, handleSetSelectedSandbox]);
+  }, [location.pathname, location.state, navigate]);
 
   // Once workspaces + sessions are loaded and the URL has no sessionId, try to
   // restore the last session the user opened in the active workspace.
@@ -1690,63 +1629,6 @@ export function SessionRoute() {
     return () => window.removeEventListener("keydown", handler);
   }, [canCreateTask, handleCreateTaskInWorkspace, selectedWorkspaceId]);
 
-  // Alt+Down / Alt+Up -> jump to the next/previous sandbox that wants a human.
-  //
-  // Once you run more than three or four sandboxes, "which one needs me" is the
-  // only navigation question that matters, and scanning a list for an amber dot
-  // does not scale. Falls back to cycling every sandbox when nothing is blocked,
-  // so the key is never inert. Alt+Arrow is chosen over Conductor's Alt+L/H
-  // because Alt+Left/Right are taken by history navigation, and Up/Down are not.
-  useEffect(() => {
-    const handler = (event: KeyboardEvent) => {
-      if (!event.altKey || event.metaKey || event.ctrlKey || event.shiftKey) return;
-      if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
-      const target = event.target as HTMLElement | null;
-      if (
-        target &&
-        (target.tagName === "INPUT" ||
-          target.tagName === "TEXTAREA" ||
-          target.isContentEditable)
-      ) {
-        return;
-      }
-      const blocked = sandboxRows.rows.filter((row) => needsUserAttention(row.status));
-      const pool = blocked.length > 0 ? blocked : sandboxRows.rows;
-      if (pool.length === 0) return;
-      event.preventDefault();
-      const currentIndex = pool.findIndex((row) => row.name === selectedSandbox?.name);
-      const step = event.key === "ArrowDown" ? 1 : -1;
-      // From "nothing selected", Down lands on the first entry and Up on the last.
-      const nextIndex =
-        currentIndex === -1
-          ? step === 1
-            ? 0
-            : pool.length - 1
-          : (currentIndex + step + pool.length) % pool.length;
-      const next = pool[nextIndex];
-      if (!next) return;
-      handleSetSidebarTab("sandboxes");
-      handleSetSelectedSandbox({ name: next.name, profile: next.profile });
-    };
-    window.addEventListener("keydown", handler);
-    return () => window.removeEventListener("keydown", handler);
-  }, [sandboxRows.rows, selectedSandbox?.name]);
-
-  const paletteSandboxOptions = useMemo<PaletteSandboxOption[]>(
-    () =>
-      sandboxRows.rows.map((row) => ({
-        name: row.name,
-        title: row.displayName,
-        statusLabel: sandboxStatusLabel(row.status),
-        needsAttention: needsUserAttention(row.status),
-        isActive: selectedSandbox?.name === row.name,
-        // Match on both the label the user sees and the real sandbox name, since
-        // renames are cosmetic and people search for either.
-        searchText: `${row.displayName} ${row.name}`.toLowerCase(),
-      })),
-    [sandboxRows.rows, selectedSandbox?.name],
-  );
-
   const paletteSessionOptions = useMemo<PaletteSessionOption[]>(() => {
     const out: PaletteSessionOption[] = [];
     for (const workspace of workspaces) {
@@ -1894,26 +1776,24 @@ export function SessionRoute() {
             workspaceId={selectedSandbox.name.replace(/^openrind-shell-/, "")}
             profile={selectedSandbox.profile}
             onOpenSettings={(target) => navigate(`/settings/${target}`)}
-            onSandboxDeleted={() => handleSetSelectedSandbox(null)}
+            onSandboxDeleted={() => setSelectedSandbox(null)}
           />
         ) : undefined
       }
-      sidebarTab={sidebarTab}
-      onSidebarTabChange={handleSetSidebarTab}
-      sandboxWarningCount={sandboxRows.warningCount}
       sandboxSidebar={
-        typeof window !== "undefined" && Boolean((window as any).__OPENRIND_DESKTOP_ELECTRON__) ? (
-          <SandboxPanel
-            state={sandboxRows}
-            selectedSandboxName={selectedSandbox?.name ?? null}
-            focusedSandboxName={selectedSandbox?.name ?? null}
-            onSelectSandbox={(row) =>
-              handleSetSelectedSandbox({ name: row.name, profile: row.profile })
-            }
-            onOpenManager={() => setCreateSandboxOpen(true)}
-            onOpenSettings={() => navigate("/settings/sandbox")}
-          />
-        ) : undefined
+        <SandboxSessionList
+          selectedSandboxName={selectedSandbox?.name ?? null}
+          onSelectSandbox={(name, profile) =>
+            setSelectedSandbox({ name, profile })
+          }
+          onOpenManager={() => navigate("/sandboxes")}
+          onOpenSettings={() => navigate("/settings/sandbox")}
+          onSandboxDeleted={(name) => {
+            setSelectedSandbox((current) =>
+              current?.name === name ? null : current,
+            );
+          }}
+        />
       }
       selectedWorkspaceDisplay={selectedWorkspace ? {
         id: selectedWorkspace.id,
@@ -1958,7 +1838,7 @@ export function SessionRoute() {
         startupPhase: effectiveLoading ? "nativeInit" : "ready",
         onSelectWorkspace: async (workspaceId) => {
           // Picking a workspace always returns to the chat experience.
-          handleSetSelectedSandbox(null);
+          setSelectedSandbox(null);
           if (workspaceId === selectedWorkspaceId) return true;
           setSelectedWorkspaceId(workspaceId);
           writeActiveWorkspaceId(workspaceId || null);
@@ -1986,7 +1866,7 @@ export function SessionRoute() {
           return true;
         },
         onOpenSession: (workspaceId, sessionId) => {
-          handleSetSelectedSandbox(null);
+          setSelectedSandbox(null);
           setSelectedWorkspaceId(workspaceId);
           writeActiveWorkspaceId(workspaceId || null);
           writeLastSessionFor(workspaceId, sessionId);
@@ -1994,7 +1874,7 @@ export function SessionRoute() {
         },
         onPrefetchSession: () => {},
         onCreateTaskInWorkspace: async (workspaceId) => {
-          handleSetSelectedSandbox(null);
+          setSelectedSandbox(null);
           void handleCreateTaskInWorkspace(workspaceId);
           return;
           const workspace = workspaces.find((item) => item.id === workspaceId)!;
@@ -2163,14 +2043,6 @@ export function SessionRoute() {
       onOpenSession={(_workspaceId, sessionId) => navigate(`/session/${sessionId}`)}
       onOpenSettings={(route) => navigate(route ?? "/settings/general")}
       sessions={paletteSessionOptions}
-      sandboxes={paletteSandboxOptions}
-      onNewSandbox={() => setCreateSandboxOpen(true)}
-      onOpenSandbox={(name) => {
-        const row = sandboxRows.rows.find((item) => item.name === name);
-        if (!row) return;
-        handleSetSidebarTab("sandboxes");
-        handleSetSelectedSandbox({ name: row.name, profile: row.profile });
-      }}
     />
     <ModelPickerModal
       open={modelPickerOpen}
@@ -2199,11 +2071,6 @@ export function SessionRoute() {
       }}
       onClose={() => setModelPickerOpen(false)}
     />
-      <CreateSandboxModal
-        open={createSandboxOpen}
-        onClose={() => setCreateSandboxOpen(false)}
-        existingNames={sandboxRows.rows.map((r) => r.name)}
-      />
     </>
   );
 }

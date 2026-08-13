@@ -424,7 +424,18 @@ test("createOpenrindShellSandbox: throws when DATABASE_URL is unconfigured", asy
   );
 });
 
-
+test("createOpenrindShellSandbox: throws when ANTHROPIC_API_KEY missing (any profile)", async () => {
+  await credentials.setCredential("databaseUrl", "postgresql://test/db");
+  await assert.rejects(
+    () =>
+      openrindShell.createOpenrindShellSandbox({
+        name: "openrind-shell-test",
+        profile: "openrind-shell-claude",
+        skipImagePull: true,
+      }),
+    /ANTHROPIC_API_KEY is not configured/,
+  );
+});
 
 test("createOpenrindShellSandbox: short-circuits when sandbox already exists", async () => {
   // listSandboxes returns our target name → existed=true, no create call.

@@ -5,6 +5,7 @@
 
 import { Loader2, Mic, Square } from "lucide-react";
 import { useVoiceInput } from "./use-voice-input";
+import { VoiceEngineMenu } from "./voice-engine-menu";
 
 type MicButtonProps = {
   onTranscript: (text: string) => void;
@@ -74,6 +75,7 @@ export function MicButton(props: MicButtonProps) {
           <Mic size={16} />
         )}
       </button>
+      <VoiceEngineMenu direction="up" align="left" />
     </div>
   );
 }

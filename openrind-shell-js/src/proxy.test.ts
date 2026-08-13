@@ -186,7 +186,7 @@ describe('sandbox workspace persistence wiring', () => {
     expect(bashBridge).toContain("import('/opt/openrind-shell/dist/sync.js')");
     expect(bashBridge).toContain('syncFromFs(pool, workspaceId, HOME_DIR, createHomeSyncOptions({ prune: true }))');
     expect(bashBridge).toContain('syncToFs(pool, workspaceId');
-    expect(bashBridge).toContain('watchAndSync(pool, workspaceId, HOME_DIR');
+    expect(bashBridge).toContain('watchAndSync(pool, workspaceId, HOME_DIR, createHomeSyncOptions({ prune: true }))');
     expect(bashBridge).toContain('createHomeSyncOptions({ prune: true })');
     expect(bashBridge).toContain('syncWatch.isDirty()');
     expect(bashBridge).toContain('syncWatch.suspend');

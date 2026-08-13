@@ -550,8 +550,6 @@ function emitOpenrindShellPtyExit(sessionId, exitCode, signal) {
   }
 }
 
-
-
 /**
  * Dump a PTY session's retained scrollback to disk as BOTH a byte-exact `.raw`
  * file and a replayable asciinema-v2 `.cast`.
@@ -2616,75 +2614,6 @@ async function handleDesktopInvoke(event, command, ...args) {
       if (!id) throw new Error("sessionId is required");
       return openrindPty.detachSession(id);
     }
-    case "openrindShellUpload": {
-      const sandboxName = String(args[0] ?? "").trim();
-      const base64Data = String(args[1] ?? "");
-      const filename = String(args[2] ?? "").trim();
-      if (!sandboxName || typeof base64Data !== "string" || !filename) {
-        throw new Error("sandboxName, base64Data, and filename are required");
-      }
-      if (/[/\\]/.test(filename) || filename.includes("..")) {
-        throw new Error("Invalid filename");
-      }
-
-      // We upload to /home/agent/inbox so that the sync daemon picks it up and
-      // it persists in the workspace.
-      const destDir = `/home/agent/inbox`;
-      const destPath = `${destDir}/${filename}`;
-
-      // We use a multi-step bash command to safely construct the file.
-      // 1. Write the raw base64 data to a text file using `cat`
-      // 2. Decode the text file into the binary file
-      // 3. Ensure destination dir exists in the sandbox
-      // 4. Run openshell sandbox upload
-      // 5. Cleanup
-      const tmpTxt = `/tmp/openrind_upload_${Date.now()}_tmp.txt`;
-      const tmpBin = `/tmp/openrind_upload_${Date.now()}_${filename.replace(/[^a-zA-Z0-9.-]/g, "_")}`;
-
-      const bashCmd = [
-        `trap 'rm -f ${openrindShell.shellQuote(tmpTxt)} ${openrindShell.shellQuote(tmpBin)}' EXIT`,
-        "mkdir -p /tmp",
-        `cat > ${openrindShell.shellQuote(tmpTxt)}`,
-        `base64 -d < ${openrindShell.shellQuote(tmpTxt)} > ${openrindShell.shellQuote(tmpBin)}`,
-        `openshell sandbox exec --name ${openrindShell.shellQuote(sandboxName)} -- bash -c "mkdir -p ${openrindShell.shellQuote(destDir)}"`,
-        `openshell sandbox upload ${openrindShell.shellQuote(sandboxName)} ${openrindShell.shellQuote(tmpBin)} ${openrindShell.shellQuote(destPath)}`
-      ].join(" && ");
-
-      const result = await wslRun([
-        "-d", OPENSHELL_DISTRO_NAME,
-        "--",
-        "bash", "-c", bashCmd
-      ], {
-        stdin: base64Data
-      });
-      if (result.exitCode !== 0) {
-        throw new Error(`openshell sandbox upload failed with exit code ${result.exitCode}: ${result.stderr || result.stdout}`);
-      }
-      return true;
-    }
-    case "openrindShellDeleteFile": {
-      const sandboxName = String(args[0] ?? "").trim();
-      const filename = String(args[1] ?? "").trim();
-      if (!sandboxName || !filename) {
-        throw new Error("sandboxName and filename are required");
-      }
-      if (/[/\\]/.test(filename) || filename.includes("..")) {
-        throw new Error("Invalid filename");
-      }
-      const destPath = `/home/agent/inbox/${filename}`;
-      const bashCmd = `rm -f ${openrindShell.shellQuote(destPath)}`;
-
-      const result = await wslRun([
-        "-d", OPENSHELL_DISTRO_NAME,
-        "--",
-        "openshell", "sandbox", "exec", "--name", sandboxName,
-        "--", "bash", "-c", bashCmd
-      ]);
-      if (result.exitCode !== 0) {
-        throw new Error(`openshell exec failed with exit code ${result.exitCode}`);
-      }
-      return true;
-    }
     case "openrindPtyWrite": {
       const input = args[0] ?? {};
       const id = String(input.sessionId ?? "").trim();
@@ -2737,7 +2666,6 @@ async function handleDesktopInvoke(event, command, ...args) {
     }
     case "openrindPtyList":
       return openrindPty.listSessions();
-
     case "openrindEnsureSandbox": {
       // Same as openrindStartSession but WITHOUT launching an external
       // terminal — the renderer's xterm.js component connects via the
