@@ -19,8 +19,10 @@ export type DenAuthDeepLink = {
   denBaseUrl: string;
 };
 
+// SECURITY FIX: Updated to use secure token exchange instead of plaintext API keys
 export type GatewayAuthDeepLink = {
-  apiKey: string;
+  token: string;        // Secure one-time exchange token (NEW)
+  apiKey?: string;      // Legacy field for backward compatibility (deprecated)
   status: string;
   email?: string;
   name?: string;
@@ -133,6 +135,19 @@ export function stripRemoteConnectQuery(rawUrl: string): string | null {
   return `${url.pathname}${search ? `?${search}` : ""}${url.hash}`;
 }
 
+/**
+ * SECURITY FIX: Parse gateway auth deep link with secure token exchange
+ * 
+ * Now accepts EITHER:
+ * - token (NEW, secure): one-time exchange token that must be exchanged via API
+ * - api_key (DEPRECATED): plaintext API key for backward compatibility
+ * 
+ * The token flow is preferred and secure:
+ * 1. Web generates random token and encrypts API key
+ * 2. Desktop receives token (not the key)
+ * 3. Desktop exchanges token for actual key via HTTPS POST
+ * 4. Token auto-expires and is deleted after use
+ */
 export function parseGatewayAuthDeepLink(rawUrl: string): GatewayAuthDeepLink | null {
   let url: URL;
   try {
@@ -151,7 +166,7 @@ export function parseGatewayAuthDeepLink(rawUrl: string): GatewayAuthDeepLink | 
   const routePath = url.pathname.replace(/^\/+/, "").toLowerCase();
   const routeSegments = routePath.split("/").filter(Boolean);
   const routeTail = routeSegments[routeSegments.length - 1] ?? "";
-  
+
   if (
     routeHost !== "auth" &&
     routePath !== "auth" &&
@@ -160,18 +175,29 @@ export function parseGatewayAuthDeepLink(rawUrl: string): GatewayAuthDeepLink | 
     return null;
   }
 
-  const apiKey = url.searchParams.get("api_key")?.trim() ?? "";
+  // SECURITY: Prefer token (secure) over api_key (legacy, insecure)
+  const token = url.searchParams.get("token")?.trim() ?? "";
+  const apiKey = url.searchParams.get("api_key")?.trim() ?? ""; // Legacy support
+  
   const rawStatus = url.searchParams.get("status")?.trim();
   const status = rawStatus === "paid" ? "paid" : "unpaid"; // Validate exact allowed statuses, default to "unpaid"
   const email = url.searchParams.get("email")?.trim() ?? "";
   const name = url.searchParams.get("name")?.trim() ?? "";
 
-  if (!apiKey) {
+  // Require EITHER token OR api_key (prefer token)
+  if (!token && !apiKey) {
     return null;
   }
 
-  return { apiKey, status, email, name };
+  // Return token if present (secure flow), otherwise api_key (legacy flow)
+  if (token) {
+    return { token, status, email, name };
+  } else {
+    // Legacy: api_key in URL (DEPRECATED but supported for backward compatibility)
+    return { token: "", apiKey, status, email, name };
+  }
 }
+
 export function parseDenAuthDeepLink(rawUrl: string): DenAuthDeepLink | null {
   let url: URL;
   try {

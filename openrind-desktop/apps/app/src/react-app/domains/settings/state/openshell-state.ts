@@ -170,6 +170,15 @@ export function useOpenShellState(options: { active: boolean } = { active: false
     }
   }, []);
 
+  // Listen for external credential changes (e.g., from gateway billing deep link)
+  useEffect(() => {
+    const handler = () => {
+      void refreshCredentialStatus();
+    };
+    window.addEventListener("openrind-shell-credentials-changed", handler);
+    return () => window.removeEventListener("openrind-shell-credentials-changed", handler);
+  }, [refreshCredentialStatus]);
+
   // Subscribe to streaming install progress whenever the bridge exposes
   // the openshell namespace (post-Phase-5 builds). One subscription per
   // mount; unsubscribe on unmount.

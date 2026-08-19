@@ -1,4 +1,5 @@
-import { test, expect } from 'vitest';
+import test from 'node:test';
+import assert from 'node:assert';
 
 function generateMassiveWorkspaceFixture() {
   const files = [];
@@ -19,20 +20,20 @@ export const massiveWorkspaceFixture = generateMassiveWorkspaceFixture();
 
 test('Sync daemon can handle heavy workspace state', async () => {
   const expectedFileCount = massiveWorkspaceFixture.files.length;
-  expect(expectedFileCount).toBe(400);
+  assert.strictEqual(expectedFileCount, 400);
 
   // Asserting properties of the first and last generated item to ensure generation works
   const firstFile = massiveWorkspaceFixture.files[0];
   const lastFile = massiveWorkspaceFixture.files[399];
 
-  expect(firstFile.path).toBe('/home/agent/workspace/nested/dir/level0/file0.txt');
-  expect(firstFile.size).toBe(firstFile.content.length);
+  assert.strictEqual(firstFile.path, '/home/agent/workspace/nested/dir/level0/file0.txt');
+  assert.strictEqual(firstFile.size, firstFile.content.length);
 
-  expect(lastFile.path).toBe('/home/agent/workspace/nested/dir/level9/file399.txt');
-  expect(lastFile.size).toBe(lastFile.content.length);
+  assert.strictEqual(lastFile.path, '/home/agent/workspace/nested/dir/level9/file399.txt');
+  assert.strictEqual(lastFile.size, lastFile.content.length);
 
   // We ensure the payload size is computed properly (content matches size property)
   for (const file of massiveWorkspaceFixture.files) {
-    expect(file.size).toBe(Buffer.byteLength(file.content, 'utf8'));
+    assert.strictEqual(file.size, Buffer.byteLength(file.content, 'utf8'));
   }
 });

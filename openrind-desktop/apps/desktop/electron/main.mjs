@@ -2296,9 +2296,48 @@ async function handleDesktopInvoke(event, command, ...args) {
       if (!response.ok) {
         const errBody = await response.json().catch(() => ({}));
         const errorMessage = errBody?.error || errBody?.message || `Failed to fetch stats: ${response.status} ${response.statusText}`;
-        throw new Error(errorMessage);
+        throw new Error(`[HTTP ${response.status}] ${errorMessage}`);
       }
       return await response.json();
+    }
+    case "openrindGatewayExchangeToken": {
+      const { token } = args[0] ?? {};
+      if (!token) throw new Error("Token is required.");
+
+      const gatewayUrl = process.env.OPENRIND_GATEWAY_URL || "https://app.openrind.com";
+      const response = await fetch(`${gatewayUrl}/api/auth/key-exchange`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ token }),
+      });
+
+      if (!response.ok) {
+        const errBody = await response.json().catch(() => ({}));
+        const errorMessage = errBody?.error || `HTTP ${response.status}: ${response.statusText}`;
+        throw new Error(`[HTTP ${response.status}] ${errorMessage}`);
+      }
+
+      const data = await response.json();
+      
+      // Compare with the currently set API key to see if we should overwrite/replace it
+      const currentKey = await openrindCredentials.getCredential("openrindGatewayApiKey");
+      
+      const isNewAccount = !currentKey || (data.apiKey && data.apiKey !== currentKey);
+      
+      if (isNewAccount && data.apiKey) {
+        // Save the new API key to the keystore
+        await openrindCredentials.setCredential("openrindGatewayApiKey", data.apiKey);
+      }
+
+      return {
+        success: true,
+        apiKey: data.apiKey,
+        organizationId: data.organizationId,
+        status: data.status,
+        isNewAccount,
+      };
     }
     case "openrindCredentialStatus":
       return openrindCredentials.getCredentialStatus();
