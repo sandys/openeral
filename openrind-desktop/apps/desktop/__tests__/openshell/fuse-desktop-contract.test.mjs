@@ -67,3 +67,16 @@ test("Claude launch uses the marker, Linux PTY bridge, and native provider binar
   assert.match(setup, /\/usr\/local\/bin\/claude/);
   assert.match(provider, /\/usr\/local\/bin\/claude-real/);
 });
+
+test("framed PTY output unconditionally filters scrollback erasure", async () => {
+  const bridge = await source("sandboxes/openeral/openrind-pty-bridge.py");
+  assert.match(bridge, /self\.enabled and window\.startswith\(CLEAR_AND_HOME\)/);
+  assert.match(bridge, /if ERASE_SCROLLBACK\.startswith\(self\._held\):\s+return b""/);
+  assert.match(
+    bridge,
+    /write_all\(1, _keeper\.feed\(TERMINAL_RESET\) \+ _keeper\.flush\(\)\)/,
+  );
+  assert.doesNotMatch(bridge, /if not self\.enabled:\s+return chunk/);
+  assert.doesNotMatch(bridge, /write_all\(1, TERMINAL_RESET\)/);
+  assert.doesNotMatch(bridge, /write_all\(1, TERMINAL_RESTORE\)/);
+});

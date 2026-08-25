@@ -162,7 +162,8 @@ _REWRITE_WINDOW = max(len(CLEAR_AND_HOME), len(ERASE_SCROLLBACK))
 # (it may still become ESC[2J ESC[H), so this is also the worst-case latency of
 # a bare screen clear that ends a write — keep it well under a frame.
 HOLDBACK_FLUSH_S = 0.01
-# Env kill switch: set to 0 to stream the agent's bytes through verbatim.
+# Env kill switch for clear rewriting. ESC[3J removal is a non-optional safety
+# invariant and remains active even when rewriting is disabled.
 KEEP_SCROLLBACK_ENV = "OPENRIND_SHELL_PTY_KEEP_SCROLLBACK"
 
 # How many clears are rewritten before the pair is left alone.
@@ -261,8 +262,6 @@ class ScrollbackKeeper:
     def feed(self, chunk):
         """Return the bytes to forward for this read. May buffer a partial
         sequence; see expired() / flush()."""
-        if not self.enabled:
-            return chunk
         data = self._held + chunk if self._held else chunk
         self._held = b""
         out = bytearray()
@@ -280,7 +279,7 @@ class ScrollbackKeeper:
             self._note_output(data, index, esc)
             out += data[index:esc]
             window = data[esc : esc + _REWRITE_WINDOW]
-            if window.startswith(CLEAR_AND_HOME):
+            if self.enabled and window.startswith(CLEAR_AND_HOME):
                 index = esc + len(CLEAR_AND_HOME)
                 if self.scrolls < self._max_rewrites:
                     used = self._used_rows
@@ -317,7 +316,8 @@ class ScrollbackKeeper:
                 index = esc + len(ERASE_SCROLLBACK)
                 continue
             if len(window) < _REWRITE_WINDOW and (
-                CLEAR_AND_HOME.startswith(window) or ERASE_SCROLLBACK.startswith(window)
+                ERASE_SCROLLBACK.startswith(window)
+                or (self.enabled and CLEAR_AND_HOME.startswith(window))
             ):
                 # Truncated at the read boundary and still a possible match.
                 self._held = bytes(window)
@@ -331,11 +331,25 @@ class ScrollbackKeeper:
     def holding(self):
         """True while a partial sequence is buffered (the select() loop polls
         faster so the holdback is never user-visible)."""
-        return bool(self._held)
+        if not self._held:
+            return False
+        if (
+            ERASE_SCROLLBACK.startswith(self._held)
+            and time.monotonic() - self._held_at >= HOLDBACK_FLUSH_S
+        ):
+            # Keep the dangerous prefix buffered, but return to the normal poll
+            # interval after the latency window instead of spinning forever.
+            return False
+        return True
 
     def expired(self):
         """Held-back bytes once they have waited longer than HOLDBACK_FLUSH_S."""
         if not self._held or time.monotonic() - self._held_at < HOLDBACK_FLUSH_S:
+            return b""
+        # Never release a prefix that could become ESC[3J when a later read
+        # arrives. Terminal parsers retain incomplete CSI sequences across idle
+        # periods, so timing out this prefix would bypass the safety filter.
+        if ERASE_SCROLLBACK.startswith(self._held):
             return b""
         return self.flush()
 
@@ -698,7 +712,10 @@ def main():
     # external terminal is the user's to manage). Written straight to stdout so
     # it reaches xterm BEFORE the agent's first byte of output.
     if _mode == "framed":
-        write_all(1, TERMINAL_RESET)
+        # Startup bytes use the same final output filter as child PTY bytes.
+        # Flush the trailing complete ESC[2J immediately; feed() has already
+        # removed the earlier ESC[3J from TERMINAL_RESET.
+        write_all(1, _keeper.feed(TERMINAL_RESET) + _keeper.flush())
 
     pid = spawn_child(master_fd, slave_fd, argv)
     os.close(slave_fd)
@@ -850,11 +867,11 @@ def main():
 
     # Restore the desktop terminal so a crashed or abruptly-exited TUI never
     # leaves xterm stuck in alt-screen, mouse-reporting, hidden-cursor, or a
-    # non-default color state. Release any partial sequence the keeper is still
-    # holding first, so the agent's very last bytes are not swallowed.
+    # non-default color state. Feed the restore bytes through the same final
+    # filter; this also resolves any partial agent sequence without allowing a
+    # client-bound path around the unconditional ESC[3J removal.
     if _mode == "framed":
-        write_all(1, _keeper.flush())
-        write_all(1, TERMINAL_RESTORE)
+        write_all(1, _keeper.feed(TERMINAL_RESTORE) + _keeper.flush())
 
     restore_termios(0, original_termios)
     try:
