@@ -21,7 +21,7 @@ pub enum Error {
     #[error("operation is not supported")]
     Unsupported,
     #[error("database error: {0}")]
-    Database(#[from] tokio_postgres::Error),
+    Database(String),
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
     #[error("JSON error: {0}")]
@@ -31,6 +31,33 @@ pub enum Error {
 }
 
 impl Error {
+    #[must_use]
+    pub fn database(operation: &str, error: tokio_postgres::Error) -> Self {
+        let detail = if let Some(server) = error.as_db_error() {
+            let mut parts = vec![format!(
+                "{} [SQLSTATE {}]",
+                server.message(),
+                server.code().code()
+            )];
+            if let Some(value) = server.detail() {
+                parts.push(format!("detail: {value}"));
+            }
+            if let Some(value) = server.hint() {
+                parts.push(format!("hint: {value}"));
+            }
+            if let Some(value) = server.table() {
+                parts.push(format!("table: {value}"));
+            }
+            if let Some(value) = server.constraint() {
+                parts.push(format!("constraint: {value}"));
+            }
+            parts.join("; ")
+        } else {
+            error.to_string()
+        };
+        Self::Database(format!("{operation}: {detail}"))
+    }
+
     #[must_use]
     pub fn errno(&self) -> Errno {
         match self {
@@ -48,6 +75,12 @@ impl Error {
             | Self::Json(_)
             | Self::Internal(_) => Errno::EIO,
         }
+    }
+}
+
+impl From<tokio_postgres::Error> for Error {
+    fn from(error: tokio_postgres::Error) -> Self {
+        Self::database("PostgreSQL operation", error)
     }
 }
 

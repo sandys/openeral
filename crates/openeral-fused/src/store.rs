@@ -54,7 +54,8 @@ impl PgStore {
                 "SELECT pg_try_advisory_lock(hashtextextended($1, 0))",
                 &[&volume_id],
             )
-            .await?
+            .await
+            .map_err(|error| Error::database("acquiring the filesystem advisory lock", error))?
             .get(0);
         if !acquired {
             return Err(Error::Fenced);
@@ -73,7 +74,8 @@ impl PgStore {
                  RETURNING epoch",
                 &[&volume_id, &owner_id, &LEASE_SECONDS],
             )
-            .await?
+            .await
+            .map_err(|error| Error::database("creating the filesystem writer lease", error))?
             .get(0);
         let (terminal_fence, _) = tokio::sync::watch::channel(None);
 
@@ -212,7 +214,9 @@ impl PgStore {
     ) -> Result<()> {
         match tx.commit().await {
             Ok(()) => Ok(()),
-            Err(error) if error.code().is_some() => Err(Error::Database(error)),
+            Err(error) if error.code().is_some() => {
+                Err(Error::database("committing a filesystem operation", error))
+            }
             Err(commit_error) => {
                 let reason = format!(
                     "database commit response was lost for operation {}: {commit_error}",
@@ -272,24 +276,6 @@ impl PgStore {
                    FROM _openeral.fs_nodes
                   WHERE volume_id = $1 AND node_id = $2",
                 &[&self.volume_id, &node_id],
-            )
-            .await?
-            .ok_or(Error::NotFound)?;
-        node_from_row(&row)
-    }
-
-    pub async fn lookup(&self, parent_node_id: i64, name: &[u8]) -> Result<Node> {
-        let client = self.client.lock().await;
-        let row = client
-            .query_opt(
-                "SELECT n.node_id, n.kind, n.mode, n.uid, n.gid, n.size, n.nlink,
-                        n.atime_ns, n.mtime_ns, n.ctime_ns,
-                        n.symlink_target, n.deleted
-                   FROM _openeral.fs_dirents d
-                   JOIN _openeral.fs_nodes n
-                     ON n.volume_id = d.volume_id AND n.node_id = d.child_node_id
-                  WHERE d.volume_id = $1 AND d.parent_node_id = $2 AND d.name = $3",
-                &[&self.volume_id, &parent_node_id, &name],
             )
             .await?
             .ok_or(Error::NotFound)?;
@@ -529,15 +515,25 @@ impl PgStore {
         let operation = PendingOperation::new(&[b"flush", &node_bytes, &sequence_bytes]);
         let mut client = self.client.lock().await;
         let tx = serializable(&mut client).await?;
-        verify_lease(&tx, self).await?;
-        persist_snapshot(&tx, self, snapshot).await?;
-        record_operation(
-            &tx,
-            self,
-            &operation,
-            json!({ "sequence": snapshot.through_sequence }),
-        )
-        .await?;
+        // These requests are independent inside the same transaction. Polling
+        // them together lets tokio-postgres pipeline them across a high-latency
+        // connection; PostgreSQL still executes them in request order. If the
+        // lease is stale or any mutation fails, the uncommitted transaction is
+        // dropped and every pipelined change is rolled back.
+        let (lease, persisted, recorded) = tokio::join!(
+            biased;
+            verify_lease(&tx, self),
+            persist_snapshot(&tx, self, snapshot),
+            record_operation(
+                &tx,
+                self,
+                &operation,
+                json!({ "sequence": snapshot.through_sequence }),
+            ),
+        );
+        lease?;
+        persisted?;
+        recorded?;
         self.commit_operation(tx, &operation).await?;
         Ok(())
     }
@@ -570,33 +566,53 @@ impl PgStore {
         ]);
         let mut client = self.client.lock().await;
         let tx = serializable(&mut client).await?;
-        verify_lease(&tx, self).await?;
-        let source = tx
-            .query_opt(
-                "SELECT n.node_id, n.kind
-                   FROM _openeral.fs_dirents d
-                   JOIN _openeral.fs_nodes n
-                     ON n.volume_id = d.volume_id AND n.node_id = d.child_node_id
-                  WHERE d.volume_id = $1 AND d.parent_node_id = $2 AND d.name = $3
-                  FOR UPDATE OF d, n",
-                &[&self.volume_id, &parent_node_id, &name],
-            )
-            .await?
-            .ok_or(Error::NotFound)?;
+        // Lease, source, destination parent, and destination are independent
+        // reads. Pipeline them so an atomic save pays one database network wait
+        // instead of four while retaining the same SERIALIZABLE row locks.
+        let (lease, source, new_parent, destination) = tokio::join!(
+            biased;
+            verify_lease(&tx, self),
+            async {
+                tx.query_opt(
+                    "SELECT n.node_id, n.kind
+                       FROM _openeral.fs_dirents d
+                       JOIN _openeral.fs_nodes n
+                         ON n.volume_id = d.volume_id AND n.node_id = d.child_node_id
+                      WHERE d.volume_id = $1 AND d.parent_node_id = $2 AND d.name = $3
+                      FOR UPDATE OF d, n",
+                    &[&self.volume_id, &parent_node_id, &name],
+                )
+                .await
+            },
+            async {
+                tx.query_opt(
+                    "SELECT kind FROM _openeral.fs_nodes
+                      WHERE volume_id = $1 AND node_id = $2 AND NOT deleted FOR UPDATE",
+                    &[&self.volume_id, &new_parent_node_id],
+                )
+                .await
+            },
+            async {
+                tx.query_opt(
+                    "SELECT n.node_id, n.kind
+                       FROM _openeral.fs_dirents d
+                       JOIN _openeral.fs_nodes n
+                         ON n.volume_id = d.volume_id AND n.node_id = d.child_node_id
+                      WHERE d.volume_id = $1 AND d.parent_node_id = $2 AND d.name = $3
+                      FOR UPDATE OF d, n",
+                    &[&self.volume_id, &new_parent_node_id, &new_name],
+                )
+                .await
+            },
+        );
+        lease?;
+        let source = source?.ok_or(Error::NotFound)?;
         let source_id: i64 = source.get(0);
         let source_kind = NodeKind::try_from(source.get::<_, i16>(1)).map_err(Error::Internal)?;
         if snapshot.is_some_and(|value| value.node_id != source_id) {
             return Err(Error::Internal("rename snapshot inode mismatch".into()));
         }
-        let new_parent_kind: i16 = tx
-            .query_opt(
-                "SELECT kind FROM _openeral.fs_nodes
-                  WHERE volume_id = $1 AND node_id = $2 AND NOT deleted FOR UPDATE",
-                &[&self.volume_id, &new_parent_node_id],
-            )
-            .await?
-            .ok_or(Error::NotFound)?
-            .get(0);
+        let new_parent_kind: i16 = new_parent?.ok_or(Error::NotFound)?.get(0);
         if NodeKind::try_from(new_parent_kind).map_err(Error::Internal)? != NodeKind::Directory {
             return Err(Error::NotDirectory);
         }
@@ -621,23 +637,14 @@ impl PgStore {
                 ));
             }
         }
-        let destination = tx
-            .query_opt(
-                "SELECT n.node_id, n.kind
-                   FROM _openeral.fs_dirents d
-                   JOIN _openeral.fs_nodes n
-                     ON n.volume_id = d.volume_id AND n.node_id = d.child_node_id
-                  WHERE d.volume_id = $1 AND d.parent_node_id = $2 AND d.name = $3
-                  FOR UPDATE OF d, n",
-                &[&self.volume_id, &new_parent_node_id, &new_name],
-            )
-            .await?;
+        let destination = destination?;
         let mut destination_was_directory = false;
+        let mut destination_id = None;
         if no_replace && destination.is_some() {
             return Err(Error::Exists);
         }
         if let Some(destination) = destination {
-            let destination_id: i64 = destination.get(0);
+            let replaced_id: i64 = destination.get(0);
             let destination_kind =
                 NodeKind::try_from(destination.get::<_, i16>(1)).map_err(Error::Internal)?;
             if source_kind == NodeKind::Directory && destination_kind != NodeKind::Directory {
@@ -652,7 +659,7 @@ impl PgStore {
                     .query_one(
                         "SELECT EXISTS(SELECT 1 FROM _openeral.fs_dirents
                           WHERE volume_id = $1 AND parent_node_id = $2)",
-                        &[&self.volume_id, &destination_id],
+                        &[&self.volume_id, &replaced_id],
                     )
                     .await?
                     .get(0);
@@ -660,77 +667,123 @@ impl PgStore {
                     return Err(Error::NotEmpty);
                 }
             }
-            tx.execute(
-                "DELETE FROM _openeral.fs_dirents
-                  WHERE volume_id = $1 AND parent_node_id = $2 AND name = $3",
-                &[&self.volume_id, &new_parent_node_id, &new_name],
-            )
-            .await?;
-            tx.execute(
-                "UPDATE _openeral.fs_nodes SET deleted = TRUE, nlink = 0, ctime_ns = $3
-                  WHERE volume_id = $1 AND node_id = $2",
-                &[&self.volume_id, &destination_id, &now_ns()],
-            )
-            .await?;
+            destination_id = Some(replaced_id);
         }
-        if let Some(snapshot) = snapshot {
-            persist_snapshot(&tx, self, snapshot).await?;
-        }
-        tx.execute(
-            "DELETE FROM _openeral.fs_dirents
-              WHERE volume_id = $1 AND parent_node_id = $2 AND name = $3",
-            &[&self.volume_id, &parent_node_id, &name],
-        )
-        .await?;
-        tx.execute(
-            "INSERT INTO _openeral.fs_dirents
-               (volume_id, parent_node_id, name, child_node_id)
-             VALUES ($1, $2, $3, $4)",
-            &[&self.volume_id, &new_parent_node_id, &new_name, &source_id],
-        )
-        .await?;
         let timestamp = now_ns();
         let source_moves_directory =
             source_kind == NodeKind::Directory && parent_node_id != new_parent_node_id;
-        if parent_node_id == new_parent_node_id {
-            let delta = -i32::from(destination_was_directory);
-            tx.execute(
-                "UPDATE _openeral.fs_nodes
-                    SET nlink = nlink + $3, mtime_ns = $4, ctime_ns = $4,
-                        generation = generation + 1
-                  WHERE volume_id = $1 AND node_id = $2",
-                &[&self.volume_id, &parent_node_id, &delta, &timestamp],
-            )
-            .await?;
-        } else {
-            let old_delta = -i32::from(source_moves_directory);
-            let new_delta =
-                i32::from(source_moves_directory) - i32::from(destination_was_directory);
-            tx.execute(
-                "UPDATE _openeral.fs_nodes
-                    SET nlink = nlink + $3, mtime_ns = $4, ctime_ns = $4,
-                        generation = generation + 1
-                  WHERE volume_id = $1 AND node_id = $2",
-                &[&self.volume_id, &parent_node_id, &old_delta, &timestamp],
-            )
-            .await?;
-            tx.execute(
-                "UPDATE _openeral.fs_nodes
-                    SET nlink = nlink + $3, mtime_ns = $4, ctime_ns = $4,
-                        generation = generation + 1
-                  WHERE volume_id = $1 AND node_id = $2",
-                &[&self.volume_id, &new_parent_node_id, &new_delta, &timestamp],
-            )
-            .await?;
+
+        // Poll the mutation requests in dependency order so tokio-postgres can
+        // send them as one pipeline. PostgreSQL executes them sequentially in
+        // that order and the transaction is committed only after every result
+        // has been checked.
+        let (replaced, persisted, moved, parents_updated, source_updated, recorded) = tokio::join!(
+            biased;
+            async {
+                if let Some(destination_id) = destination_id {
+                    tx.execute(
+                        "WITH removed AS (
+                           DELETE FROM _openeral.fs_dirents
+                            WHERE volume_id = $1 AND parent_node_id = $2 AND name = $3
+                            RETURNING 1
+                         )
+                         UPDATE _openeral.fs_nodes
+                            SET deleted = TRUE, nlink = 0, ctime_ns = $5
+                          WHERE volume_id = $1 AND node_id = $4
+                            AND EXISTS (SELECT 1 FROM removed)",
+                        &[
+                            &self.volume_id,
+                            &new_parent_node_id,
+                            &new_name,
+                            &destination_id,
+                            &timestamp,
+                        ],
+                    )
+                    .await?;
+                }
+                Ok::<(), tokio_postgres::Error>(())
+            },
+            async {
+                if let Some(snapshot) = snapshot {
+                    persist_snapshot(&tx, self, snapshot).await?;
+                }
+                Ok::<(), Error>(())
+            },
+            async {
+                tx.execute(
+                    "WITH removed AS (
+                       DELETE FROM _openeral.fs_dirents
+                        WHERE volume_id = $1 AND parent_node_id = $2 AND name = $3
+                        RETURNING child_node_id
+                     )
+                     INSERT INTO _openeral.fs_dirents
+                        (volume_id, parent_node_id, name, child_node_id)
+                     SELECT $1, $4, $5, child_node_id FROM removed",
+                    &[
+                        &self.volume_id,
+                        &parent_node_id,
+                        &name,
+                        &new_parent_node_id,
+                        &new_name,
+                    ],
+                )
+                .await
+            },
+            async {
+                if parent_node_id == new_parent_node_id {
+                    let delta = -i32::from(destination_was_directory);
+                    tx.execute(
+                        "UPDATE _openeral.fs_nodes
+                            SET nlink = nlink + $3, mtime_ns = $4, ctime_ns = $4,
+                                generation = generation + 1
+                          WHERE volume_id = $1 AND node_id = $2",
+                        &[&self.volume_id, &parent_node_id, &delta, &timestamp],
+                    )
+                    .await?;
+                } else {
+                    let old_delta = -i32::from(source_moves_directory);
+                    let new_delta = i32::from(source_moves_directory)
+                        - i32::from(destination_was_directory);
+                    tx.execute(
+                        "UPDATE _openeral.fs_nodes
+                            SET nlink = nlink + $3, mtime_ns = $4, ctime_ns = $4,
+                                generation = generation + 1
+                          WHERE volume_id = $1 AND node_id = $2",
+                        &[&self.volume_id, &parent_node_id, &old_delta, &timestamp],
+                    )
+                    .await?;
+                    tx.execute(
+                        "UPDATE _openeral.fs_nodes
+                            SET nlink = nlink + $3, mtime_ns = $4, ctime_ns = $4,
+                                generation = generation + 1
+                          WHERE volume_id = $1 AND node_id = $2",
+                        &[&self.volume_id, &new_parent_node_id, &new_delta, &timestamp],
+                    )
+                    .await?;
+                }
+                Ok::<(), tokio_postgres::Error>(())
+            },
+            async {
+                tx.execute(
+                    "UPDATE _openeral.fs_nodes
+                        SET ctime_ns = $3, generation = generation + 1
+                      WHERE volume_id = $1 AND node_id = $2",
+                    &[&self.volume_id, &source_id, &timestamp],
+                )
+                .await
+            },
+            record_operation(&tx, self, &operation, json!({ "nodeId": source_id })),
+        );
+        replaced?;
+        persisted?;
+        if moved? != 1 {
+            return Err(Error::NotFound);
         }
-        tx.execute(
-            "UPDATE _openeral.fs_nodes
-                SET ctime_ns = $3, generation = generation + 1
-              WHERE volume_id = $1 AND node_id = $2",
-            &[&self.volume_id, &source_id, &timestamp],
-        )
-        .await?;
-        record_operation(&tx, self, &operation, json!({ "nodeId": source_id })).await?;
+        parents_updated?;
+        if source_updated? != 1 {
+            return Err(Error::NotFound);
+        }
+        recorded?;
         self.commit_operation(tx, &operation).await?;
         Ok(())
     }
@@ -877,7 +930,8 @@ async fn ensure_volume(
               WHERE workspace_id = $1",
             &[&workspace_id],
         )
-        .await?
+        .await
+        .map_err(|error| Error::database("reading the prepared filesystem volume", error))?
     {
         let schema: i32 = row.get(1);
         if schema != SCHEMA_VERSION {
@@ -952,24 +1006,35 @@ async fn persist_snapshot(
     store: &PgStore,
     snapshot: &DataSnapshot,
 ) -> Result<()> {
-    for ChunkWrite { index, data } in &snapshot.chunks {
-        tx.execute(
-            "INSERT INTO _openeral.fs_chunks (volume_id, node_id, chunk_index, data)
-             VALUES ($1, $2, $3, $4)
-             ON CONFLICT (volume_id, node_id, chunk_index)
-             DO UPDATE SET data = EXCLUDED.data",
-            &[&store.volume_id, &snapshot.node_id, index, data],
-        )
-        .await?;
-    }
+    let indices = snapshot
+        .chunks
+        .iter()
+        .map(|ChunkWrite { index, .. }| *index)
+        .collect::<Vec<_>>();
+    let data = snapshot
+        .chunks
+        .iter()
+        .map(|ChunkWrite { data, .. }| data.clone())
+        .collect::<Vec<_>>();
     let updated = tx
         .execute(
-            "UPDATE _openeral.fs_nodes
-                SET size = $3, mtime_ns = $4, ctime_ns = $4, generation = generation + 1
+            "WITH persisted_chunks AS (
+               INSERT INTO _openeral.fs_chunks (volume_id, node_id, chunk_index, data)
+               SELECT $1, $2, chunks.chunk_index, chunks.data
+                 FROM UNNEST($3::bigint[], $4::bytea[])
+                        AS chunks(chunk_index, data)
+               ON CONFLICT (volume_id, node_id, chunk_index)
+               DO UPDATE SET data = EXCLUDED.data
+               RETURNING 1
+             )
+             UPDATE _openeral.fs_nodes
+                SET size = $5, mtime_ns = $6, ctime_ns = $6, generation = generation + 1
               WHERE volume_id = $1 AND node_id = $2 AND kind = 1",
             &[
                 &store.volume_id,
                 &snapshot.node_id,
+                &indices,
+                &data,
                 &snapshot.size,
                 &snapshot.mtime_ns,
             ],
@@ -1037,7 +1102,7 @@ fn map_constraint_error(error: tokio_postgres::Error) -> Error {
     match error.code().map(tokio_postgres::error::SqlState::code) {
         Some("23505") => Error::Exists,
         Some("23503") => Error::NotFound,
-        _ => Error::Database(error),
+        _ => Error::database("applying a filesystem constraint", error),
     }
 }
 

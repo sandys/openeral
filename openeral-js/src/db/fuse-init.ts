@@ -28,6 +28,14 @@ export interface PreparedFuseVolume {
   volumeId: string;
   rootNodeId: number;
   importedItems: number;
+  seededItems: number;
+}
+
+export interface FuseSeedEntry {
+  path: string;
+  kind: 'directory' | 'file';
+  mode: number;
+  content?: Buffer;
 }
 
 interface LegacyRow {
@@ -105,11 +113,13 @@ export async function prepareFuseVolume(
   workspaceId: string,
   uid = 1000,
   gid = 1000,
+  seedEntries: FuseSeedEntry[] = [],
 ): Promise<PreparedFuseVolume> {
   const client = await pool.connect();
   const volumeId = `workspace:${workspaceId}`;
   let rootNodeId = 0;
   let importedItems = 0;
+  let seededItems = 0;
 
   const lock = await client.query<{ acquired: boolean }>(
     'SELECT pg_try_advisory_lock(hashtextextended($1, 0)) AS acquired',
@@ -209,6 +219,14 @@ export async function prepareFuseVolume(
         renamedWorkspace.rows.length > 0,
       );
     }
+    seededItems = await seedMissingWorkspaceEntries(
+      client,
+      volumeId,
+      rootNodeId,
+      uid,
+      gid,
+      seedEntries,
+    );
   } finally {
     try {
       await client.query('SELECT pg_advisory_unlock(hashtextextended($1, 0))', [volumeId]);
@@ -217,7 +235,101 @@ export async function prepareFuseVolume(
     }
   }
 
-  return { volumeId, rootNodeId, importedItems };
+  return { volumeId, rootNodeId, importedItems, seededItems };
+}
+
+async function seedMissingWorkspaceEntries(
+  client: pg.PoolClient,
+  volumeId: string,
+  rootNodeId: number,
+  uid: number,
+  gid: number,
+  entries: FuseSeedEntry[],
+): Promise<number> {
+  if (entries.length === 0) return 0;
+
+  const ordered = [...entries].sort((left, right) => {
+    const leftDepth = left.path.split('/').length;
+    const rightDepth = right.path.split('/').length;
+    return leftDepth - rightDepth || left.path.localeCompare(right.path);
+  });
+  const unique = new Set<string>();
+  for (const entry of ordered) {
+    validateLegacyPath(entry.path, true);
+    if (unique.has(entry.path)) throw new Error(`duplicate FUSE seed path: ${entry.path}`);
+    unique.add(entry.path);
+  }
+
+  await client.query('BEGIN ISOLATION LEVEL SERIALIZABLE');
+  try {
+    const existing = await client.query<{
+      parent_node_id: string | number;
+      name: Buffer;
+      child_node_id: string | number;
+      kind: number;
+    }>(
+      `SELECT d.parent_node_id, d.name, d.child_node_id, n.kind
+         FROM _openeral.fs_dirents d
+         JOIN _openeral.fs_nodes n
+           ON n.volume_id = d.volume_id AND n.node_id = d.child_node_id
+        WHERE d.volume_id = $1 AND NOT n.deleted`,
+      [volumeId],
+    );
+    const children = new Map<string, { nodeId: number; kind: number }>();
+    for (const row of existing.rows) {
+      children.set(
+        `${Number(row.parent_node_id)}\0${Buffer.from(row.name).toString('hex')}`,
+        { nodeId: Number(row.child_node_id), kind: Number(row.kind) },
+      );
+    }
+
+    const paths = new Map<string, number>([['/', rootNodeId]]);
+    let seeded = 0;
+    for (const entry of ordered) {
+      const parentPath = dirnamePath(entry.path);
+      const parentNodeId = paths.get(parentPath);
+      if (parentNodeId === undefined) {
+        throw new Error(`FUSE seed parent is missing: ${parentPath}`);
+      }
+      const name = basenamePath(entry.path);
+      const key = `${parentNodeId}\0${Buffer.from(name).toString('hex')}`;
+      const prior = children.get(key);
+      const expectedKind = entry.kind === 'directory' ? 2 : 1;
+      if (prior) {
+        if (prior.kind !== expectedKind) {
+          throw new Error(`FUSE seed path has the wrong type: ${entry.path}`);
+        }
+        paths.set(entry.path, prior.nodeId);
+        continue;
+      }
+
+      const content = entry.kind === 'file' ? (entry.content ?? Buffer.alloc(0)) : null;
+      const now = wallClockNs();
+      const nodeId = await insertNode(client, {
+        volumeId,
+        parentNodeId,
+        name,
+        kind: expectedKind,
+        mode: entry.mode & 0o7777,
+        uid,
+        gid,
+        size: content?.length ?? 0,
+        nlink: entry.kind === 'directory' ? 2 : 1,
+        atimeNs: now,
+        mtimeNs: now,
+        ctimeNs: now,
+        content,
+      });
+      children.set(key, { nodeId, kind: expectedKind });
+      paths.set(entry.path, nodeId);
+      seeded += 1;
+    }
+    await client.query('COMMIT');
+    return seeded;
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  }
 }
 
 async function importLegacyWorkspace(

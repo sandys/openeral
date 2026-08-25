@@ -793,9 +793,9 @@ for (const [root, nested] of [
 pass('canonical and nested Dockerfile instructions match');
 
 // ---------------------------------------------------------------------------
-// Lint 36: Gateway metadata and OpenRouter support match the current contract
+// Lint 36: Gateway metadata preserves direct Claude model selection
 // ---------------------------------------------------------------------------
-console.log('\n--- Lint: Openrind Gateway labels and model route are current ---');
+console.log('\n--- Lint: Openrind Gateway labels and Anthropic model routing are current ---');
 
 try {
   const configure = readFileSync('../sandboxes/openeral/configure-stringcost.mjs', 'utf8');
@@ -812,28 +812,20 @@ try {
       fail(file, 'top-level presign tags are ignored; use metadata.labels');
     }
   }
-  for (const name of [
-    'ANTHROPIC_DEFAULT_SONNET_MODEL',
-    'ANTHROPIC_DEFAULT_OPUS_MODEL',
-    'ANTHROPIC_DEFAULT_HAIKU_MODEL',
-    'CLAUDE_CODE_SUBAGENT_MODEL',
-  ]) {
-    for (const [file, content] of [
-      ['sandboxes/openeral/configure-stringcost.mjs', configure],
-      ['sandboxes/openeral/setup.sh', compatibilitySetup],
-    ]) {
-      if (!content.includes(name)) {
-        fail(file, `missing ${name} gateway default`);
-      }
-    }
-  }
   const claudeStart = policy.indexOf('  claude_code:');
   const claudeEnd = policy.indexOf('\n  #', claudeStart + 1);
   const claudeBlock = policy.slice(claudeStart, claudeEnd > 0 ? claudeEnd : undefined);
-  if (!claudeBlock.includes('host: openrouter.ai')) {
-    fail('sandboxes/openeral/policy.yaml', 'Claude policy must allow the OpenRouter model route');
+  const forbiddenRouter = new RegExp(['open', 'router'].join(''), 'i');
+  for (const [file, content] of [
+    ['sandboxes/openeral/configure-stringcost.mjs', configure],
+    ['sandboxes/openeral/setup.sh', compatibilitySetup],
+    ['sandboxes/openeral/policy.yaml', claudeBlock],
+  ]) {
+    if (forbiddenRouter.test(content)) {
+      fail(file, 'product Claude paths must use the configured Anthropic provider directly');
+    }
   }
-  pass('Gateway labels, model defaults, and Claude OpenRouter route are present');
+  pass('Gateway labels are present and Claude keeps native Anthropic model routing');
 } catch {
   fail('sandboxes/openeral/configure-stringcost.mjs', 'gateway runtime files must exist');
 }

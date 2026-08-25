@@ -2,6 +2,7 @@
 
 import { existsSync, readFileSync } from 'node:fs';
 import { getDatabaseConnection } from '../db/embedded.js';
+import type { FuseSeedEntry } from '../db/fuse-init.js';
 import {
   buildFuseRuntimeIdentity,
   fuseRuntimeIdentityMatches,
@@ -23,6 +24,12 @@ const workspaceId = process.env.OPENRIND_SHELL_WORKSPACE_ID
   || process.env.OPENSHELL_SANDBOX_ID
   || 'default';
 const databaseUrl = process.env.DATABASE_URL || '';
+
+function initialWorkspaceEntries(): FuseSeedEntry[] {
+  // Claude owns its settings, onboarding, trust state, and installed skills in
+  // /sandbox/claude-home. Do not seed those choices into the project FUSE tree.
+  return [{ path: '/.openrind-shell', kind: 'directory', mode: 0o700 }];
+}
 
 async function main(): Promise<void> {
   const command = process.argv[2];
@@ -48,6 +55,7 @@ async function main(): Promise<void> {
         workspaceId,
         process.getuid?.() ?? 1000,
         process.getgid?.() ?? 1000,
+        initialWorkspaceEntries(),
       );
       const identity = buildFuseRuntimeIdentity(workspaceId, databaseUrl);
       writeJsonAtomic(readyPath, identity);

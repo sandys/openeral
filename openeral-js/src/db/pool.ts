@@ -1,8 +1,21 @@
 import pg from 'pg';
+import { existsSync, readFileSync } from 'node:fs';
 import { URL } from 'node:url';
 import { createTunneledSocket, isLocalHost, resolveHttpProxy } from './http-connect-socket.js';
 
 export type DbPool = pg.Pool;
+
+// Supabase's pooler chain terminates at its private Root 2021 CA. OpenShell's
+// SSL_CERT_FILE contains the local proxy CA, so the PostgreSQL end-to-end TLS
+// client must explicitly add the Supabase root instead of replacing strict
+// verification with rejectUnauthorized=false.
+const SUPABASE_POOLER_SUFFIX = '.pooler.supabase.com';
+const SUPABASE_ROOT_2021_CA_PATH = '/opt/openrind-shell/certs/supabase-root-2021-ca.pem';
+const CONNECTION_STRING_TLS_OPTIONS = ['sslmode', 'sslcert', 'sslkey', 'sslrootcert'];
+
+function isSupabasePooler(host: string | undefined): host is string {
+  return !!host && host.toLowerCase().endsWith(SUPABASE_POOLER_SUFFIX);
+}
 
 /**
  * Create a pg.Pool that tunnels through the OpenShell HTTP CONNECT proxy
@@ -28,10 +41,11 @@ export function createPool(connectionString: string): DbPool {
   }
 
   const useTunnel = !!proxyUrl && !isLocalHost(targetHost);
+  let poolConnectionString = connectionString;
 
   const poolConfig: pg.PoolConfig = {
-    connectionString,
-    max: 16,
+    connectionString: poolConnectionString,
+    max: 4,
     // Supavisor may need time to wake a paused database before accepting a
     // session. The caller adds bounded retries around transient failures.
     connectionTimeoutMillis: 60000,
@@ -42,16 +56,40 @@ export function createPool(connectionString: string): DbPool {
       || process.env.OPENERAL_REQUIRE_POSTGRES_TLS === '1')
     && !isLocalHost(targetHost)
   ) {
+    let parsedConnectionString: URL | undefined;
     let sslMode = '';
     try {
-      sslMode = new URL(connectionString).searchParams.get('sslmode')?.toLowerCase() ?? '';
+      parsedConnectionString = new URL(connectionString);
+      sslMode = parsedConnectionString.searchParams.get('sslmode')?.toLowerCase() ?? '';
     } catch {
       // pg reports malformed connection strings with its normal diagnostic.
     }
     if (sslMode === 'disable' || sslMode === 'allow') {
       throw new Error('PostgreSQL TLS cannot be disabled in this runtime');
     }
-    poolConfig.ssl = { rejectUnauthorized: true };
+    if (parsedConnectionString) {
+      // node-postgres otherwise lets query-string TLS options overwrite the
+      // strict, pinned policy below.
+      for (const option of CONNECTION_STRING_TLS_OPTIONS) {
+        parsedConnectionString.searchParams.delete(option);
+      }
+      poolConnectionString = parsedConnectionString.toString();
+      poolConfig.connectionString = poolConnectionString;
+    }
+    if (isSupabasePooler(targetHost)) {
+      if (!existsSync(SUPABASE_ROOT_2021_CA_PATH)) {
+        throw new Error(
+          `The FUSE image is missing its pinned Supabase CA at ${SUPABASE_ROOT_2021_CA_PATH}`,
+        );
+      }
+      poolConfig.ssl = {
+        ca: readFileSync(SUPABASE_ROOT_2021_CA_PATH, 'utf8'),
+        rejectUnauthorized: true,
+        servername: targetHost,
+      };
+    } else {
+      poolConfig.ssl = { rejectUnauthorized: true };
+    }
   }
 
   if (useTunnel) {

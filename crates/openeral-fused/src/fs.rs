@@ -1,4 +1,7 @@
-use crate::cache::{DirtyCache, InodeState, MAX_DIRTY_GLOBAL, MAX_DIRTY_PER_INODE};
+use crate::cache::{
+    CachedLookup, DirtyCache, InodeState, MetadataCache, MAX_DIRTY_GLOBAL,
+    MAX_DIRTY_PER_INODE,
+};
 use crate::error::{Error, Result};
 use crate::model::{now_ns, ns_to_system_time, Node, NodeKind, BLOCK_SIZE};
 use crate::runtime::RuntimeState;
@@ -28,7 +31,11 @@ const FUSE_GENERATION: u64 = 0;
 const STATFS_FREE_BLOCKS: u64 = 1 << 30;
 const STATFS_FREE_FILES: u64 = 1 << 30;
 
-const TTL: Duration = Duration::from_secs(1);
+/// The mounted volume has exactly one lease-owning writer, and supported
+/// mutations all pass through this daemon. A longer kernel metadata TTL is
+/// therefore safe while eliminating a PostgreSQL round trip for every repeated
+/// Claude startup lookup. Recreated mounts start with an empty kernel cache.
+const TTL: Duration = Duration::from_secs(300);
 const DATABASE_WAIT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone, Copy)]
@@ -41,6 +48,7 @@ pub struct FilesystemCore {
     runtime_handle: tokio::runtime::Handle,
     runtime: Arc<RuntimeState>,
     cache: DirtyCache,
+    metadata: MetadataCache,
     handles: DashMap<u64, OpenHandle>,
     next_handle: AtomicU64,
 }
@@ -52,6 +60,7 @@ impl FilesystemCore {
             runtime_handle,
             runtime,
             cache: DirtyCache::default(),
+            metadata: MetadataCache::default(),
             handles: DashMap::new(),
             next_handle: AtomicU64::new(1),
         })
@@ -72,12 +81,70 @@ impl FilesystemCore {
 
     fn node_for_inode(&self, store: &PgStore, inode: INodeNo) -> Result<Node> {
         let node_id = store.db_node_id(inode.into())?;
-        self.block(store.get_node(node_id))
+        if let Some(node) = self.metadata.node(node_id) {
+            return Ok(node);
+        }
+        let generation = self.metadata.generation();
+        let node = self.block(store.get_node(node_id))?;
+        self.metadata.remember_node(generation, node.clone());
+        Ok(node)
+    }
+
+    fn lookup_node(&self, store: &PgStore, parent_id: i64, name: &[u8]) -> Result<Node> {
+        if let Some(cached) = self.metadata.lookup(parent_id, name) {
+            return match cached {
+                CachedLookup::Found(node) => Ok(node),
+                CachedLookup::Missing => Err(Error::NotFound),
+            };
+        }
+
+        // Populate the complete directory in one remote query. Claude probes a
+        // set of optional project/config names synchronously; one authoritative
+        // listing makes every subsequent hit *and miss* local instead of paying
+        // a PostgreSQL round trip for each name.
+        let generation = self.metadata.generation();
+        let entries = Arc::new(self.block(store.list_directory(parent_id))?);
+        let found = entries
+            .iter()
+            .find(|entry| entry.name.as_slice() == name)
+            .map(|entry| entry.node.clone());
+        self.metadata
+            .remember_directory(generation, parent_id, Arc::clone(&entries));
+        found.ok_or(Error::NotFound)
+    }
+
+    fn directory_entries(
+        &self,
+        store: &PgStore,
+        node_id: i64,
+    ) -> Result<Arc<Vec<crate::model::DirectoryEntry>>> {
+        if let Some(entries) = self.metadata.directory(node_id) {
+            return Ok(entries);
+        }
+        let generation = self.metadata.generation();
+        let entries = Arc::new(self.block(store.list_directory(node_id))?);
+        self.metadata
+            .remember_directory(generation, node_id, Arc::clone(&entries));
+        Ok(entries)
+    }
+
+    fn parent_id(&self, store: &PgStore, node_id: i64) -> Result<i64> {
+        if let Some(parent_id) = self.metadata.parent(node_id) {
+            return Ok(parent_id);
+        }
+        let generation = self.metadata.generation();
+        let parent_id = self.block(store.parent_of(node_id))?;
+        self.metadata
+            .remember_parent(generation, node_id, parent_id);
+        Ok(parent_id)
     }
 
     fn attr(&self, store: &PgStore, mut node: Node) -> FileAttr {
         if let Some(state) = self.cache.existing(node.node_id) {
             node.size = state.size();
+            if state.has_dirty_data() {
+                node.mtime_ns = state.mtime_ns();
+            }
         }
         let size = node.size.max(0) as u64;
         FileAttr {
@@ -136,6 +203,11 @@ impl FilesystemCore {
         match store.flush_snapshot(&snapshot).await {
             Ok(()) => {
                 state.committed(&snapshot);
+                self.metadata.patch_file_state(
+                    snapshot.node_id,
+                    snapshot.size,
+                    snapshot.mtime_ns,
+                );
                 Ok(())
             }
             Err(error) => {
@@ -256,7 +328,7 @@ impl Filesystem for OpeneralFilesystem {
         let result = (|| {
             let store = self.core.store()?;
             let parent_id = store.db_node_id(parent.into())?;
-            let node = self.core.block(store.lookup(parent_id, name.as_bytes()))?;
+            let node = self.core.lookup_node(&store, parent_id, name.as_bytes())?;
             Ok((store, node))
         })();
         match result {
@@ -301,7 +373,7 @@ impl Filesystem for OpeneralFilesystem {
         let result = (|| {
             let store = self.core.store()?;
             let node_id = store.db_node_id(ino.into())?;
-            let mut node = self.core.block(store.get_node(node_id))?;
+            let mut node = self.core.node_for_inode(&store, ino)?;
             if let Some(new_size) = size {
                 let state = self.core.cache.state_for(&node);
                 node = self.core.block(async {
@@ -326,6 +398,7 @@ impl Filesystem for OpeneralFilesystem {
                     mtime.map(time_or_now_ns),
                 ))?;
             }
+            self.core.metadata.replace_node(node.clone());
             Ok((store, node))
         })();
         match result {
@@ -371,6 +444,8 @@ impl Filesystem for OpeneralFilesystem {
                 request.gid(),
                 None,
             ))?;
+            self.core.metadata.invalidate();
+            self.core.metadata.replace_node(node.clone());
             Ok((store, node))
         })();
         match result {
@@ -392,6 +467,7 @@ impl Filesystem for OpeneralFilesystem {
             if self.core.open_count(node_id) == 0 {
                 self.core.block(store.collect_deleted_node(node_id))?;
             }
+            self.core.metadata.invalidate();
             Ok(())
         })();
         match result {
@@ -408,6 +484,7 @@ impl Filesystem for OpeneralFilesystem {
                 .core
                 .block(store.remove(parent_id, name.as_bytes(), true))?;
             self.core.block(store.collect_deleted_node(node_id))?;
+            self.core.metadata.invalidate();
             Ok(())
         })();
         match result {
@@ -436,6 +513,8 @@ impl Filesystem for OpeneralFilesystem {
                 request.gid(),
                 Some(target.as_os_str().as_bytes()),
             ))?;
+            self.core.metadata.invalidate();
+            self.core.metadata.replace_node(node.clone());
             Ok((store, node))
         })();
         match result {
@@ -464,7 +543,7 @@ impl Filesystem for OpeneralFilesystem {
             let store = self.core.store()?;
             let parent_id = store.db_node_id(parent.into())?;
             let new_parent_id = store.db_node_id(newparent.into())?;
-            let source = self.core.block(store.lookup(parent_id, name.as_bytes()))?;
+            let source = self.core.lookup_node(&store, parent_id, name.as_bytes())?;
             let state = self.core.cache.existing(source.node_id);
             if let Some(state) = state.as_ref() {
                 if let Some(error) = state.writeback_error() {
@@ -502,6 +581,7 @@ impl Filesystem for OpeneralFilesystem {
                 }
                 Ok(())
             })?;
+            self.core.metadata.invalidate();
             Ok(())
         })();
         match result {
@@ -526,7 +606,12 @@ impl Filesystem for OpeneralFilesystem {
                     state.truncate_local(0);
                     Ok(node)
                 })?;
+                self.core.metadata.replace_node(node.clone());
             }
+            // Pin file metadata in the per-mount inode cache for the lifetime
+            // of the open handle. Reads and writes can then avoid a PostgreSQL
+            // metadata lookup on every FUSE request.
+            self.core.cache.state_for(&node);
             Ok(self.core.allocate_handle(node.node_id, truncate))
         })();
         match result {
@@ -549,8 +634,11 @@ impl Filesystem for OpeneralFilesystem {
         let result = (|| {
             let handle = self.core.handle(fh)?;
             let store = self.core.store()?;
-            let node = self.core.block(store.get_node(handle.node_id))?;
-            let state = self.core.cache.state_for(&node);
+            let state = self
+                .core
+                .cache
+                .existing(handle.node_id)
+                .ok_or_else(|| Error::Internal("open file is missing inode state".into()))?;
             self.core.block(state.read(&store, offset, size))
         })();
         match result {
@@ -574,11 +662,11 @@ impl Filesystem for OpeneralFilesystem {
         let result = (|| {
             let handle = self.core.handle(fh)?;
             let store = self.core.store()?;
-            let node = self.core.block(store.get_node(handle.node_id))?;
-            if node.kind != NodeKind::File {
-                return Err(Error::IsDirectory);
-            }
-            let state = self.core.cache.state_for(&node);
+            let state = self
+                .core
+                .cache
+                .existing(handle.node_id)
+                .ok_or_else(|| Error::Internal("open file is missing inode state".into()))?;
             self.core.flush_for_capacity(&state)?;
             // Prepare and copy under the inode writeback lock: a concurrent flush
             // that commits between the two steps drops every chunk at or below the
@@ -720,8 +808,8 @@ impl Filesystem for OpeneralFilesystem {
         let result = (|| {
             let store = self.core.store()?;
             let node_id = store.db_node_id(ino.into())?;
-            let parent = self.core.block(store.parent_of(node_id))?;
-            let entries = self.core.block(store.list_directory(node_id))?;
+            let parent = self.core.parent_id(&store, node_id)?;
+            let entries = self.core.directory_entries(&store, node_id)?;
             Ok((store, parent, entries))
         })();
         let (store, parent, entries) = match result {
@@ -742,11 +830,11 @@ impl Filesystem for OpeneralFilesystem {
             FileType::Directory,
             b"..".to_vec(),
         ));
-        all.extend(entries.into_iter().map(|entry| {
+        all.extend(entries.iter().map(|entry| {
             (
                 INodeNo(store.fuse_inode(entry.node.node_id)),
                 file_type(entry.node.kind),
-                entry.name,
+                entry.name.clone(),
             )
         }));
         for (index, (entry_ino, kind, name)) in all.into_iter().enumerate().skip(offset as usize) {
@@ -842,6 +930,9 @@ impl Filesystem for OpeneralFilesystem {
                 request.gid(),
                 None,
             ))?;
+            self.core.metadata.invalidate();
+            self.core.metadata.replace_node(node.clone());
+            self.core.cache.state_for(&node);
             let handle = self.core.allocate_handle(node.node_id, false);
             Ok((store, node, handle))
         })();

@@ -1,13 +1,152 @@
 use crate::error::{Error, Result};
-use crate::model::{now_ns, ChunkWrite, DataSnapshot, Node, CHUNK_SIZE};
+use crate::model::{now_ns, ChunkWrite, DataSnapshot, DirectoryEntry, Node, CHUNK_SIZE};
 use crate::store::PgStore;
 use dashmap::DashMap;
 use parking_lot::Mutex;
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 pub const MAX_DIRTY_PER_INODE: usize = 16 * 1024 * 1024;
 pub const MAX_DIRTY_GLOBAL: usize = 64 * 1024 * 1024;
+
+/// Result of an authoritative cached directory lookup.
+#[derive(Debug, Clone)]
+pub enum CachedLookup {
+    Found(Node),
+    Missing,
+}
+
+/// Read-mostly metadata cache for the single-writer mounted volume.
+///
+/// Claude Code performs many synchronous `stat`/directory probes while it
+/// paints and updates its prompt. Sending each one to a remote PostgreSQL
+/// session serializes the TUI behind network round trips. The writer lease
+/// guarantees that namespace mutations for this mount pass through this daemon,
+/// so an authoritative per-mount cache is safe as long as every mutation bumps
+/// the generation. Values carry the generation they were loaded under: a slow
+/// query that races an invalidation can still satisfy its in-flight FUSE request,
+/// but it cannot repopulate stale data for later requests.
+#[derive(Default)]
+pub struct MetadataCache {
+    generation: AtomicU64,
+    nodes: DashMap<i64, (u64, Node)>,
+    directories: DashMap<i64, (u64, Arc<Vec<DirectoryEntry>>)>,
+    parents: DashMap<i64, (u64, i64)>,
+    lookups: DashMap<(i64, Vec<u8>), (u64, i64)>,
+}
+
+impl MetadataCache {
+    #[must_use]
+    pub fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Acquire)
+    }
+
+    #[must_use]
+    pub fn node(&self, node_id: i64) -> Option<Node> {
+        let generation = self.generation();
+        self.nodes.get(&node_id).and_then(|entry| {
+            let (cached_generation, node) = entry.value();
+            (*cached_generation == generation).then(|| node.clone())
+        })
+    }
+
+    /// Returns `Some(Missing)` only when the parent directory has been loaded in
+    /// full. That makes negative lookups authoritative without one SQL query per
+    /// absent `.claude`/`.git`/config probe.
+    #[must_use]
+    pub fn lookup(&self, parent_id: i64, name: &[u8]) -> Option<CachedLookup> {
+        let generation = self.generation();
+        if let Some(entry) = self.lookups.get(&(parent_id, name.to_vec())) {
+            let (cached_generation, node_id) = *entry.value();
+            if cached_generation == generation {
+                return self.node(node_id).map(CachedLookup::Found);
+            }
+        }
+        self.directories
+            .get(&parent_id)
+            .filter(|entry| entry.value().0 == generation)
+            .map(|_| CachedLookup::Missing)
+    }
+
+    #[must_use]
+    pub fn directory(&self, node_id: i64) -> Option<Arc<Vec<DirectoryEntry>>> {
+        let generation = self.generation();
+        self.directories.get(&node_id).and_then(|entry| {
+            let (cached_generation, entries) = entry.value();
+            (*cached_generation == generation).then(|| Arc::clone(entries))
+        })
+    }
+
+    #[must_use]
+    pub fn parent(&self, node_id: i64) -> Option<i64> {
+        let generation = self.generation();
+        self.parents.get(&node_id).and_then(|entry| {
+            let (cached_generation, parent_id) = *entry.value();
+            (cached_generation == generation).then_some(parent_id)
+        })
+    }
+
+    pub fn remember_node(&self, generation: u64, node: Node) {
+        if self.generation() == generation {
+            self.nodes.insert(node.node_id, (generation, node));
+        }
+    }
+
+    pub fn remember_parent(&self, generation: u64, node_id: i64, parent_id: i64) {
+        if self.generation() == generation {
+            self.parents.insert(node_id, (generation, parent_id));
+        }
+    }
+
+    pub fn remember_directory(
+        &self,
+        generation: u64,
+        parent_id: i64,
+        entries: Arc<Vec<DirectoryEntry>>,
+    ) {
+        if self.generation() != generation {
+            return;
+        }
+        for entry in entries.iter() {
+            self.nodes
+                .insert(entry.node.node_id, (generation, entry.node.clone()));
+            self.lookups.insert(
+                (parent_id, entry.name.clone()),
+                (generation, entry.node.node_id),
+            );
+        }
+        self.directories
+            .insert(parent_id, (generation, entries));
+    }
+
+    /// Keep cached attributes coherent after an in-place mutation. Namespace
+    /// mutations use `invalidate` instead because they affect multiple lookup
+    /// and directory keys.
+    pub fn replace_node(&self, node: Node) {
+        let generation = self.generation();
+        self.nodes.insert(node.node_id, (generation, node));
+    }
+
+    pub fn patch_file_state(&self, node_id: i64, size: i64, mtime_ns: i64) {
+        let generation = self.generation();
+        if let Some(mut entry) = self.nodes.get_mut(&node_id) {
+            if entry.value().0 == generation {
+                entry.value_mut().1.size = size;
+                entry.value_mut().1.mtime_ns = mtime_ns;
+                entry.value_mut().1.ctime_ns = mtime_ns;
+            }
+        }
+    }
+
+    pub fn invalidate(&self) {
+        self.generation.fetch_add(1, Ordering::AcqRel);
+        self.nodes.clear();
+        self.directories.clear();
+        self.parents.clear();
+        self.lookups.clear();
+    }
+}
 
 #[derive(Clone)]
 struct DirtyChunk {
@@ -54,14 +193,26 @@ impl InodeState {
         }
         let first = (offset as usize / CHUNK_SIZE) as i64;
         let last = ((offset as usize + len - 1) / CHUNK_SIZE) as i64;
-        let missing = {
+        let (missing, file_size) = {
             let inner = self.inner.lock();
-            (first..=last)
-                .filter(|index| !inner.dirty.contains_key(index))
-                .collect::<Vec<_>>()
+            (
+                (first..=last)
+                    .filter(|index| !inner.dirty.contains_key(index))
+                    .collect::<Vec<_>>(),
+                inner.size.max(0),
+            )
         };
         for index in missing {
-            let mut data = store.read_chunk(self.node_id, index).await?;
+            // A chunk wholly beyond the current EOF cannot have persisted data.
+            // Avoiding that guaranteed-empty PostgreSQL read is important for
+            // atomic-save temp files and append-heavy CLI caches on a remote DB.
+            // Partial overwrites of the existing final chunk still read it.
+            let chunk_start = index * CHUNK_SIZE as i64;
+            let mut data = if chunk_start >= file_size {
+                Vec::new()
+            } else {
+                store.read_chunk(self.node_id, index).await?
+            };
             data.resize(CHUNK_SIZE, 0);
             let mut inner = self.inner.lock();
             inner
@@ -208,6 +359,20 @@ impl InodeState {
         self.inner.lock().size
     }
 
+    #[must_use]
+    pub fn mtime_ns(&self) -> i64 {
+        self.inner.lock().mtime_ns
+    }
+
+    #[must_use]
+    pub fn has_dirty_data(&self) -> bool {
+        self.inner
+            .lock()
+            .dirty
+            .values()
+            .any(|chunk| chunk.sequence > 0)
+    }
+
     pub fn record_error(&self, error: impl ToString) {
         let mut inner = self.inner.lock();
         if inner.writeback_error.is_none() {
@@ -278,7 +443,7 @@ impl DirtyCache {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::NodeKind;
+    use crate::model::{DirectoryEntry, NodeKind};
 
     fn node() -> Node {
         Node {
@@ -355,5 +520,39 @@ mod tests {
         let snapshot = state.snapshot().unwrap();
         assert_eq!(snapshot.chunks.len(), 1);
         assert_eq!(snapshot.chunks[0].data, b"small");
+    }
+
+    #[test]
+    fn metadata_directory_snapshot_caches_hits_and_authoritative_misses() {
+        let cache = MetadataCache::default();
+        let generation = cache.generation();
+        cache.remember_directory(
+            generation,
+            1,
+            Arc::new(vec![DirectoryEntry {
+                name: b"project".to_vec(),
+                node: node(),
+            }]),
+        );
+
+        assert!(matches!(
+            cache.lookup(1, b"project"),
+            Some(CachedLookup::Found(found)) if found.node_id == 2
+        ));
+        assert!(matches!(
+            cache.lookup(1, b"missing"),
+            Some(CachedLookup::Missing)
+        ));
+    }
+
+    #[test]
+    fn metadata_invalidation_rejects_a_late_remote_result() {
+        let cache = MetadataCache::default();
+        let stale_generation = cache.generation();
+        cache.invalidate();
+        cache.remember_node(stale_generation, node());
+
+        assert!(cache.node(2).is_none());
+        assert!(cache.lookup(1, b"anything").is_none());
     }
 }
