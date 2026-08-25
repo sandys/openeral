@@ -10,12 +10,14 @@ RUN cargo build --locked --release -p openeral-fused \
 
 FROM ghcr.io/nvidia/openshell-community/sandboxes/base:latest
 
+LABEL com.openrind.desktop.fuse-contract="fuse-metadata-cache-v11"
+
 USER root
 
 # Refresh Node.js 22 from NodeSource. The current upstream base pins 22.22.1,
 # which its Dockerfile documents as affected by multiple known CVEs.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates curl gnupg \
+    && apt-get install -y --no-install-recommends ca-certificates curl gnupg python3 \
     && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/*
@@ -39,9 +41,19 @@ COPY --from=fused-builder /source/target/release/openeral-fused /usr/local/bin/o
 COPY sandboxes/openeral/openeral-claude-fuse.sh /usr/local/bin/claude
 COPY sandboxes/openeral/pg-client-fuse.mjs /usr/local/bin/pg
 COPY sandboxes/openeral/setup-fuse.sh /opt/openrind-shell/setup.sh
+COPY sandboxes/openeral/openrind-pty-bridge.py /opt/openrind-shell/openrind-pty-bridge.py
 COPY sandboxes/openeral/configure-stringcost.mjs /opt/openrind-shell/configure-openrind-gateway.mjs
+COPY sandboxes/openeral/supabase-root-2021-ca.pem /opt/openrind-shell/certs/supabase-root-2021-ca.pem
 RUN chmod 755 /usr/local/bin/openrind-shell-fused /usr/local/bin/claude /usr/local/bin/pg \
-        /opt/openrind-shell/setup.sh /opt/openrind-shell/configure-openrind-gateway.mjs \
+        /opt/openrind-shell/setup.sh /opt/openrind-shell/openrind-pty-bridge.py \
+        /opt/openrind-shell/configure-openrind-gateway.mjs \
+    && chmod 644 /opt/openrind-shell/certs/supabase-root-2021-ca.pem \
+    && install -m 0644 /opt/openrind-shell/certs/supabase-root-2021-ca.pem /usr/local/share/ca-certificates/supabase-root-2021-ca.crt \
+    && cat /opt/openrind-shell/certs/supabase-root-2021-ca.pem >> /etc/ssl/certs/ca-certificates.crt \
+    && sed -i 's/\r$//' /usr/local/bin/claude /usr/local/bin/pg \
+        /opt/openrind-shell/setup.sh /opt/openrind-shell/openrind-pty-bridge.py \
+        /opt/openrind-shell/configure-openrind-gateway.mjs \
+    && printf '%s' fuse-metadata-cache-v11 > /opt/openrind-shell/desktop-contract \
     && ln -sf /usr/local/bin/openrind-shell-fused /usr/local/bin/openeral-fused \
     && ln -sf /opt/openrind-shell/setup.sh /usr/local/bin/openrind-shell \
     && ln -sf /opt/openrind-shell/setup.sh /usr/local/bin/openrind-shell-init \
@@ -49,7 +61,8 @@ RUN chmod 755 /usr/local/bin/openrind-shell-fused /usr/local/bin/claude /usr/loc
     && ln -sf /usr/local/bin/openrind-shell /usr/local/bin/openeral \
     && ln -sf /usr/local/bin/openrind-shell-init /usr/local/bin/openeral-init \
     && ln -sf /usr/local/bin/openrind-shell-start /usr/local/bin/openeral-start \
-    && install -d -o sandbox -g sandbox -m 0700 /var/lib/openrind-shell/runtime
+    && install -d -o sandbox -g sandbox -m 0700 \
+        /var/lib/openrind-shell/runtime /sandbox/claude-home
 
 # Override the upstream base policy
 COPY sandboxes/openeral/policy.yaml /etc/openshell/policy.yaml

@@ -12,13 +12,14 @@ import {
 } from 'node:fs';
 import { dirname, join } from 'node:path';
 
-const home = process.env.OPENRIND_SHELL_HOME || process.env.OPENERAL_HOME || '/sandbox/work';
+const projectHome = process.env.OPENRIND_SHELL_HOME || process.env.OPENERAL_HOME || '/sandbox/work';
+const claudeHome = process.env.OPENRIND_SHELL_CLAUDE_HOME || projectHome;
 const runtimeDir = process.env.OPENRIND_SHELL_RUNTIME_DIR
   || process.env.OPENERAL_RUNTIME_DIR
   || '/var/lib/openrind-shell/runtime';
-const presignPath = join(home, '.openrind-shell', 'presign.json');
-const legacyPresignPath = join(home, '.openeral', 'presign.json');
-const settingsPath = join(home, '.claude', 'settings.json');
+const presignPath = join(projectHome, '.openrind-shell', 'presign.json');
+const legacyPresignPath = join(projectHome, '.openeral', 'presign.json');
+const settingsPath = join(claudeHome, '.claude', 'settings.json');
 const baseUrlPath = join(runtimeDir, 'anthropic-base-url');
 
 function normalize(raw) {
@@ -142,11 +143,6 @@ function persist(baseUrl) {
   try { settings = JSON.parse(readFileSync(settingsPath, 'utf8')); } catch {}
   settings.env = settings.env && typeof settings.env === 'object' ? settings.env : {};
   settings.env.ANTHROPIC_BASE_URL = baseUrl;
-  settings.env.ANTHROPIC_DEFAULT_SONNET_MODEL ||= 'openrouter/free';
-  settings.env.ANTHROPIC_DEFAULT_OPUS_MODEL ||= 'openrouter/free';
-  settings.env.ANTHROPIC_DEFAULT_HAIKU_MODEL ||= 'openrouter/free';
-  settings.env.ANTHROPIC_DEFAULT_FABLE_MODEL ||= 'openrouter/free';
-  settings.env.CLAUDE_CODE_SUBAGENT_MODEL ||= 'openrouter/free';
   delete settings.env.ANTHROPIC_API_KEY;
   delete settings.env.ANTHROPIC_AUTH_TOKEN;
   writeFileSync(settingsPath, `${JSON.stringify(settings, null, 2)}\n`);

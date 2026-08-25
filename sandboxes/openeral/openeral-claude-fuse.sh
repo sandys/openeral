@@ -7,7 +7,7 @@ if [ -f "$RUNTIME_DIR/session.env" ]; then
   . "$RUNTIME_DIR/session.env"
 fi
 
-export HOME=/sandbox/work
+export HOME="${OPENRIND_SHELL_CLAUDE_HOME:-/sandbox/claude-home}"
 export OPENRIND_SHELL_HOME=/sandbox/work
 export OPENRIND_SHELL_RUNTIME_DIR="$RUNTIME_DIR"
 export OPENRIND_SHELL_STATE_DIR="$RUNTIME_DIR"
@@ -22,6 +22,14 @@ export OPENERAL_INIT_MARKER="$RUNTIME_DIR/init.done"
 export OPENERAL_REQUIRE_POSTGRES_TLS=1
 export SHELL="${SHELL:-/bin/bash}"
 export NODE_NO_WARNINGS="${NODE_NO_WARNINGS:-1}"
+# Claude Code is installed by the immutable sandbox image. Disable update,
+# telemetry, feedback, and crash-report traffic that is unrelated to an
+# interactive agent session; in particular this avoids first-launch cache work
+# on the PostgreSQL-backed HOME. This is an Anthropic-supported environment
+# control and does not create settings, accept trust, or skip onboarding. Claude
+# writes that state to its local named-volume HOME, not the PostgreSQL FUSE mount.
+export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC="${CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC:-1}"
+export DISABLE_AUTOUPDATER="${DISABLE_AUTOUPDATER:-1}"
 
 unset STRINGCOST_API_KEY
 unset OPENRIND_GATEWAY_API_KEY
@@ -32,7 +40,19 @@ if [ ! -x /usr/local/bin/claude-real ]; then
   exit 127
 fi
 
-openrind-shell init --ensure
+# Keep successful marker verification out of Claude's terminal. The command's
+# diagnostics are still surfaced verbatim when initialization is missing or
+# stale, but a healthy reconnect paints Claude as the first application output.
+ENSURE_LOG="${RUNTIME_DIR}/claude-init-ensure.log"
+set +e
+openrind-shell init --ensure >"$ENSURE_LOG" 2>&1
+ENSURE_STATUS=$?
+set -e
+if [ "$ENSURE_STATUS" -ne 0 ]; then
+  cat "$ENSURE_LOG" >&2
+  exit "$ENSURE_STATUS"
+fi
+rm -f "$ENSURE_LOG"
 
 HEALTH="$(openrind-shell-fused health 2>/dev/null || true)"
 STATE="$(node -e 'try { process.stdout.write(JSON.parse(process.argv[1]).state || "") } catch {}' "$HEALTH")"

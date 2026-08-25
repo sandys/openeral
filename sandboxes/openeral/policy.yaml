@@ -22,6 +22,15 @@ filesystem_policy:
     - /var/lib/openrind-shell/runtime
     - /var/lib/openeral/runtime
     - /dev/null
+    # The desktop PTY bridge creates one new Linux PTY for Claude. The
+    # inherited OpenShell SSH PTY was opened before Landlock is applied, but
+    # Python's os.openpty() must open the devpts multiplexer and slave after
+    # Landlock is active. Without this directory the bridge dies silently
+    # before its framed-readiness reset reaches xterm.
+    #
+    # Allow the real devpts directory, not the /dev/ptmx symlink: OpenShell
+    # rejects ownership changes on the symlink during sandbox provisioning.
+    - /dev/pts
 
 landlock:
   compatibility: best_effort
@@ -56,11 +65,6 @@ network_policies:
     name: claude-code
     endpoints:
       - host: api.anthropic.com
-        port: 443
-        protocol: rest
-        enforcement: enforce
-        access: full
-      - host: openrouter.ai
         port: 443
         protocol: rest
         enforcement: enforce

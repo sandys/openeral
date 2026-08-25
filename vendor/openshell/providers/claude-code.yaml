@@ -31,4 +31,8 @@ endpoints:
     protocol: rest
     access: read-write
     enforcement: enforce
-binaries: [/usr/bin/claude, /usr/local/bin/claude]
+# Openrind Shell keeps a small durability wrapper at /usr/local/bin/claude and
+# moves the native Claude Code executable to claude-real. Include both paths so
+# provider-managed ANTHROPIC_API_KEY injection follows the process that actually
+# opens the Anthropic connection.
+binaries: [/usr/bin/claude, /usr/local/bin/claude, /usr/local/bin/claude-real]

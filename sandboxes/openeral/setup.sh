@@ -375,11 +375,6 @@ let s = {};
 try { s = JSON.parse(fs.readFileSync(file, 'utf8')); } catch(e) {}
 if (!s.env) s.env = {};
 s.env.ANTHROPIC_BASE_URL = process.env.STRINGCOST_PROXY_URL;
-if(!s.env.ANTHROPIC_DEFAULT_SONNET_MODEL)s.env.ANTHROPIC_DEFAULT_SONNET_MODEL='openrouter/free';
-if(!s.env.ANTHROPIC_DEFAULT_OPUS_MODEL)s.env.ANTHROPIC_DEFAULT_OPUS_MODEL='openrouter/free';
-if(!s.env.ANTHROPIC_DEFAULT_HAIKU_MODEL)s.env.ANTHROPIC_DEFAULT_HAIKU_MODEL='openrouter/free';
-if(!s.env.ANTHROPIC_DEFAULT_FABLE_MODEL)s.env.ANTHROPIC_DEFAULT_FABLE_MODEL='openrouter/free';
-if(!s.env.CLAUDE_CODE_SUBAGENT_MODEL)s.env.CLAUDE_CODE_SUBAGENT_MODEL='openrouter/free';
 delete s.env.ANTHROPIC_API_KEY;
 delete s.env.ANTHROPIC_AUTH_TOKEN;
 fs.mkdirSync(home + '/.claude', {recursive: true});
@@ -531,11 +526,6 @@ let s = {};
 try { s = JSON.parse(fs.readFileSync(file, 'utf8')); } catch(e) {}
 if (!s.env) s.env = {};
 s.env.ANTHROPIC_BASE_URL = process.env.STRINGCOST_PROXY_URL;
-if(!s.env.ANTHROPIC_DEFAULT_SONNET_MODEL)s.env.ANTHROPIC_DEFAULT_SONNET_MODEL='openrouter/free';
-if(!s.env.ANTHROPIC_DEFAULT_OPUS_MODEL)s.env.ANTHROPIC_DEFAULT_OPUS_MODEL='openrouter/free';
-if(!s.env.ANTHROPIC_DEFAULT_HAIKU_MODEL)s.env.ANTHROPIC_DEFAULT_HAIKU_MODEL='openrouter/free';
-if(!s.env.ANTHROPIC_DEFAULT_FABLE_MODEL)s.env.ANTHROPIC_DEFAULT_FABLE_MODEL='openrouter/free';
-if(!s.env.CLAUDE_CODE_SUBAGENT_MODEL)s.env.CLAUDE_CODE_SUBAGENT_MODEL='openrouter/free';
 delete s.env.ANTHROPIC_API_KEY;
 delete s.env.ANTHROPIC_AUTH_TOKEN;
 fs.mkdirSync(home + '/.claude', {recursive: true});

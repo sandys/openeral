@@ -44,13 +44,15 @@ does not receive `/dev/fuse` or mount capability.
 
 `openrind-shell-init` is the trailing one-shot command. It runs migrations/import, publishes
 database coordination, waits for the writer lease, verifies that lease in PostgreSQL,
-performs a mounted fsync canary, seeds Claude state, removes the uploaded URL, and
+performs a mounted fsync canary, prepares the local Claude home, removes the uploaded URL, and
 exits. The FUSE daemon is already a supervisor-owned critical child; init does not
 launch or detach it.
 
 Claude runs through the installed Openrind Shell wrapper (source file
-`openeral-claude-fuse.sh`) with `HOME=/sandbox/work`. `/exit` or
-`Ctrl+D` returns to the shell after `flush-all`; `claude -c` resumes the latest session.
+`openeral-claude-fuse.sh`) with `HOME=/sandbox/claude-home` and cwd `/sandbox/work`.
+The home path is a per-workspace Docker named volume; project files remain on FUSE.
+`/exit` or `Ctrl+D` returns to the shell after `flush-all`; `claude -c` resumes the
+latest session from the local home volume.
 
 No watcher or PGlite process participates in primary persistence.
 

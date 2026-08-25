@@ -10,6 +10,7 @@ export OPENRIND_SHELL_STATE_DIR="$OPENRIND_SHELL_RUNTIME_DIR"
 export OPENRIND_SHELL_DB_URL_FILE="$OPENRIND_SHELL_RUNTIME_DIR/database-url"
 export OPENRIND_SHELL_INIT_MARKER="$OPENRIND_SHELL_RUNTIME_DIR/init.done"
 export OPENRIND_SHELL_HOME=/sandbox/work
+export OPENRIND_SHELL_CLAUDE_HOME=/sandbox/claude-home
 export OPENRIND_SHELL_REQUIRE_POSTGRES_TLS=1
 # Legacy aliases are exported for user scripts and older library builds.
 export OPENERAL_RUNTIME_DIR="$OPENRIND_SHELL_RUNTIME_DIR"
@@ -29,6 +30,18 @@ OPENRIND_SHELL_DIR=/opt/openrind-shell
 OPENERAL_DIR="$OPENRIND_SHELL_DIR"
 mkdir -p "$OPENRIND_SHELL_RUNTIME_DIR"
 chmod 700 "$OPENRIND_SHELL_RUNTIME_DIR"
+if [ ! -d "$OPENRIND_SHELL_CLAUDE_HOME" ] || [ ! -w "$OPENRIND_SHELL_CLAUDE_HOME" ]; then
+  echo "setup-fuse.sh: persistent Claude home is missing or not writable at $OPENRIND_SHELL_CLAUDE_HOME" >&2
+  exit 1
+fi
+chmod 700 "$OPENRIND_SHELL_CLAUDE_HOME"
+install -d -m 0700 "$OPENRIND_SHELL_CLAUDE_HOME/.local/bin"
+# The upstream base installs Claude's native binary system-wide, but the native
+# client validates its installation at $HOME/.local/bin/claude. Claude's HOME
+# is a persistent named volume in this runtime, so provide the expected path as
+# immutable runtime plumbing without creating settings, trust, or onboarding
+# state. DISABLE_AUTOUPDATER keeps this image-owned binary authoritative.
+ln -sfn /usr/local/bin/claude-real "$OPENRIND_SHELL_CLAUDE_HOME/.local/bin/claude"
 
 read_database_url() {
   tr -d '\r' < "$1" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//'
@@ -135,7 +148,8 @@ DB_HOST="$(node -e 'const u = new URL(process.env.DATABASE_URL); process.stdout.
 echo "setup-fuse.sh: migrating and preparing $WORKSPACE_ID on $DB_HOST..."
 PREPARED="$(node "$OPENRIND_SHELL_DIR/dist/bin/openrind-shell-fuse-init.js" prepare)"
 IMPORTED="$(node -e 'process.stdout.write(String(JSON.parse(process.argv[1]).importedItems || 0))' "$PREPARED")"
-echo "setup-fuse.sh: normalized volume ready; imported $IMPORTED legacy item(s)"
+SEEDED="$(node -e 'process.stdout.write(String(JSON.parse(process.argv[1]).seededItems || 0))' "$PREPARED")"
+echo "setup-fuse.sh: normalized project volume ready; imported $IMPORTED legacy item(s), seeded $SEEDED runtime item(s)"
 
 echo "setup-fuse.sh: waiting for the mounted filesystem writer lease..."
 HEALTH=""
@@ -162,14 +176,15 @@ OPENERAL_LEASE_OWNER="$LEASE_OWNER" OPENERAL_LEASE_EPOCH="$LEASE_EPOCH" \
 
 echo "setup-fuse.sh: verifying mounted read/write durability..."
 HOME="$OPENRIND_SHELL_HOME" node --input-type=module - <<'NODE'
-import { closeSync, constants, mkdirSync, openSync, readFileSync, readdirSync, rmSync, unlinkSync, writeFileSync, fsyncSync } from 'node:fs';
+import { closeSync, constants, fsyncSync, openSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { randomBytes, randomUUID } from 'node:crypto';
 
-const directory = '/sandbox/work/.openrind-shell/.init-probes';
-mkdirSync(directory, { recursive: true, mode: 0o700 });
-for (const name of readdirSync(directory)) rmSync(`${directory}/${name}`, { recursive: true, force: true });
-const path = `${directory}/${randomUUID()}`;
-const expected = randomBytes(4096);
+// `prepare` creates .openrind-shell transactionally before the daemon mounts.
+// A single mounted create/write/fsync/read/unlink is the required end-to-end
+// durability proof. Directory fsyncs add remote PostgreSQL round trips but no
+// extra guarantee here: FUSE namespace mutations commit before their replies.
+const path = `/sandbox/work/.openrind-shell/.durability-probe-${randomUUID()}`;
+const expected = randomBytes(256);
 const fd = openSync(path, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY, 0o600);
 try {
   writeFileSync(fd, expected);
@@ -177,35 +192,15 @@ try {
 } finally {
   closeSync(fd);
 }
-const directoryFd = openSync(directory, constants.O_RDONLY);
-try { fsyncSync(directoryFd); } finally { closeSync(directoryFd); }
 const actual = readFileSync(path);
 if (!actual.equals(expected)) throw new Error('FUSE canary read-back mismatch');
 unlinkSync(path);
-const finalDirectoryFd = openSync(directory, constants.O_RDONLY);
-try { fsyncSync(finalDirectoryFd); } finally { closeSync(finalDirectoryFd); }
 NODE
+echo "setup-fuse.sh: mounted durability verified"
 
-mkdir -p "$OPENRIND_SHELL_HOME/.claude/skills" "$OPENRIND_SHELL_HOME/.openrind-shell"
-if [ -d /opt/openrind-shell/skills ]; then
-  cp -a --update=none /opt/openrind-shell/skills/. "$OPENRIND_SHELL_HOME/.claude/skills/"
-fi
-
-HOME="$OPENRIND_SHELL_HOME" node --input-type=module - <<'NODE'
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
-const home = '/sandbox/work';
-const settings = `${home}/.claude/settings.json`;
-mkdirSync(`${home}/.claude`, { recursive: true });
-if (!existsSync(settings)) {
-  writeFileSync(settings, `${JSON.stringify({
-    permissions: {
-      allow: ['Bash(npm run *)', 'Bash(npm test *)', 'Bash(git status)', 'Bash(git diff *)', 'Bash(git log *)', 'Bash(git commit *)', 'Bash(ls *)', 'Bash(cat *)', 'Bash(grep *)'],
-      deny: ['Read(~/.ssh/**)', 'Read(~/.aws/**)', 'Read(~/.azure/**)', 'Read(~/.npmrc)', 'Read(~/.git-credentials)', 'Edit(~/.bashrc)', 'Edit(~/.zshrc)', 'Bash(curl *)', 'Bash(wget *)', 'Bash(nc *)', 'Bash(ssh *)', 'Bash(git push *)', 'Read(*.env)', 'Read(.env.*)'],
-    },
-    enableAllProjectMcpServers: false,
-  }, null, 2)}\n`);
-}
-NODE
+# Claude creates its own settings, skills, and onboarding/trust state from the
+# user's interactive choices in the separate persistent Claude home volume.
+echo "setup-fuse.sh: persistent Claude home ready"
 
 HOME="$OPENRIND_SHELL_HOME" node /opt/openrind-shell/configure-openrind-gateway.mjs
 
@@ -220,8 +215,10 @@ NPMRC
 fi
 
 # Interactive SSH shells start with the sandbox user's login home (/sandbox), not
-# the mount, so the session hook must live in that .bashrc. It sources
-# session.env (which exports HOME=/sandbox/work) and moves into the workspace.
+# the mount, so the session hook must live in that .bashrc. A normal README-style
+# `sandbox connect` remains a shell. Openrind Desktop writes a consume-once marker
+# immediately before its connection; only that connection auto-launches Claude
+# through the same proven Linux PTY bridge used by the just-bash image.
 SHELL_BASHRC="${HOME:-/sandbox}/.bashrc"
 if ! grep -q 'Openrind Shell FUSE session environment' "$SHELL_BASHRC" 2>/dev/null; then
   cat >> "$SHELL_BASHRC" <<'BASHRC'
@@ -233,7 +230,40 @@ case "$-" in
     case "$PWD" in
       /|/sandbox) [ -d /sandbox/work ] && cd /sandbox/work ;;
     esac
-    if [ -z "${OPENRIND_SHELL_HINT_SHOWN:-}" ]; then
+
+    _openrind_desktop_marker=/var/lib/openrind-shell/runtime/desktop-session
+    _openrind_desktop_launch=0
+    _openrind_desktop_sid=""
+    if [ -f "$_openrind_desktop_marker" ]; then
+      _openrind_desktop_launch=1
+      _openrind_desktop_sid="$(tr -d '\r\n ' < "$_openrind_desktop_marker" 2>/dev/null || true)"
+      rm -f "$_openrind_desktop_marker" 2>/dev/null || true
+    fi
+
+    if [ "$_openrind_desktop_launch" -eq 1 ] && [ -z "${OPENRIND_DESKTOP_AGENT_LAUNCHED:-}" ]; then
+      export OPENRIND_DESKTOP_AGENT_LAUNCHED=1
+      _openrind_desktop_claude_args=()
+      case "$_openrind_desktop_sid" in
+        default|'') ;;
+        *[!0-9a-fA-F-]*) ;;
+        *)
+          if find "$OPENRIND_SHELL_CLAUDE_HOME/.claude/projects" -type f -name "${_openrind_desktop_sid}.jsonl" -print -quit 2>/dev/null | grep -q .; then
+            _openrind_desktop_claude_args=(--resume "$_openrind_desktop_sid")
+          else
+            _openrind_desktop_claude_args=(--session-id "$_openrind_desktop_sid")
+          fi
+          ;;
+      esac
+      if command -v python3 >/dev/null 2>&1 && [ -x /opt/openrind-shell/openrind-pty-bridge.py ]; then
+        exec python3 /opt/openrind-shell/openrind-pty-bridge.py \
+          env SHELL=/bin/bash DISABLE_AUTOUPDATER=1 \
+          CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 \
+          /usr/local/bin/claude "${_openrind_desktop_claude_args[@]}"
+      fi
+      exec env SHELL=/bin/bash DISABLE_AUTOUPDATER=1 \
+        CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 \
+        /usr/local/bin/claude "${_openrind_desktop_claude_args[@]}"
+    elif [ -z "${OPENRIND_SHELL_HINT_SHOWN:-}" ]; then
       export OPENRIND_SHELL_HINT_SHOWN=1
       echo "Openrind Shell ready. Run 'claude' to start; /exit or Ctrl-D returns here; 'claude -c' continues."
     fi
@@ -251,6 +281,7 @@ SESSION_ENV="$OPENRIND_SHELL_RUNTIME_DIR/session.env"
 {
   printf 'export HOME='; shell_quote "$OPENRIND_SHELL_HOME"; printf '\n'
   printf 'export OPENRIND_SHELL_HOME='; shell_quote "$OPENRIND_SHELL_HOME"; printf '\n'
+  printf 'export OPENRIND_SHELL_CLAUDE_HOME='; shell_quote "$OPENRIND_SHELL_CLAUDE_HOME"; printf '\n'
   printf 'export OPENRIND_SHELL_RUNTIME_DIR='; shell_quote "$OPENRIND_SHELL_RUNTIME_DIR"; printf '\n'
   printf 'export OPENRIND_SHELL_STATE_DIR='; shell_quote "$OPENRIND_SHELL_RUNTIME_DIR"; printf '\n'
   printf 'export OPENRIND_SHELL_DB_URL_FILE='; shell_quote "$OPENRIND_SHELL_DB_URL_FILE"; printf '\n'
@@ -280,6 +311,13 @@ command -v claude-real >/dev/null 2>&1 || {
 
 openrind-shell-fused flush-all >/dev/null
 node "$OPENRIND_SHELL_DIR/dist/bin/openrind-shell-fuse-init.js" mark-done
+
+# Prime the daemon's authoritative root-directory snapshot after the final
+# initialization write. Claude synchronously probes several optional project
+# files before its first paint; warming one listing here makes every root hit
+# and miss local when the terminal connects. This is a prefetch, not another
+# durability validation or retry loop.
+ls -A "$OPENRIND_SHELL_HOME" >/dev/null
 
 if [ -n "$DB_URL_FILE" ] && [ "$DB_URL_FILE" != "$OPENERAL_DB_URL_FILE" ]; then
   rm -f "$DB_URL_FILE"
