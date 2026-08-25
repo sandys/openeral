@@ -34,6 +34,10 @@ import {
   exportWorkspaceConfig,
   importWorkspaceConfig,
 } from "./workspace-archive.mjs";
+import {
+  requireRegisteredLocalWorkspaceRoot,
+  resolveWorkspaceConfigFilePath,
+} from "./workspace-config-authorization.mjs";
 import * as openrindShell from "./openshell/fuse-sandbox.mjs";
 import {
   getFuseRuntimeStatus,
@@ -1008,7 +1012,7 @@ function openrindDesktopRemoteWorkspaceId(hostUrl, workspaceId) {
 }
 
 async function readWorkspaceOpenrindDesktopConfig(workspacePath) {
-  const openrindDesktopPath = path.join(workspacePath, ".opencode", "openrind-desktop.json");
+  const openrindDesktopPath = await resolveWorkspaceConfigFilePath(workspacePath);
   if (!(await pathExists(openrindDesktopPath))) {
     return defaultWorkspaceOpenrindDesktopConfig(workspacePath);
   }
@@ -1017,7 +1021,7 @@ async function readWorkspaceOpenrindDesktopConfig(workspacePath) {
 }
 
 async function writeWorkspaceOpenrindDesktopConfig(workspacePath, config) {
-  const openrindDesktopPath = path.join(workspacePath, ".opencode", "openrind-desktop.json");
+  const openrindDesktopPath = await resolveWorkspaceConfigFilePath(workspacePath);
   await mkdir(path.dirname(openrindDesktopPath), { recursive: true });
   await writeFile(openrindDesktopPath, `${JSON.stringify(config, null, 2)}\n`, "utf8");
   return execResult(true, `Wrote ${openrindDesktopPath}`);
@@ -1043,6 +1047,14 @@ async function readWorkspaceState() {
     activeId: typeof state?.activeId === "string" ? state.activeId : null,
     workspaces: Array.isArray(state?.workspaces) ? state.workspaces : [],
   };
+}
+
+async function resolveRegisteredWorkspaceConfigRoot(rawPath) {
+  const state = await readWorkspaceState();
+  return requireRegisteredLocalWorkspaceRoot({
+    requestedPath: rawPath,
+    workspaces: state.workspaces,
+  });
 }
 
 async function writeWorkspaceState(nextState) {
@@ -1673,13 +1685,16 @@ async function handleDesktopInvoke(event, command, ...args) {
     }
     case "workspaceAddAuthorizedRoot": {
       const input = args[0] ?? {};
-      const workspacePath = String(input.workspacePath ?? "").trim();
+      const requestedWorkspacePath = String(input.workspacePath ?? "").trim();
       const authorizedRoot = String(
         input.folderPath ?? input.authorizedRoot ?? "",
       ).trim();
-      if (!workspacePath || !authorizedRoot) {
+      if (!requestedWorkspacePath || !authorizedRoot) {
         throw new Error("workspacePath and folderPath are required");
       }
+      const workspacePath = await resolveRegisteredWorkspaceConfigRoot(
+        requestedWorkspacePath,
+      );
       const config = await readWorkspaceOpenrindDesktopConfig(workspacePath);
       if (!Array.isArray(config.authorizedRoots)) {
         config.authorizedRoots = [];
@@ -1689,15 +1704,21 @@ async function handleDesktopInvoke(event, command, ...args) {
       }
       return writeWorkspaceOpenrindDesktopConfig(workspacePath, config);
     }
-    case "workspaceOpenrindDesktopRead":
-      return readWorkspaceOpenrindDesktopConfig(
+    case "workspaceOpenrindDesktopRead": {
+      const workspacePath = await resolveRegisteredWorkspaceConfigRoot(
         String(args[0]?.workspacePath ?? "").trim(),
       );
-    case "workspaceOpenrindDesktopWrite":
-      return writeWorkspaceOpenrindDesktopConfig(
+      return readWorkspaceOpenrindDesktopConfig(workspacePath);
+    }
+    case "workspaceOpenrindDesktopWrite": {
+      const workspacePath = await resolveRegisteredWorkspaceConfigRoot(
         String(args[0]?.workspacePath ?? "").trim(),
+      );
+      return writeWorkspaceOpenrindDesktopConfig(
+        workspacePath,
         args[0]?.config ?? defaultWorkspaceOpenrindDesktopConfig(""),
       );
+    }
     case "workspaceExportConfig": {
       const input = args[0] ?? {};
       const workspaceId = String(input.workspaceId ?? "").trim();
@@ -3023,6 +3044,33 @@ async function createMainWindow() {
 }
 
 ipcMain.handle("openrind-desktop:desktop", handleDesktopInvokeWithLaunchLogging);
+ipcMain.handle(
+  "openrind-desktop:workspace-config:add-authorized-root",
+  (event, input) =>
+    handleDesktopInvokeWithLaunchLogging(
+      event,
+      "workspaceAddAuthorizedRoot",
+      input,
+    ),
+);
+ipcMain.handle(
+  "openrind-desktop:workspace-config:read",
+  (event, input) =>
+    handleDesktopInvokeWithLaunchLogging(
+      event,
+      "workspaceOpenrindDesktopRead",
+      input,
+    ),
+);
+ipcMain.handle(
+  "openrind-desktop:workspace-config:write",
+  (event, input) =>
+    handleDesktopInvokeWithLaunchLogging(
+      event,
+      "workspaceOpenrindDesktopWrite",
+      input,
+    ),
+);
 ipcMain.handle("openrind-desktop:shell:openExternal", async (_event, url) => {
   await openExternalSafe(url);
 });

@@ -8,9 +8,49 @@ function normalizePlatform(value) {
   return "linux";
 }
 
+const PRIVILEGED_WORKSPACE_CONFIG_COMMANDS = new Set([
+  "workspaceAddAuthorizedRoot",
+  "workspaceOpenrindDesktopRead",
+  "workspaceOpenrindDesktopWrite",
+]);
+
+function invokeDesktop(command, ...args) {
+  const normalizedCommand = String(command ?? "");
+  if (PRIVILEGED_WORKSPACE_CONFIG_COMMANDS.has(normalizedCommand)) {
+    return Promise.reject(
+      new Error(
+        `Privileged desktop command must use its dedicated bridge method: ${normalizedCommand}`,
+      ),
+    );
+  }
+  return ipcRenderer.invoke(
+    "openrind-desktop:desktop",
+    normalizedCommand,
+    ...args,
+  );
+}
+
 contextBridge.exposeInMainWorld("__OPENRIND_DESKTOP_ELECTRON__", {
-  invokeDesktop(command, ...args) {
-    return ipcRenderer.invoke("openrind-desktop:desktop", command, ...args);
+  invokeDesktop,
+  bridge: {
+    workspaceAddAuthorizedRoot(input) {
+      return ipcRenderer.invoke(
+        "openrind-desktop:workspace-config:add-authorized-root",
+        input,
+      );
+    },
+    workspaceOpenrindDesktopRead(input) {
+      return ipcRenderer.invoke(
+        "openrind-desktop:workspace-config:read",
+        input,
+      );
+    },
+    workspaceOpenrindDesktopWrite(input) {
+      return ipcRenderer.invoke(
+        "openrind-desktop:workspace-config:write",
+        input,
+      );
+    },
   },
   shell: {
     openExternal(url) {
