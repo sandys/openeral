@@ -32,6 +32,11 @@ export function OPTIONS(request: Request) {
 }
 
 export async function POST(request: Request) {
+  const botProtection = await verifyShareBotProtection();
+  if (!botProtection.ok) {
+    return jsonResponse({ message: botProtection.message }, request, botProtection.status);
+  }
+
   const originCheck = validateTrustedOrigin(request);
   if (!originCheck.ok) {
     return jsonResponse({ message: originCheck.message }, request, originCheck.status);
@@ -47,11 +52,6 @@ export async function POST(request: Request) {
         "X-Retry-After": String(rateLimit.retryAfterSeconds),
       },
     });
-  }
-
-  const botProtection = await verifyShareBotProtection(request);
-  if (!botProtection.ok) {
-    return jsonResponse({ message: botProtection.message }, request, botProtection.status);
   }
 
   const maxBytes = Number.parseInt(getEnv("MAX_BYTES", "262144"), 10);

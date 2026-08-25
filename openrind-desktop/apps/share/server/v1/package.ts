@@ -51,6 +51,17 @@ export default async function handler(req: LegacyApiRequest, res: LegacyApiRespo
     return;
   }
 
+  if (req.method !== "POST") {
+    json(res, { message: "Method not allowed" }, 405);
+    return;
+  }
+
+  const botProtection = await verifyShareBotProtection();
+  if (!botProtection.ok) {
+    json(res, { message: botProtection.message }, botProtection.status);
+    return;
+  }
+
   const originCheck = validateTrustedOrigin(request);
   if (!originCheck.ok) {
     json(res, { message: originCheck.message }, originCheck.status);
@@ -65,17 +76,6 @@ export default async function handler(req: LegacyApiRequest, res: LegacyApiRespo
       429,
       { "X-Retry-After": String(rateLimit.retryAfterSeconds) },
     );
-    return;
-  }
-
-  const botProtection = await verifyShareBotProtection(request);
-  if (!botProtection.ok) {
-    json(res, { message: botProtection.message }, botProtection.status);
-    return;
-  }
-
-  if (req.method !== "POST") {
-    json(res, { message: "Method not allowed" }, 405);
     return;
   }
 

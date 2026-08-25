@@ -109,14 +109,12 @@ export function rateLimitPublishRequest(request: Request) {
   });
 }
 
-export async function verifyShareBotProtection(request: Request) {
-  const requestOrigin = getRequestOrigin(request);
-  const origin = request.headers.get("origin")?.trim() ?? "";
-  if (!origin || origin !== requestOrigin) {
-    return { ok: true as const };
-  }
+type BotIdChecker = () => Promise<{ isBot: boolean }>;
 
-  const result = await checkBotId();
+export async function verifyShareBotProtection(
+  runBotIdCheck: BotIdChecker = checkBotId,
+) {
+  const result = await runBotIdCheck();
   if (result.isBot) {
     return { ok: false as const, status: 403, message: "Bot traffic is not allowed for bundle publishing." };
   }
