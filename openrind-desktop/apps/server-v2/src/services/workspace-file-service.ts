@@ -220,12 +220,57 @@ function normalizeWorkspaceRelativePath(input: string, options: { allowSubdirs: 
 }
 
 function resolveSafeChildPath(root: string, child: string) {
-  const rootResolved = path.resolve(root);
-  const candidate = path.resolve(rootResolved, child);
-  if (candidate === rootResolved || !candidate.startsWith(rootResolved + path.sep)) {
-    throw new RouteError(400, "invalid_request", "Path traversal is not allowed.");
+  const lexicalRoot = path.resolve(root);
+  const lexicalCandidate = path.resolve(lexicalRoot, child);
+  const lexicalRelative = path.relative(lexicalRoot, lexicalCandidate);
+  if (
+    !lexicalRelative ||
+    path.isAbsolute(lexicalRelative) ||
+    lexicalRelative === ".." ||
+    lexicalRelative.startsWith(`..${path.sep}`)
+  ) {
+    throw new HTTPException(400, { message: "Path traversal is not allowed." });
   }
-  return candidate;
+
+  const canonicalRoot = fs.realpathSync.native(lexicalRoot);
+  let existingAncestor = lexicalCandidate;
+  while (true) {
+    try {
+      fs.lstatSync(existingAncestor);
+      break;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== "ENOENT" && code !== "ENOTDIR") {
+        throw error;
+      }
+      const parent = path.dirname(existingAncestor);
+      if (parent === existingAncestor) {
+        throw new HTTPException(400, { message: "Path could not be resolved safely." });
+      }
+      existingAncestor = parent;
+    }
+  }
+
+  let canonicalAncestor: string;
+  try {
+    canonicalAncestor = fs.realpathSync.native(existingAncestor);
+  } catch {
+    throw new HTTPException(400, { message: "Path could not be resolved safely." });
+  }
+
+  const missingSuffix = path.relative(existingAncestor, lexicalCandidate);
+  const canonicalCandidate = path.resolve(canonicalAncestor, missingSuffix);
+  const canonicalRelative = path.relative(canonicalRoot, canonicalCandidate);
+  if (
+    !canonicalRelative ||
+    path.isAbsolute(canonicalRelative) ||
+    canonicalRelative === ".." ||
+    canonicalRelative.startsWith(`..${path.sep}`)
+  ) {
+    throw new HTTPException(400, { message: "Path resolves outside the workspace." });
+  }
+
+  return canonicalCandidate;
 }
 
 function fileRevision(info: { mtimeMs: number; size: number }) {
@@ -311,11 +356,11 @@ function parseOperations(input: unknown) {
 }
 
 function resolveInboxDir(workspaceRoot: string) {
-  return path.join(workspaceRoot, ".opencode", "openrind-desktop", "inbox");
+  return resolveSafeChildPath(workspaceRoot, path.join(".opencode", "openrind-desktop", "inbox"));
 }
 
 function resolveOutboxDir(workspaceRoot: string) {
-  return path.join(workspaceRoot, ".opencode", "openrind-desktop", "outbox");
+  return resolveSafeChildPath(workspaceRoot, path.join(".opencode", "openrind-desktop", "outbox"));
 }
 
 function encodeArtifactId(relativePath: string) {
@@ -739,6 +784,9 @@ export function createWorkspaceFileService(input: {
       const workspace = resolveWorkspaceOrThrow(input.repositories, workspaceId);
       const rootDir = resolveOutboxDir(resolveWorkspaceRoot(workspace));
       const relativePath = decodeArtifactId(artifactId);
+      if (!fs.existsSync(rootDir)) {
+        throw new HTTPException(404, { message: "Artifact not found." });
+      }
       const absolutePath = resolveSafeChildPath(rootDir, relativePath);
       if (!fs.existsSync(absolutePath) || !fs.statSync(absolutePath).isFile()) {
         throw new HTTPException(404, { message: "Artifact not found." });
@@ -765,6 +813,9 @@ export function createWorkspaceFileService(input: {
       const workspace = resolveWorkspaceOrThrow(input.repositories, workspaceId);
       const rootDir = resolveInboxDir(resolveWorkspaceRoot(workspace));
       const relativePath = decodeArtifactId(inboxId);
+      if (!fs.existsSync(rootDir)) {
+        throw new HTTPException(404, { message: "Inbox item not found." });
+      }
       const absolutePath = resolveSafeChildPath(rootDir, relativePath);
       if (!fs.existsSync(absolutePath) || !fs.statSync(absolutePath).isFile()) {
         throw new HTTPException(404, { message: "Inbox item not found." });
@@ -1065,6 +1116,7 @@ export function createWorkspaceFileService(input: {
       if (file.size > FILE_SESSION_MAX_FILE_BYTES) {
         throw new RouteError(413, "invalid_request", "File exceeds the maximum supported size.");
       }
+      fs.mkdirSync(rootDir, { recursive: true });
       const absolutePath = resolveSafeChildPath(rootDir, relativePath);
       fs.mkdirSync(path.dirname(absolutePath), { recursive: true });
       fs.writeFileSync(absolutePath, Buffer.from(await file.arrayBuffer()));

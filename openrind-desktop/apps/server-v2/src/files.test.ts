@@ -57,7 +57,7 @@ test("local workspace creation and config routes use server-owned config directo
 
   expect(createResponse.status).toBe(200);
   expect(created.data.backend.local.dataDir).toBe(workspaceRoot);
-  expect(created.data.backend.local.configDir).toContain(`/workspaces/${workspaceId}/config`);
+  expect(created.data.backend.local.configDir).toContain(path.join("workspaces", workspaceId, "config"));
 
   const configResponse = await app.request(`http://openrind-desktop.local/workspaces/${workspaceId}/config`);
   const configBody = await configResponse.json();
@@ -86,7 +86,7 @@ test("local workspace creation and config routes use server-owned config directo
   const rawBody = await rawResponse.json();
   expect(rawResponse.status).toBe(200);
   expect(rawBody.data.content).toContain("external_directory");
-  expect(rawBody.data.path).toContain(`/workspaces/${workspaceId}/config/opencode.jsonc`);
+  expect(rawBody.data.path).toContain(path.join("workspaces", workspaceId, "config", "opencode.jsonc"));
 
   const persistedWorkspace = dependencies.persistence.repositories.workspaces.getById(workspaceId);
   expect(persistedWorkspace?.configDir).toBeTruthy();
@@ -212,6 +212,77 @@ test("file routes cover simple content, file sessions, inbox, artifacts, and rel
   const disposedBody = await disposed.json();
   expect(disposed.status).toBe(200);
   expect(disposedBody.data.disposed).toBe(true);
+});
+
+test("workspace file routes reject symlinks that escape the workspace root", async () => {
+  const { app, root } = createTestApp();
+  const workspaceRoot = path.join(root, "workspace-symlink-security");
+  const outsideRoot = path.join(root, "outside-workspace");
+  fs.mkdirSync(outsideRoot, { recursive: true });
+  fs.writeFileSync(path.join(outsideRoot, "secret.md"), "outside secret", "utf8");
+
+  const createResponse = await app.request("http://openrind-desktop.local/workspaces/local", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ folderPath: workspaceRoot, name: "Symlink Security", preset: "starter" }),
+  });
+  const created = await createResponse.json();
+  const workspaceId = created.data.id as string;
+  expect(createResponse.status).toBe(200);
+
+  fs.symlinkSync(outsideRoot, path.join(workspaceRoot, "escape"), process.platform === "win32" ? "junction" : "dir");
+
+  const simpleRead = await app.request(
+    `http://openrind-desktop.local/workspaces/${workspaceId}/files/content?path=${encodeURIComponent("escape/secret.md")}`,
+  );
+  expect(simpleRead.status).toBe(400);
+
+  const simpleWrite = await app.request(`http://openrind-desktop.local/workspaces/${workspaceId}/files/content`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ path: "escape/simple-created.md", content: "must stay inside" }),
+  });
+  expect(simpleWrite.status).toBe(400);
+  expect(fs.existsSync(path.join(outsideRoot, "simple-created.md"))).toBe(false);
+
+  const sessionCreate = await app.request(`http://openrind-desktop.local/workspaces/${workspaceId}/file-sessions`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ write: true }),
+  });
+  const sessionBody = await sessionCreate.json();
+  const fileSessionId = sessionBody.data.id as string;
+  expect(sessionCreate.status).toBe(200);
+
+  const batchRead = await app.request(
+    `http://openrind-desktop.local/workspaces/${workspaceId}/file-sessions/${fileSessionId}/read-batch`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ paths: ["escape/secret.md"] }),
+    },
+  );
+  const batchReadBody = await batchRead.json();
+  expect(batchRead.status).toBe(200);
+  expect(batchReadBody.data.items[0].ok).toBe(false);
+  expect(batchReadBody.data.items[0].code).toBe("read_failed");
+
+  const batchWrite = await app.request(
+    `http://openrind-desktop.local/workspaces/${workspaceId}/file-sessions/${fileSessionId}/write-batch`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        writes: [{ path: "escape/batch-created.txt", contentBase64: Buffer.from("must stay inside").toString("base64") }],
+      }),
+    },
+  );
+  const batchWriteBody = await batchWrite.json();
+  expect(batchWrite.status).toBe(200);
+  expect(batchWriteBody.data.items[0].ok).toBe(false);
+  expect(batchWriteBody.data.items[0].code).toBe("write_failed");
+  expect(fs.existsSync(path.join(outsideRoot, "batch-created.txt"))).toBe(false);
+  expect(fs.readFileSync(path.join(outsideRoot, "secret.md"), "utf8")).toBe("outside secret");
 });
 
 test("remote workspace config and file routes proxy through the local server", async () => {
