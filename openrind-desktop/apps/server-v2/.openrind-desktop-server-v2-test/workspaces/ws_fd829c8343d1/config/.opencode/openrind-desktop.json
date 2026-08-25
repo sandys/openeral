@@ -1,0 +1,13 @@
+{
+  "authorizedRoots": [],
+  "blueprint": null,
+  "reload": null,
+  "version": 1,
+  "workspace": {
+    "configDir": "/Users/benjaminshafii/openrind-desktop-enterprise/_repos/openrind-desktop/apps/server-v2/.openrind-desktop-server-v2-test/workspaces/ws_fd829c8343d1/config",
+    "createdAt": 1777342554599,
+    "dataDir": null,
+    "name": "Help Workspace",
+    "preset": "remote"
+  }
+}

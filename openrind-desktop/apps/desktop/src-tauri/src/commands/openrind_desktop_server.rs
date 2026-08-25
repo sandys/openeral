@@ -1,0 +1,72 @@
+use tauri::{AppHandle, State};
+
+use crate::engine::manager::EngineManager;
+use crate::openrind_desktop_server::manager::OpenrindDesktopServerManager;
+use crate::openrind_desktop_server::start_openrind_desktop_server;
+use crate::types::{OpenrindDesktopServerInfo, WorkspaceType};
+use crate::workspace::state::load_workspace_state;
+
+#[tauri::command]
+pub fn openrind_desktop_server_info(manager: State<OpenrindDesktopServerManager>) -> OpenrindDesktopServerInfo {
+    let mut state = manager
+        .inner
+        .lock()
+        .expect("openrind-desktop server mutex poisoned");
+    OpenrindDesktopServerManager::snapshot_locked(&mut state)
+}
+
+#[tauri::command]
+pub fn openrind_desktop_server_restart(
+    app: AppHandle,
+    manager: State<OpenrindDesktopServerManager>,
+    engine_manager: State<EngineManager>,
+    remote_access_enabled: Option<bool>,
+) -> Result<OpenrindDesktopServerInfo, String> {
+    let (workspace_paths, opencode_url, opencode_username, opencode_password) = {
+        let engine = engine_manager
+            .inner
+            .lock()
+            .map_err(|_| "engine mutex poisoned".to_string())?;
+        let mut workspace_paths = Vec::new();
+        if let Some(project_dir) = engine.project_dir.clone() {
+            let trimmed = project_dir.trim().to_string();
+            if !trimmed.is_empty() {
+                workspace_paths.push(trimmed);
+            }
+        }
+        (
+            workspace_paths,
+            engine.base_url.clone(),
+            engine.opencode_username.clone(),
+            engine.opencode_password.clone(),
+        )
+    };
+
+    let mut workspace_paths = workspace_paths;
+    if workspace_paths.is_empty() {
+        let state = load_workspace_state(&app)?;
+        for workspace in state.workspaces {
+            if workspace.workspace_type != WorkspaceType::Local {
+                continue;
+            }
+            let trimmed = workspace.path.trim().to_string();
+            if trimmed.is_empty() || workspace_paths.iter().any(|path| path == &trimmed) {
+                continue;
+            }
+            workspace_paths.push(trimmed);
+        }
+    }
+
+    start_openrind_desktop_server(
+        &app,
+        &manager,
+        &workspace_paths,
+        opencode_url.as_deref(),
+        opencode_username.as_deref(),
+        opencode_password.as_deref(),
+        remote_access_enabled.unwrap_or(false),
+        false,
+        None,
+        None,
+    )
+}

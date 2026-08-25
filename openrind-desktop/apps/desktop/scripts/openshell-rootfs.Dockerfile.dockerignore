@@ -1,0 +1,5 @@
+**
+!vendor/
+!vendor/openshell/
+!vendor/openshell/**
+vendor/openshell/target/

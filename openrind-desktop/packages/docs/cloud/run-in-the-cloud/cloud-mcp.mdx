@@ -1,0 +1,62 @@
+---
+title: "Connect OpenrindDesktop Cloud MCP"
+description: "Use the hosted OpenrindDesktop Cloud MCP server from OpenrindDesktop or another OAuth-capable MCP client"
+---
+
+OpenrindDesktop Cloud exposes a hosted MCP server at `https://api.openrind-desktoplabs.com/mcp`. Add it to an MCP client when you want agents to use your OpenrindDesktop Cloud organization, skills, plugins, marketplaces, workers, and other Cloud API resources through MCP tools.
+
+The server uses OAuth. Your MCP client opens a browser, you sign in to OpenrindDesktop Cloud, choose the organization to authorize, and the client stores the returned token.
+
+## MCP config
+
+Add this server to your MCP config:
+
+```json
+{
+  "mcp": {
+    "openrind-desktop-cloud": {
+      "type": "remote",
+      "enabled": true,
+      "url": "https://api.openrind-desktoplabs.com/mcp",
+      "oauth": {}
+    }
+  }
+}
+```
+
+If your client expects the server map directly, use just the server entry:
+
+```json
+{
+  "openrind-desktop-cloud": {
+    "type": "remote",
+    "enabled": true,
+    "url": "https://api.openrind-desktoplabs.com/mcp",
+    "oauth": {}
+  }
+}
+```
+
+## Authorize access
+
+1. Save the MCP config in your client.
+2. Start the client's MCP auth flow for `openrind-desktop-cloud`.
+3. Sign in at `app.openrind-desktoplabs.com` when the browser opens.
+4. Choose the OpenrindDesktop Cloud organization that should receive MCP access.
+5. Return to your MCP client after authorization completes.
+
+The token is scoped to the organization you select during OAuth. If you need to switch organizations, remove the stored MCP auth token in your client and run the auth flow again.
+
+## What the server exposes
+
+The hosted MCP server exposes OpenrindDesktop Cloud API tools for normal product resources, including config objects, connectors, plugins, marketplaces, skill hubs, skills, workers, members, roles, teams, and LLM providers.
+
+It intentionally does not expose authentication internals, admin-only system routes, webhooks, API-key creation or deletion, or credential-returning endpoints.
+
+## Requirements
+
+- An OpenrindDesktop Cloud account and organization.
+- An MCP client that supports remote Streamable HTTP MCP servers.
+- OAuth support in the MCP client, including browser-based authorization.
+
+If your client does not support OAuth for remote MCP servers, it cannot connect to `openrind-desktop-cloud` yet.

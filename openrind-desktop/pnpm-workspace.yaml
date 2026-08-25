@@ -1,0 +1,18 @@
+packages:
+  - "apps/*"
+  - "packages/*"
+
+# Build-script allowlist + patches. pnpm 10 no longer reads these from the
+# "pnpm" field in package.json — they live here now. Without `electron` in
+# onlyBuiltDependencies, pnpm skips electron's postinstall and the electron
+# binary is never downloaded, so `pnpm --filter @openrind/desktop dev` fails
+# with "Electron failed to install correctly".
+onlyBuiltDependencies:
+  - "@whiskeysockets/baileys"
+  - better-sqlite3
+  - electron
+  - esbuild
+  - protobufjs
+
+patchedDependencies:
+  "@solidjs/router@0.15.4": "patches/@solidjs__router@0.15.4.patch"

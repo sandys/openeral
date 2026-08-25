@@ -1,0 +1,101 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - dev
+  pull_request:
+    branches:
+      - dev
+
+permissions:
+  contents: read
+
+jobs:
+  build-web:
+    name: Build Web
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version-file: .nvmrc
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.27.0
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build web
+        run: pnpm --filter @openrind-ee/den-web build
+
+  build-den:
+    name: Build Den services
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version-file: .nvmrc
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.27.0
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build den-api
+        run: pnpm --filter @openrind-ee/den-api build
+
+      - name: Build den-worker-proxy
+        run: pnpm --filter @openrind-ee/den-worker-proxy build
+
+  build-orchestrator-binary:
+    name: Build openrind-desktop orchestrator binary
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version-file: .nvmrc
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.27.0
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v1
+        with:
+          bun-version: 1.3.9
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck openrind-desktop-orchestrator
+        run: pnpm --filter openrind-desktop-orchestrator typecheck
+
+      - name: Build openrind-desktop orchestrator binary
+        run: pnpm --filter openrind-desktop-orchestrator build:bin
+
+      - name: Validate compiled binary
+        run: |
+          ./apps/orchestrator/dist/bin/openrind-desktop --version
+          ./apps/orchestrator/dist/bin/openrind-desktop --help >/dev/null

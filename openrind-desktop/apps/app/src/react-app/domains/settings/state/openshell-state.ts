@@ -1,0 +1,431 @@
+/** @jsxImportSource react */
+import { useCallback, useEffect, useRef, useState } from "react";
+
+import { isElectronRuntime } from "../../../../app/utils";
+
+// Mirrors the OpenShellDoctorResult shape produced by
+// apps/desktop/electron/openshell/doctor.mjs. JSDoc on the main-side
+// can't flow into renderer TS, so we re-declare the contract here.
+export type OpenShellComponentState = "ok" | "warn" | "missing" | "unknown";
+
+export type OpenShellComponent = {
+  id: string;
+  label: string;
+  state: OpenShellComponentState;
+  version: string | null;
+  detail: string | null;
+  actionable?: string | null;
+};
+
+export type OpenShellDoctorStatus = "ready" | "degraded" | "missing" | "unsupported";
+
+export type OpenShellDoctorResult = {
+  status: OpenShellDoctorStatus;
+  components: OpenShellComponent[];
+  actionable: string[];
+  fatal: string[];
+};
+
+export type OpenShellInstallProgress = {
+  phase: string;
+  status?: string;
+  message?: string | null;
+  percent?: number;
+  error?: string | null;
+};
+
+export type OpenShellInstallStatus = {
+  status: "idle" | "running" | "ready" | "reboot_required" | "cancelled" | "cancelling" | "failed";
+  lastEvent?: OpenShellInstallProgress | null;
+  state?: {
+    completed: string[];
+    rebootRequired: boolean;
+    lastError: string | null;
+    startedAt: number | null;
+    updatedAt: number | null;
+  };
+};
+
+export type OpenrindShellCredentialKey =
+  | "databaseUrl"
+  | "anthropicApiKey"
+  | "openrindGatewayApiKey"
+  | "elevenLabsApiKey";
+
+export type OpenrindShellCredentialStatus = {
+  databaseUrl: "set" | "unset";
+  anthropicApiKey: "set" | "unset";
+  openrindGatewayApiKey: "set" | "unset";
+  elevenLabsApiKey: "set" | "unset";
+  encryptionAvailable: boolean;
+  databaseUrl_masked?: string;
+  databaseUrl_updatedAt?: number;
+  anthropicApiKey_masked?: string;
+  anthropicApiKey_updatedAt?: number;
+  openrindGatewayApiKey_masked?: string;
+  openrindGatewayApiKey_updatedAt?: number;
+  elevenLabsApiKey_masked?: string;
+  elevenLabsApiKey_updatedAt?: number;
+};
+
+export type OpenrindShellSessionProgress = {
+  sandboxName?: string;
+  phase: string;
+  message?: string;
+};
+
+export type OpenrindShellSessionResult = {
+  sandboxName: string;
+  profile?: string;
+  existed?: boolean;
+  terminal?: { launched: string } | null;
+  terminalError?: string;
+};
+
+type ElectronBridge = NonNullable<Window["__OPENRIND_DESKTOP_ELECTRON__"]>;
+
+function getBridge(): ElectronBridge | null {
+  if (typeof window === "undefined") return null;
+  return window.__OPENRIND_DESKTOP_ELECTRON__ ?? null;
+}
+
+async function invoke<T>(command: string, ...args: unknown[]): Promise<T> {
+  const bridge = getBridge();
+  if (!bridge?.invokeDesktop) {
+    throw new Error("Electron desktop bridge is not available.");
+  }
+  return (await bridge.invokeDesktop(command, ...args)) as T;
+}
+
+const DOCTOR_POLL_INTERVAL_MS = 5_000;
+const PROGRESS_LOG_MAX = 200;
+
+export function useOpenShellState(options: { active: boolean } = { active: false }) {
+  const { active } = options;
+  const [doctor, setDoctor] = useState<OpenShellDoctorResult | null>(null);
+  const [doctorLoading, setDoctorLoading] = useState(false);
+  const [doctorError, setDoctorError] = useState<string | null>(null);
+  const [installStatus, setInstallStatus] = useState<OpenShellInstallStatus | null>(null);
+  const [progressLog, setProgressLog] = useState<OpenShellInstallProgress[]>([]);
+  const [policies, setPolicies] = useState<string[]>([]);
+  const [credentialStatus, setCredentialStatus] = useState<OpenrindShellCredentialStatus | null>(null);
+  const [sessionProgress, setSessionProgress] = useState<OpenrindShellSessionProgress[]>([]);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [actionBusy, setActionBusy] = useState(false);
+
+  const isMountedRef = useRef(true);
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, []);
+
+  const refreshDoctor = useCallback(async () => {
+    if (!isElectronRuntime()) return;
+    setDoctorLoading(true);
+    setDoctorError(null);
+    try {
+      const result = await invoke<OpenShellDoctorResult>("openshellDoctor");
+      if (isMountedRef.current) setDoctor(result);
+    } catch (err) {
+      if (isMountedRef.current) {
+        setDoctorError(err instanceof Error ? err.message : String(err));
+      }
+    } finally {
+      if (isMountedRef.current) setDoctorLoading(false);
+    }
+  }, []);
+
+  const refreshInstallStatus = useCallback(async () => {
+    if (!isElectronRuntime()) return;
+    try {
+      const status = await invoke<OpenShellInstallStatus>("openshellInstallStatus");
+      if (isMountedRef.current) setInstallStatus(status);
+    } catch (err) {
+      // Stale state is fine; surface only if it happens during a user action.
+      if (isMountedRef.current && actionBusy) {
+        setActionError(err instanceof Error ? err.message : String(err));
+      }
+    }
+  }, [actionBusy]);
+
+  const refreshPolicies = useCallback(async () => {
+    if (!isElectronRuntime()) return;
+    try {
+      const list = await invoke<string[]>("openshellListPolicies");
+      if (isMountedRef.current) setPolicies(Array.isArray(list) ? list : []);
+    } catch {
+      if (isMountedRef.current) setPolicies([]);
+    }
+  }, []);
+
+  const refreshCredentialStatus = useCallback(async () => {
+    if (!isElectronRuntime()) return;
+    try {
+      const status = await invoke<OpenrindShellCredentialStatus>("openrindCredentialStatus");
+      if (isMountedRef.current) setCredentialStatus(status);
+    } catch (err) {
+      // Failed to refresh credential status, ignored silently in UI
+    }
+  }, []);
+
+  // Listen for external credential changes (e.g., from gateway billing deep link)
+  useEffect(() => {
+    const handler = () => {
+      void refreshCredentialStatus();
+    };
+    window.addEventListener("openrind-shell-credentials-changed", handler);
+    return () => window.removeEventListener("openrind-shell-credentials-changed", handler);
+  }, [refreshCredentialStatus]);
+
+  // Subscribe to streaming install progress whenever the bridge exposes
+  // the openshell namespace (post-Phase-5 builds). One subscription per
+  // mount; unsubscribe on unmount.
+  useEffect(() => {
+    if (!isElectronRuntime()) return;
+    const bridge = getBridge();
+    const sub = bridge?.openshell?.onInstallProgress;
+    if (!sub) return;
+    const unsubscribe = sub((evt: OpenShellInstallProgress) => {
+      if (!isMountedRef.current) return;
+      setProgressLog((prev) => {
+        const next = prev.concat(evt);
+        return next.length > PROGRESS_LOG_MAX ? next.slice(-PROGRESS_LOG_MAX) : next;
+      });
+      // A "done" or "error" terminal event triggers a status refresh so
+      // the snapshot is consistent with what was streamed.
+      if (evt.phase === "done" || evt.phase === "error") {
+        void refreshInstallStatus();
+        void refreshDoctor();
+      }
+    });
+    return () => unsubscribe();
+  }, [refreshInstallStatus, refreshDoctor]);
+
+  // Subscribe to Openrind Shell session progress (pull + create + terminal-launch).
+  useEffect(() => {
+    if (!isElectronRuntime()) return;
+    const bridge = getBridge();
+    const sub = bridge?.openrindShell?.onSessionProgress;
+    if (!sub) return;
+    const unsubscribe = sub((evt: OpenrindShellSessionProgress) => {
+      if (!isMountedRef.current) return;
+      setSessionProgress((prev) => {
+        const next = prev.concat(evt);
+        return next.length > PROGRESS_LOG_MAX ? next.slice(-PROGRESS_LOG_MAX) : next;
+      });
+    });
+    return () => unsubscribe();
+  }, []);
+
+  // Credential status backs the Sandbox credentials panel on the Environment
+  // tab, which renders even when the Sandbox tab is not `active`. Fetch it once
+  // on mount (a cheap, tab-independent read of the on-disk credential blob) so a
+  // fresh restart shows the persisted "set" state immediately. Previously this
+  // was gated behind `active` (sandbox tab only), so opening Settings on the
+  // Environment tab showed every credential as "unset" until the user changed
+  // one — whose set/clear IPC response then filled in the whole status.
+  useEffect(() => {
+    if (!isElectronRuntime()) return;
+    void refreshCredentialStatus();
+  }, [refreshCredentialStatus]);
+
+  // Poll doctor + install status on a steady cadence while the user is
+  // looking at the sandbox tab. Outside the tab we don't waste cycles.
+  useEffect(() => {
+    if (!active || !isElectronRuntime()) return;
+    void refreshDoctor();
+    void refreshInstallStatus();
+    void refreshPolicies();
+    void refreshCredentialStatus();
+    const id = setInterval(() => {
+      void refreshDoctor();
+      void refreshInstallStatus();
+    }, DOCTOR_POLL_INTERVAL_MS);
+    return () => clearInterval(id);
+  }, [active, refreshDoctor, refreshInstallStatus, refreshPolicies, refreshCredentialStatus]);
+
+  const startInstall = useCallback(async () => {
+    setActionBusy(true);
+    setActionError(null);
+    setProgressLog([]);
+    try {
+      await invoke<OpenShellInstallStatus>("openshellInstallStart");
+      await refreshInstallStatus();
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setActionBusy(false);
+    }
+  }, [refreshInstallStatus]);
+
+  const cancelInstall = useCallback(async () => {
+    setActionError(null);
+    try {
+      await invoke("openshellInstallCancel");
+      await refreshInstallStatus();
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : String(err));
+    }
+  }, [refreshInstallStatus]);
+
+  const restartGateway = useCallback(async () => {
+    setActionBusy(true);
+    setActionError(null);
+    try {
+      await invoke("openshellGatewayRestart");
+      await refreshDoctor();
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setActionBusy(false);
+    }
+  }, [refreshDoctor]);
+
+  const openPoliciesFolder = useCallback(async () => {
+    setActionError(null);
+    try {
+      await invoke("openshellOpenPoliciesFolder");
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : String(err));
+    }
+  }, []);
+
+  const setCredential = useCallback(
+    async (key: OpenrindShellCredentialKey, value: string) => {
+      setActionBusy(true);
+      setActionError(null);
+      try {
+        const status = await invoke<OpenrindShellCredentialStatus>("openrindSetCredential", {
+          key,
+          value,
+        });
+        if (isMountedRef.current) setCredentialStatus(status);
+      } catch (err) {
+        setActionError(err instanceof Error ? err.message : String(err));
+        throw err;
+      } finally {
+        setActionBusy(false);
+      }
+    },
+    [],
+  );
+
+  const clearCredential = useCallback(
+    async (key: OpenrindShellCredentialKey) => {
+      setActionBusy(true);
+      setActionError(null);
+      try {
+        const status = await invoke<OpenrindShellCredentialStatus>("openrindClearCredential", key);
+        if (isMountedRef.current) setCredentialStatus(status);
+      } catch (err) {
+        setActionError(err instanceof Error ? err.message : String(err));
+        throw err;
+      } finally {
+        setActionBusy(false);
+      }
+    },
+    [],
+  );
+
+  const startOpenrindShellSession = useCallback(
+    async (
+      workspaceId: string,
+      profile: "openrind-shell-claude" | "openrind-shell-openclaw",
+    ): Promise<OpenrindShellSessionResult> => {
+      setActionBusy(true);
+      setActionError(null);
+      setSessionProgress([]);
+      try {
+        const result = await invoke<OpenrindShellSessionResult>("openrindStartSession", {
+          workspaceId,
+          profile,
+        });
+        return result;
+      } catch (err) {
+        setActionError(err instanceof Error ? err.message : String(err));
+        throw err;
+      } finally {
+        setActionBusy(false);
+      }
+    },
+    [],
+  );
+
+  const deleteOpenrindShellSandbox = useCallback(async (sandboxName: string) => {
+    setActionBusy(true);
+    setActionError(null);
+    try {
+      await invoke("openrindDeleteSandbox", sandboxName);
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : String(err));
+      throw err;
+    } finally {
+      setActionBusy(false);
+    }
+  }, []);
+
+  const testDatabaseUrl = useCallback(async () => {
+    setActionBusy(true);
+    setActionError(null);
+    try {
+      const result = await invoke<{ status: string; probedReachable?: boolean }>(
+        "openrindTestDatabase",
+      );
+      return result;
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : String(err));
+      throw err;
+    } finally {
+      setActionBusy(false);
+    }
+  }, []);
+
+  const resetDistro = useCallback(async () => {
+    setActionBusy(true);
+    setActionError(null);
+    try {
+      const result = await invoke<{ status: string }>("openshellResetDistro");
+      if (result?.status === "reset") {
+        // Force a fresh doctor + installer-state read so the UI snaps to
+        // "Install OpenShell" instead of showing a green checklist for a
+        // distro that no longer exists.
+        await refreshDoctor();
+        await refreshInstallStatus();
+        setProgressLog([]);
+      }
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setActionBusy(false);
+    }
+  }, [refreshDoctor, refreshInstallStatus]);
+
+  return {
+    doctor,
+    doctorLoading,
+    doctorError,
+    installStatus,
+    progressLog,
+    policies,
+    actionBusy,
+    actionError,
+    credentialStatus,
+    sessionProgress,
+    startInstall,
+    cancelInstall,
+    restartGateway,
+    resetDistro,
+    openPoliciesFolder,
+    setCredential,
+    clearCredential,
+    testDatabaseUrl,
+    startOpenrindShellSession,
+    deleteOpenrindShellSandbox,
+    refreshDoctor,
+    refreshInstallStatus,
+    refreshPolicies,
+    refreshCredentialStatus,
+  };
+}

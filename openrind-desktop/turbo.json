@@ -1,0 +1,34 @@
+{
+  "$schema": "https://turbo.build/schema.json",
+  "globalEnv": [
+    "OPENRIND_DESKTOP_DEV_MODE",
+    "DATABASE_URL",
+    "DEN_DB_ENCRYPTION_KEY",
+    "BETTER_AUTH_SECRET",
+    "BETTER_AUTH_URL",
+    "DEN_BETTER_AUTH_TRUSTED_ORIGINS",
+    "CORS_ORIGINS",
+    "DEN_API_PORT",
+    "DEN_CONTROLLER_PORT",
+    "DEN_WORKER_PROXY_PORT",
+    "DEN_WEB_PORT",
+    "DEN_API_BASE",
+    "DEN_AUTH_ORIGIN",
+    "DEN_AUTH_FALLBACK_BASE",
+    "PROVISIONER_MODE"
+  ],
+  "tasks": {
+    "dev": {
+      "cache": false,
+      "persistent": true
+    },
+    "dev:local": {
+      "cache": false,
+      "persistent": true
+    },
+    "build": {
+      "dependsOn": ["^build"],
+      "outputs": ["dist/**", ".next/**"]
+    }
+  }
+}

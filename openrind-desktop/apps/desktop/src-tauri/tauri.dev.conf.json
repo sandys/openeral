@@ -1,0 +1,36 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Openrind Desktop Dev",
+  "identifier": "com.differentai.openrind-desktop.dev",
+  "bundle": {
+    "icon": [
+      "icons/dev/32x32.png",
+      "icons/dev/128x128.png",
+      "icons/dev/128x128@2x.png",
+      "icons/icon-dev.icns"
+    ],
+    "macOS": {
+      "bundleName": "Openrind Desktop - Dev",
+      "infoPlist": "./Info.dev.plist"
+    }
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Openrind Desktop - Dev",
+        "width": 1180,
+        "height": 820,
+        "resizable": true
+      }
+    ]
+  },
+  "plugins": {
+    "deep-link": {
+      "desktop": {
+        "schemes": [
+          "openrind-desktop-dev"
+        ]
+      }
+    }
+  }
+}
