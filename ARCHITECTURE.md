@@ -4,8 +4,9 @@
 
 Openrind Shell has two intentionally separate sandbox runtimes:
 
-- The primary image uses one OpenShell-supervised FUSE mount backed by external
-  PostgreSQL. It persists all of `/sandbox/work` and has no file watcher.
+- The primary image uses an OpenShell-supervised FUSE mount backed by external
+  PostgreSQL for `/sandbox/work`, plus a per-workspace Docker named volume for
+  Claude's high-churn home at `/sandbox/claude-home`. Neither path uses a file watcher.
 - The compatibility image uses the existing real filesystem plus prefix-scoped
   replication. It supports optional PostgreSQL and PGlite and persists only Claude
   and Openrind Shell state.
@@ -39,7 +40,7 @@ flowchart TB
     init["openrind-shell-init one-shot"]
     database["Migrate V1-V8, bridge renamed rows,<br/>prepare volume and one-time legacy import"]
     verify["Verify writer lease in PostgreSQL<br/>and fsync/read/unlink through mount"]
-    configure["Seed Claude skills/settings,<br/>configure Openrind Gateway, remove upload"]
+    configure["Prepare user-owned Claude home,<br/>configure Openrind Gateway, remove upload"]
     marker["Write init marker and exit 0"]
   end
 
@@ -76,10 +77,15 @@ dial PostgreSQL directly: a valid OpenShell HTTP proxy environment is mandatory.
 PostgreSQL endpoint uses `tls: skip` at the OpenShell route so the proxy relays the
 non-HTTP PostgreSQL TLS session without terminating it.
 
-`HOME` and the default interactive cwd are `/sandbox/work`: the sandbox user's login
-home stays `/sandbox`, and initialization installs a hook in `/sandbox/.bashrc` that
-sources the session environment (`HOME=/sandbox/work`) and enters the mount for
-interactive shells; the `claude` wrapper applies the same environment itself.
+The default interactive cwd is `/sandbox/work`, while the sandbox user's login home
+stays `/sandbox`. Initialization installs a hook in `/sandbox/.bashrc` that enters the
+FUSE mount. The `claude` wrapper alone sets `HOME=/sandbox/claude-home`, a persistent
+per-workspace Docker named volume, so Claude's high-churn settings and session state do
+not add remote filesystem latency to terminal startup and input. Project discovery still
+targets `/sandbox/work`; the FUSE daemon therefore keeps a generation-fenced metadata
+and directory cache. Its first lookup loads one authoritative directory snapshot, and
+subsequent hits and misses stay local until a committed namespace mutation invalidates
+the cache.
 `/sandbox` remains the OCI bootstrap working directory because initialization and
 supervisor startup must work before the database-backed mount is writable.
 

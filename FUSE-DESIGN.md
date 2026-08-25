@@ -34,17 +34,17 @@ changes them:
 | Decision | Selected behavior |
 |---|---|
 | Product default | FUSE replaces scoped sync in the primary Openrind Shell sandbox image. |
-| Persistent scope | Claude home and project workspace share one mount at `/sandbox/work`. |
-| Claude environment | `HOME=/sandbox/work`; default cwd `/sandbox/work`. |
+| Persistent scope | Project workspace uses PostgreSQL FUSE at `/sandbox/work`; Claude home uses a per-workspace Docker named volume at `/sandbox/claude-home`. |
+| Claude environment | `HOME=/sandbox/claude-home`; default cwd `/sandbox/work`. |
 | Backing store | External PostgreSQL is mandatory. PGlite is unsupported in this image. |
 | Write contract | Ordinary writes are buffered under strict limits; `fsync`/`fdatasync` are general durability barriers; dirty-source rename and close after an existing-file `O_TRUNC` rewrite are narrow ordering barriers. |
 | Driver | Docker only for v1. Podman, Kubernetes, and MicroVM reject the request. |
-| OpenShell integration | First-class public resource requirement and static policy, not a private driver-config escape hatch. |
+| OpenShell integration | First-class FUSE resource requirement and static policy, plus the public Docker named-volume driver configuration for Claude home. |
 | Mount owner | OpenShell supervisor mounts; Claude never receives mount capability. |
 | Daemon security | Spawn after supervisor hardening via the normal unprivileged child path. |
 | Crash recovery | FUSE daemon exit terminates the supervisor/container; Docker reconstructs the mount namespace. No in-place remount. |
 | Migration owner | TypeScript/Openrind Shell initialization owns all PostgreSQL schema migration. The Rust daemon never migrates. |
-| Persistence authority | FUSE is the only sandbox-side persistence authority. The watcher is removed from this runtime. |
+| Persistence authority | Each path has one authority: FUSE for `/sandbox/work`, Docker volume for `/sandbox/claude-home`. The watcher is removed from this runtime. |
 | Historical Rust code | Evidence and test cases only; do not revive it wholesale. |
 
 These are explicit product decisions, not accidental consequences of the technical
@@ -881,6 +881,11 @@ The general contract is durability on fsync, not commit on every write:
   writes may remain dirty;
 - implement relatime-style atime updates and coalesce them with background metadata
   flushes; do not issue a PostgreSQL transaction for every read;
+- keep a generation-fenced, per-mount read cache for inode metadata and authoritative
+  directory snapshots. The first lookup in a directory may populate its full listing so
+  both present and absent child probes remain local. Every committed namespace mutation
+  increments the cache generation; a query started under an older generation may finish
+  its in-flight request but must not repopulate stale cache state;
 - namespace and metadata mutations (`create`, `mkdir`, `rename`, `unlink`, `rmdir`,
   symlink, chmod/chown/timestamp changes, truncate) commit before returning success;
 - truncate serializes with the shared inode state so dirty chunks beyond the new EOF
@@ -978,8 +983,8 @@ The trailing command remains one-shot and idempotent:
 8. independently query PostgreSQL and require the reported lease owner/epoch to match
    the current `fs_mount_epochs` row;
 9. run the FUSE readiness probe described below;
-10. seed bundled skills and patch current Claude/Openrind Gateway settings through
-   `/sandbox/work`, never outside the mount;
+10. verify the separate user-owned Claude home volume and configure Openrind Gateway
+    without creating Claude onboarding, trust, settings, or skill defaults;
 11. call `openrind-shell-fused flush-all` and require success;
 12. atomically write `init.done` with the same identity fields plus completion time;
 13. delete uploaded secret files;
@@ -994,15 +999,15 @@ check detects a stale or unrelated management socket. Neither check turns same-U
 state into an authorization boundary.
 
 Before changing datasource identity, remove both markers. If migration/import fails,
-never publish `database.ready`. If seeding or settings patching fails after database
-readiness, leave `database.ready`, remove `init.done`, print a concrete diagnostic,
-and exit nonzero so `--ensure` can resume. Do not fall back to PGlite or an empty local
-workspace.
+never publish `database.ready`. If local-home or gateway configuration fails after
+database readiness, leave `database.ready`, remove `init.done`, print a concrete
+diagnostic, and exit nonzero so `--ensure` can resume. Do not fall back to PGlite or an
+empty local project workspace.
 
 If a failure occurs after `database.ready` but before `init.done`, the daemon remains
-available and the next `openrind-shell init --ensure` resumes the idempotent seed/settings
-steps. Publishing `init.done` is the product-ready barrier. The supervisor's FUSE
-readiness means only that the kernel session is served.
+available and the next `openrind-shell init --ensure` resumes the idempotent
+configuration steps. Publishing `init.done` is the product-ready barrier. The
+supervisor's FUSE readiness means only that the kernel session is served.
 
 ### 10.3 Legacy data import
 
@@ -1020,15 +1025,14 @@ On first init only:
 - perform import transactionally or in restartable batches with a completion marker;
 - never delete legacy rows during the first release.
 
-Subsequent init runs seed only missing product-owned defaults and never overwrite user
-content.
+Subsequent init runs do not seed Claude-owned defaults or overwrite user content.
 
 ### 10.4 Claude wrapper
 
 The primary wrapper becomes simpler:
 
 ```text
-export HOME=/sandbox/work
+export HOME=/sandbox/claude-home
 cd /sandbox/work when invoked from /sandbox or /
 run openrind-shell init --ensure; require matching init.done
 verify openrind-shell-fused health is writable
@@ -1491,8 +1495,8 @@ The design is implemented only when all of the following are true:
 
 - stock behavior is unchanged when FUSE is not requested;
 - unpatched/disabled/unsupported configurations fail clearly;
-- `/sandbox` remains the bootstrap workspace root and `/sandbox/work` becomes Claude's
-  home/cwd only after successful init;
+- `/sandbox` remains the bootstrap workspace root, `/sandbox/work` becomes Claude's
+  cwd after successful init, and `/sandbox/claude-home` is Claude's home;
 - Claude cannot mount, unmount, or bypass OpenShell database egress policy;
 - the daemon receives the intended inherited fd and full child sandboxing;
 - same-UID marker/socket replacement cannot satisfy supervisor startup readiness or
@@ -1511,8 +1515,9 @@ The design is implemented only when all of the following are true:
 - ordinary-write loss outside any completed durability barrier matches the documented
   contract;
 - no legacy watcher participates in primary persistence;
-- real Claude Code runs with `HOME=/sandbox/work`, exits, restarts, continues, and
-  survives sandbox delete/recreate from PostgreSQL alone;
+- real Claude Code runs with `HOME=/sandbox/claude-home`, exits, restarts, continues,
+  and survives sandbox container replacement on the same Docker daemon; project files
+  independently survive through PostgreSQL FUSE;
 - all OpenShell and Openrind Shell unit, integration, lint, and E2E suites are green;
 - the vendored source pin, patch footprint, generated artifacts, and upstream/fallback
   status are recorded reproducibly;

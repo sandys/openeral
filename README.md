@@ -1,15 +1,16 @@
 # Openrind Shell
 
 Run Claude Code in an isolated OpenShell sandbox with a PostgreSQL-backed native
-filesystem. In the primary runtime, Claude's home and project files live on one FUSE
-mount at `/sandbox/work`; OpenShell owns the mount and keeps PostgreSQL traffic behind
-its default-deny network policy.
+project filesystem. In the primary runtime, project files live on the FUSE mount at
+`/sandbox/work`, while Claude's high-churn home state lives on a per-workspace Docker
+volume at `/sandbox/claude-home`. OpenShell owns both mounts and keeps PostgreSQL
+traffic behind its default-deny network policy.
 
 ## Runtime Status
 
 | Runtime | Persistence | OpenShell requirement | Status |
 |---|---|---|---|
-| Primary FUSE image (`Dockerfile.openrind-shell`) | All of `/sandbox/work` | Vendored Docker-driver build with `--fuse` | Implemented; source build and `:fuse` publication target |
+| Primary FUSE image (`Dockerfile.openrind-shell`) | Project files in PostgreSQL FUSE; Claude state in a local named volume | Vendored Docker-driver build with `--fuse` and driver-config named-volume mounts | Implemented; source build and `:fuse` publication target |
 | Compatibility image (`Dockerfile.openrind-shell-compat`) | `.claude`, `.claude.json`, `.openrind-shell`, and legacy `.openeral` | Stock current OpenShell | GHCR `:just-bash` target; registry pull access currently required |
 
 The FUSE capability is a default-off OpenShell patch pinned under
@@ -47,8 +48,9 @@ flowchart LR
     supervisor["openshell-sandbox<br/>PID 1"]
     workload["Managed workload<br/>sleep infinity"]
     ssh["SSH sessions<br/>init, shell, Claude"]
-    claude["Claude Code<br/>HOME=/sandbox/work"]
+    claude["Claude Code<br/>HOME=/sandbox/claude-home<br/>cwd=/sandbox/work"]
     vfs["Linux VFS<br/>/sandbox/work"]
+    claudehome["Docker named volume<br/>/sandbox/claude-home"]
     fused["openrind-shell-fused<br/>critical sandbox child"]
     runtime["/var/lib/openrind-shell/runtime<br/>same-UID coordination"]
     proxy["OpenShell egress proxy<br/>binary-attributed policy"]
@@ -59,7 +61,9 @@ flowchart LR
   user --> cli --> gateway --> driver --> supervisor
   supervisor --> workload
   supervisor --> ssh
-  ssh --> claude --> vfs
+  ssh --> claude
+  claude -->|"project I/O"| vfs
+  claude -->|"settings, sessions, cache"| claudehome
   supervisor -->|"open /dev/fuse, mount, pass FDs"| fused
   vfs -->|"FUSE requests"| fused
   fused <-->|"health socket, DB readiness, init marker"| runtime
@@ -229,12 +233,25 @@ exit         # disconnect without deleting the sandbox
 Reconnect later with the same `sandbox connect` command. The OpenShell supervisor and
 FUSE daemon remain sandbox services; they are not tied to the SSH session. Interactive
 shells start with the sandbox user's login home `/sandbox`, then a hook installed by
-initialization sources the session environment (`HOME=/sandbox/work`) and enters the
-mount; the `claude` wrapper applies the same environment on its own.
+initialization enters `/sandbox/work`. The `claude` wrapper keeps that directory as the
+cwd but sets `HOME=/sandbox/claude-home` for Claude only.
 
 ### Persistence And Durability
 
-- `HOME=/sandbox/work`, and all files below that mount are stored in PostgreSQL.
+- Project files below `/sandbox/work` are stored in PostgreSQL.
+- Claude settings, onboarding/trust choices, conversation metadata, and caches use the
+  per-workspace Docker volume mounted at `/sandbox/claude-home`. The volume survives
+  sandbox container replacement on the same Openrind Desktop Docker daemon and is not
+  deleted with the OpenShell sandbox.
+- The Claude home volume is device-local: it is not restored from PostgreSQL on another
+  machine or after the Openrind Desktop WSL/Docker data is reset. Project data remains
+  portable through its stable `OPENRIND_SHELL_WORKSPACE_ID`.
+- No watcher or second writer copies data between these stores; each path has one
+  persistence authority.
+- The lease-owning FUSE daemon caches inode metadata and complete directory snapshots
+  per mount. Claude's repeated project/config probes, including absent-name lookups, do
+  not repeat remote PostgreSQL queries; every committed namespace mutation invalidates
+  the cache before later requests can observe it.
 - `fsync`, `fdatasync`, `O_SYNC`, and `O_DSYNC` acknowledge only after commit.
 - Ordinary writes use a bounded write-back cache and may be lost before a durability
   barrier. Claude's clean-exit wrapper calls `flush-all`.
@@ -265,8 +282,8 @@ Create or update a generic `openrind-gateway` provider with
 Initialization calls the presign endpoint inside the sandbox. OpenShell resolves the
 provider placeholder only in that constrained HTTPS request; raw Anthropic and gateway
 keys are not written to the upload or session environment. The old `stringcost`
-provider and `STRINGCOST_API_KEY` remain migration aliases. When the gateway is active,
-unset Claude model defaults use `openrouter/free`; explicit user model settings are
+provider and `STRINGCOST_API_KEY` remain migration aliases. The gateway does not rewrite
+Claude's model selection; native Anthropic model defaults and explicit user settings are
 preserved.
 
 ## Compatibility Runtime
