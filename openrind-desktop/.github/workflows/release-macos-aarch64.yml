@@ -198,31 +198,35 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.resolve.outputs.release_tag }}
+          RELEASE_NAME: ${{ steps.resolve.outputs.release_name }}
+          RELEASE_BODY: ${{ steps.resolve.outputs.release_body }}
+          RELEASE_DRAFT: ${{ steps.resolve.outputs.draft }}
+          RELEASE_PRERELEASE: ${{ steps.resolve.outputs.prerelease }}
         run: |
           set -euo pipefail
 
           BODY_FILE="$RUNNER_TEMP/release_body.md"
-          printf '%s\n' "${{ steps.resolve.outputs.release_body }}" > "$BODY_FILE"
+          printf '%s\n' "$RELEASE_BODY" > "$BODY_FILE"
 
-          if gh release view "${{ steps.resolve.outputs.release_tag }}" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            echo "Release ${{ steps.resolve.outputs.release_tag }} already exists; skipping create."
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release $RELEASE_TAG already exists; skipping create."
             exit 0
           fi
 
-          DRAFT_FLAG=""
-          PRERELEASE_FLAG=""
-          if [ "${{ steps.resolve.outputs.draft }}" = "true" ]; then
-            DRAFT_FLAG="--draft"
+          RELEASE_FLAGS=()
+          if [ "$RELEASE_DRAFT" = "true" ]; then
+            RELEASE_FLAGS+=(--draft)
           fi
-          if [ "${{ steps.resolve.outputs.prerelease }}" = "true" ]; then
-            PRERELEASE_FLAG="--prerelease"
+          if [ "$RELEASE_PRERELEASE" = "true" ]; then
+            RELEASE_FLAGS+=(--prerelease)
           fi
 
-          gh release create "${{ steps.resolve.outputs.release_tag }}" \
+          gh release create "$RELEASE_TAG" \
             --repo "$GITHUB_REPOSITORY" \
-            --title "${{ steps.resolve.outputs.release_name }}" \
+            --title "$RELEASE_NAME" \
             --notes-file "$BODY_FILE" \
-            $DRAFT_FLAG $PRERELEASE_FLAG
+            "${RELEASE_FLAGS[@]}"
 
   verify-release:
     name: Verify Release Versions
