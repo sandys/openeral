@@ -15,7 +15,7 @@ import { startHealthServer, type HealthSnapshot } from "./health.js";
 import { type InboundMessagePart, type MessageDeliveryResult, type OutboundMessagePart, normalizeOutboundParts, summarizeInboundPartsForPrompt, summarizeInboundPartsForReporter, textFromInboundParts } from "./media.js";
 import { MediaStore } from "./media-store.js";
 import { buildPermissionRules, createClient } from "./opencode.js";
-import { isWithinWorkspaceRootPath, normalizeScopedDirectoryPath } from "./path-scope.js";
+import { normalizeScopedDirectoryPath, resolveWorkspaceScopedDirectoryPath } from "./path-scope.js";
 import { chunkText, formatInputSummary, truncateText } from "./text.js";
 import { createSlackAdapter } from "./slack.js";
 import { createTelegramAdapter, isTelegramPeerId } from "./telegram.js";
@@ -448,25 +448,22 @@ export async function startBridge(config: Config, logger: Logger, reporter?: Bri
 
   const workspaceRootNormalized = normalizeDirectory(workspaceRoot);
 
-  const isWithinWorkspaceRoot = (candidate: string) => {
-    return isWithinWorkspaceRootPath({
-      workspaceRoot,
-      candidate,
-      platform: process.platform,
-    });
-  };
-
   const resolveScopedDirectory = (input: string): { ok: true; directory: string } | { ok: false; error: string } => {
     const trimmed = input.trim();
     if (!trimmed) return { ok: false, error: "Directory is required." };
     const resolved = resolve(isAbsolute(trimmed) ? trimmed : join(workspaceRoot, trimmed));
-    if (!isWithinWorkspaceRoot(resolved)) {
+    const canonicalDirectory = resolveWorkspaceScopedDirectoryPath({
+      workspaceRoot,
+      candidate: resolved,
+      platform: process.platform,
+    });
+    if (!canonicalDirectory) {
       return {
         ok: false,
         error: `Directory must stay within workspace root: ${workspaceRootNormalized}`,
       };
     }
-    return { ok: true, directory: normalizeDirectory(resolved) };
+    return { ok: true, directory: normalizeDirectory(canonicalDirectory) };
   };
 
   const formatModelLabel = (model?: ModelRef) =>
