@@ -1,9 +1,21 @@
+import { isIP } from "node:net";
+
 import { checkBotId } from "botid/server";
 
 type FixedWindowEntry = {
   count: number;
   resetAt: number;
 };
+
+export type FixedWindowRateLimitState = {
+  entries: Map<string, FixedWindowEntry>;
+  maxEntries: number;
+  nextSweepAt: number;
+  sweepIntervalMs: number;
+};
+
+const RATE_LIMIT_MAX_ENTRIES = 10_000;
+const RATE_LIMIT_SWEEP_INTERVAL_MS = 60_000;
 
 const defaultAllowedOrigins = [
   "https://app.openrind-desktoplabs.com",
@@ -20,22 +32,37 @@ const defaultAllowedOrigins = [
   "http://127.0.0.1:3006",
 ];
 
-const store = globalThis as typeof globalThis & {
-  __openrindDesktopShareRateLimitStore?: Map<string, FixedWindowEntry>;
-};
-
-const rateLimitStore = store.__openrindDesktopShareRateLimitStore ?? new Map<string, FixedWindowEntry>();
-store.__openrindDesktopShareRateLimitStore = rateLimitStore;
-
 function now() {
   return Date.now();
 }
 
 function readClientIp(request: Request) {
-  const forwarded = request.headers.get("x-forwarded-for")?.split(",")[0]?.trim();
-  const realIp = request.headers.get("x-real-ip")?.trim();
-  return forwarded || realIp || "unknown";
+  if (process.env.VERCEL !== "1") {
+    return "unknown";
+  }
+
+  const forwarded = request.headers.get("x-vercel-forwarded-for")?.trim() ?? "";
+  return isIP(forwarded) !== 0 ? forwarded.toLowerCase() : "unknown";
 }
+
+export function createFixedWindowRateLimitState(options: {
+  maxEntries?: number;
+  sweepIntervalMs?: number;
+} = {}): FixedWindowRateLimitState {
+  return {
+    entries: new Map<string, FixedWindowEntry>(),
+    maxEntries: Math.max(1, options.maxEntries ?? RATE_LIMIT_MAX_ENTRIES),
+    nextSweepAt: 0,
+    sweepIntervalMs: Math.max(1, options.sweepIntervalMs ?? RATE_LIMIT_SWEEP_INTERVAL_MS),
+  };
+}
+
+const store = globalThis as typeof globalThis & {
+  __openrindDesktopShareRateLimitState?: FixedWindowRateLimitState;
+};
+
+const rateLimitState = store.__openrindDesktopShareRateLimitState ?? createFixedWindowRateLimitState();
+store.__openrindDesktopShareRateLimitState = rateLimitState;
 
 function getRequestOrigin(request: Request) {
   try {
@@ -77,15 +104,41 @@ export function validateTrustedOrigin(request: Request) {
   return { ok: true as const, origin };
 }
 
-export function applyFixedWindowRateLimit(input: {
-  key: string;
-  windowMs: number;
-  max: number;
-}) {
-  const currentTime = now();
-  const current = rateLimitStore.get(input.key);
+export function applyFixedWindowRateLimit(
+  input: {
+    key: string;
+    windowMs: number;
+    max: number;
+  },
+  state = rateLimitState,
+  currentTime = now(),
+) {
+  if (currentTime >= state.nextSweepAt) {
+    for (const [key, entry] of state.entries) {
+      if (entry.resetAt <= currentTime) {
+        state.entries.delete(key);
+      }
+    }
+    state.nextSweepAt = currentTime + state.sweepIntervalMs;
+  }
+
+  const current = state.entries.get(input.key);
   if (!current || current.resetAt <= currentTime) {
-    rateLimitStore.set(input.key, { count: 1, resetAt: currentTime + input.windowMs });
+    if (current) {
+      state.entries.delete(input.key);
+    }
+    if (state.entries.size >= state.maxEntries) {
+      let earliestResetAt = Number.POSITIVE_INFINITY;
+      for (const entry of state.entries.values()) {
+        earliestResetAt = Math.min(earliestResetAt, entry.resetAt);
+      }
+      return {
+        ok: false as const,
+        retryAfterSeconds: Math.max(1, Math.ceil((earliestResetAt - currentTime) / 1000)),
+      };
+    }
+
+    state.entries.set(input.key, { count: 1, resetAt: currentTime + input.windowMs });
     return { ok: true as const, retryAfterSeconds: 0 };
   }
 
@@ -97,16 +150,24 @@ export function applyFixedWindowRateLimit(input: {
   }
 
   current.count += 1;
-  rateLimitStore.set(input.key, current);
+  state.entries.set(input.key, current);
   return { ok: true as const, retryAfterSeconds: 0 };
 }
 
-export function rateLimitPublishRequest(request: Request) {
-  return applyFixedWindowRateLimit({
-    key: `publish:${readClientIp(request)}`,
-    windowMs: 60_000,
-    max: 20,
-  });
+export function rateLimitPublishRequest(
+  request: Request,
+  state = rateLimitState,
+  currentTime = now(),
+) {
+  return applyFixedWindowRateLimit(
+    {
+      key: `publish:${readClientIp(request)}`,
+      windowMs: 60_000,
+      max: 20,
+    },
+    state,
+    currentTime,
+  );
 }
 
 type BotIdChecker = () => Promise<{ isBot: boolean }>;
