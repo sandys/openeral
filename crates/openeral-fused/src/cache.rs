@@ -116,8 +116,7 @@ impl MetadataCache {
                 (generation, entry.node.node_id),
             );
         }
-        self.directories
-            .insert(parent_id, (generation, entries));
+        self.directories.insert(parent_id, (generation, entries));
     }
 
     /// Keep cached attributes coherent after an in-place mutation. Namespace

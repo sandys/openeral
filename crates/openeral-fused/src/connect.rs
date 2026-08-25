@@ -14,8 +14,7 @@ use url::Url;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_CONNECT_HEADERS: usize = 16 * 1024;
 const SUPABASE_POOLER_SUFFIX: &str = ".pooler.supabase.com";
-const SUPABASE_ROOT_2021_CA_PATH: &str =
-    "/opt/openrind-shell/certs/supabase-root-2021-ca.pem";
+const SUPABASE_ROOT_2021_CA_PATH: &str = "/opt/openrind-shell/certs/supabase-root-2021-ca.pem";
 
 pub struct ConnectedDatabase {
     pub client: Client,
@@ -82,12 +81,14 @@ fn tls_connector(host: &str) -> Result<MakeRustlsConnect> {
     let native_roots = rustls_native_certs::load_native_certs();
     let mut roots = rustls::RootCertStore::empty();
     for certificate in native_roots.certs {
-        roots
-            .add(certificate)
-            .map_err(|error| Error::Internal(format!("could not add a native TLS root: {error}")))?;
+        roots.add(certificate).map_err(|error| {
+            Error::Internal(format!("could not add a native TLS root: {error}"))
+        })?;
     }
     if roots.is_empty() {
-        return Err(Error::Internal("could not load any native TLS roots".into()));
+        return Err(Error::Internal(
+            "could not load any native TLS roots".into(),
+        ));
     }
     if !native_roots.errors.is_empty() {
         tracing::warn!(

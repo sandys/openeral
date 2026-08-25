@@ -1,6 +1,5 @@
 use crate::cache::{
-    CachedLookup, DirtyCache, InodeState, MetadataCache, MAX_DIRTY_GLOBAL,
-    MAX_DIRTY_PER_INODE,
+    CachedLookup, DirtyCache, InodeState, MetadataCache, MAX_DIRTY_GLOBAL, MAX_DIRTY_PER_INODE,
 };
 use crate::error::{Error, Result};
 use crate::model::{now_ns, ns_to_system_time, Node, NodeKind, BLOCK_SIZE};
@@ -203,11 +202,8 @@ impl FilesystemCore {
         match store.flush_snapshot(&snapshot).await {
             Ok(()) => {
                 state.committed(&snapshot);
-                self.metadata.patch_file_state(
-                    snapshot.node_id,
-                    snapshot.size,
-                    snapshot.mtime_ns,
-                );
+                self.metadata
+                    .patch_file_state(snapshot.node_id, snapshot.size, snapshot.mtime_ns);
                 Ok(())
             }
             Err(error) => {
