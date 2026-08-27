@@ -181,6 +181,7 @@ export function CreateSandboxModal(props: CreateSandboxModalProps) {
                 onChange={(e) => setProfile(e.target.value as SandboxProfile)}
               >
                 <option value="openrind-shell-claude">{t("sandbox.agent_claude")}</option>
+                <option value="openrind-shell-openclaw">{t("sandbox.agent_openclaw")}</option>
               </select>
             </div>
           </div>

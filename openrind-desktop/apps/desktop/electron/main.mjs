@@ -657,12 +657,12 @@ async function buildOpenrindShellPtyEnv(cols, rows) {
 /**
  * Write the per-connect "which agent conversation to launch" marker into the
  * sandbox before a FRESH PTY connect, so the .bashrc launch block binds the
- * auto-launched Claude Code process to the Openrind Desktop session the user
+ * auto-launched agent process to the Openrind Desktop session the user
  * selected. Marker failure is fatal: connecting without it would open a plain
  * shell and recreate the misleading blank-terminal failure.
  *
  * @param {string} sandboxName
- * @param {string} profile  "openrind-shell-claude"
+ * @param {string} profile  "openrind-shell-claude" | "openrind-shell-openclaw"
  * @param {string | null} agentSessionId  Openrind Desktop session id, or null
  */
 async function writeOpenrindShellSessionMarker(sandboxName, profile, agentSessionId) {
@@ -2316,7 +2316,7 @@ async function handleDesktopInvoke(event, command, ...args) {
       const workspaceId = String(input.workspaceId ?? "").trim();
       const profile = String(input.profile ?? "").trim();
       if (!workspaceId) throw new Error("workspaceId is required");
-      if (profile !== "openrind-shell-claude") {
+      if (!["openrind-shell-claude", "openrind-shell-openclaw"].includes(profile)) {
         throw new Error(`Unsupported Openrind Shell profile: ${profile}`);
       }
       await assertOpenShellReady();
@@ -2581,6 +2581,13 @@ async function handleDesktopInvoke(event, command, ...args) {
         base64Data,
       );
     }
+    case "openrindShellListFiles": {
+      const sandboxName = String(args[0] ?? "").trim();
+      if (!sandboxName) {
+        throw new Error("sandboxName is required");
+      }
+      return openrindShell.listWorkspaceFiles(sandboxName);
+    }
     case "openrindShellDeleteFile": {
       const sandboxName = String(args[0] ?? "").trim();
       const filename = String(args[1] ?? "").trim();
@@ -2653,7 +2660,7 @@ async function handleDesktopInvoke(event, command, ...args) {
       const workspaceId = String(input.workspaceId ?? "").trim();
       const profile = String(input.profile ?? "").trim();
       if (!workspaceId) throw new Error("workspaceId is required");
-      if (profile !== "openrind-shell-claude") {
+      if (!["openrind-shell-claude", "openrind-shell-openclaw"].includes(profile)) {
         throw new Error(`Unsupported Openrind Shell profile: ${profile}`);
       }
       await assertOpenShellReady();
@@ -2687,12 +2694,19 @@ async function handleDesktopInvoke(event, command, ...args) {
       // Renderer's "Pop out to external terminal" button. Opens a
       // second connection to the same sandbox in a new OS terminal
       // window — additive to the in-app xterm.js, not a replacement.
-      const sandboxName = String(args[0] ?? "").trim();
+      const input = typeof args[0] === "object" && args[0] !== null
+        ? args[0]
+        : { sandboxName: args[0], profile: "openrind-shell-claude" };
+      const sandboxName = String(input.sandboxName ?? "").trim();
+      const profile = String(input.profile ?? "").trim();
       if (!sandboxName) throw new Error("sandboxName is required");
+      if (!["openrind-shell-claude", "openrind-shell-openclaw"].includes(profile)) {
+        throw new Error(`Unsupported Openrind Shell profile: ${profile}`);
+      }
       try {
         await writeOpenrindShellSessionMarker(
           sandboxName,
-          "openrind-shell-claude",
+          profile,
           null,
         );
         const terminal = await launchExternalTerminalToSandbox(sandboxName);

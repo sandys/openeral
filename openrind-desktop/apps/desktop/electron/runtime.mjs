@@ -1479,7 +1479,9 @@ export function createRuntimeManager({ app, desktopRoot, listLocalWorkspacePaths
     }
 
     const sandboxProfile = String(options.sandboxProfile ?? "openrind-desktop").trim();
-    const isOpenrindShellProfile = sandboxProfile === "openrind-shell-claude";
+    const isOpenrindShellProfile =
+      sandboxProfile === "openrind-shell-claude" ||
+      sandboxProfile === "openrind-shell-openclaw";
 
     // Fail fast for openshell — spec §9.2 calls for hard-fail, not silent
     // fallback to docker, so the banker is never running under weaker

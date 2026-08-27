@@ -10,6 +10,7 @@ elif [ -f /tmp/openeral-session.env ]; then
 fi
 
 export HOME="${HOME:-/sandbox}"
+export PATH="$HOME/.local/bin:${PATH:-/usr/local/bin:/usr/bin:/bin}"
 export SHELL="${SHELL:-/bin/bash}"
 export NODE_NO_WARNINGS="${NODE_NO_WARNINGS:-1}"
 

@@ -10,12 +10,12 @@ import {
   MessageSquare,
   Mic,
   MoreHorizontal,
+  Paperclip,
   Pencil,
   RotateCcw,
   Settings,
   Square,
   Trash2,
-  Upload,
   X,
 } from "lucide-react";
 
@@ -274,6 +274,13 @@ type Phase =
   | "exited"
   | "error";
 
+type SandboxWorkspaceFile = {
+  name: string;
+  path: string;
+  size: number;
+  modifiedAt: number;
+};
+
 /**
  * Mirrors deriveOpenrindShellSandboxName() in openrind-shell-terminal.mjs.
  * Used to pre-populate lastKnownSandboxNameRef so deleteAndReconnect can
@@ -338,13 +345,52 @@ export function OpenrindShellTerminal(props: OpenrindShellTerminalProps) {
   const [popoutError, setPopoutError] = useState<string | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const filesRequestRef = useRef(0);
   const [uploadBusy, setUploadBusy] = useState(false);
   const { showToast } = useStatusToasts();
-  const [uploadedFiles, setUploadedFiles] = useState<{ id: string; name: string; size: number }[]>([]);
+  const [sandboxFiles, setSandboxFiles] = useState<SandboxWorkspaceFile[]>([]);
+  const [filesLoading, setFilesLoading] = useState(false);
+  const [filesError, setFilesError] = useState<string | null>(null);
 
   useEffect(() => {
-    setUploadedFiles([]);
+    filesRequestRef.current += 1;
+    setSandboxFiles([]);
+    setFilesLoading(false);
+    setFilesError(null);
   }, [props.workspaceId]);
+
+  const refreshSandboxFiles = useCallback(async () => {
+    const effectiveName = sandboxName ?? lastKnownSandboxNameRef.current;
+    if (!effectiveName) return;
+    const requestId = ++filesRequestRef.current;
+    setFilesLoading(true);
+    setFilesError(null);
+    try {
+      const files = await invoke<SandboxWorkspaceFile[]>(
+        "openrindShellListFiles",
+        effectiveName,
+      );
+      if (requestId === filesRequestRef.current) {
+        setSandboxFiles(files);
+      }
+    } catch (error) {
+      if (requestId === filesRequestRef.current) {
+        setFilesError(
+          error instanceof Error ? error.message : "Could not read sandbox files.",
+        );
+      }
+    } finally {
+      if (requestId === filesRequestRef.current) {
+        setFilesLoading(false);
+      }
+    }
+  }, [sandboxName]);
+
+  useEffect(() => {
+    if (phase === "connected") {
+      void refreshSandboxFiles();
+    }
+  }, [phase, refreshSandboxFiles]);
 
   const handleUploadClick = useCallback(() => {
     fileInputRef.current?.click();
@@ -368,14 +414,6 @@ export function OpenrindShellTerminal(props: OpenrindShellTerminalProps) {
               const base64 = (reader.result as string).split(",")[1] ?? "";
               await invoke("openrindShellUpload", effectiveName, base64, file.name);
               uploadedNames.push(file.name);
-              setUploadedFiles((prev) => [
-                ...prev,
-                {
-                  id: `${file.name}-${file.lastModified}-${Math.random().toString(36).slice(2)}`,
-                  name: file.name,
-                  size: file.size,
-                },
-              ]);
               resolve();
             } catch (err) {
               reject(err);
@@ -408,20 +446,22 @@ export function OpenrindShellTerminal(props: OpenrindShellTerminalProps) {
         });
       }
     } finally {
+      await refreshSandboxFiles();
       setUploadBusy(false);
       // Reset input so the same file can be uploaded again
       if (fileInputRef.current) {
         fileInputRef.current.value = "";
       }
     }
-  }, [sandboxName]);
+  }, [refreshSandboxFiles, sandboxName, showToast]);
 
-  const removeUploadedFile = useCallback(async (id: string, filename: string): Promise<boolean> => {
+  const removeUploadedFile = useCallback(async (filename: string): Promise<boolean> => {
     const effectiveName = sandboxName ?? lastKnownSandboxNameRef.current;
     if (!effectiveName) return false;
     try {
       await invoke("openrindShellDeleteFile", effectiveName, filename);
-      setUploadedFiles((prev) => prev.filter((f) => f.id !== id));
+      setSandboxFiles((current) => current.filter((file) => file.name !== filename));
+      await refreshSandboxFiles();
       showToast({
         title: `Removed ${filename} from sandbox`,
         tone: "success",
@@ -434,7 +474,7 @@ export function OpenrindShellTerminal(props: OpenrindShellTerminalProps) {
       });
       return false;
     }
-  }, [sandboxName, showToast]);
+  }, [refreshSandboxFiles, sandboxName, showToast]);
 
   // Overflow ("⋮") menu for secondary/management actions, so the main toolbar
   // stays to its essentials.
@@ -1323,13 +1363,16 @@ export function OpenrindShellTerminal(props: OpenrindShellTerminalProps) {
     setPopoutBusy(true);
     setPopoutError(null);
     try {
-      await invoke("openrindPopOutTerminal", name);
+      await invoke("openrindPopOutTerminal", {
+        sandboxName: name,
+        profile: props.profile,
+      });
     } catch (err) {
       setPopoutError(err instanceof Error ? err.message : String(err));
     } finally {
       setPopoutBusy(false);
     }
-  }, [sandboxName]);
+  }, [props.profile, sandboxName]);
 
   const deleteSandbox = useCallback(async () => {
     const nameToDelete = sandboxName ?? lastKnownSandboxNameRef.current;
@@ -1492,10 +1535,10 @@ export function OpenrindShellTerminal(props: OpenrindShellTerminalProps) {
                 onClick={handleUploadClick}
                 disabled={uploadBusy}
                 onMouseDown={(e) => e.preventDefault()}
-                title="Upload file to the sandbox"
+                title="Attach files to the sandbox workspace"
               >
-                {uploadBusy ? <Loader2 className="animate-spin" size={16} /> : <Upload size={16} />}
-                <span>Upload</span>
+                {uploadBusy ? <Loader2 className="animate-spin" size={16} /> : <Paperclip size={16} />}
+                <span>Attach</span>
               </button>
               <input
                 type="file"
@@ -1508,12 +1551,15 @@ export function OpenrindShellTerminal(props: OpenrindShellTerminalProps) {
                 type="button"
                 className={TOOLBAR_BTN}
                 aria-label="Files"
-                onClick={() => setFilesModalOpen(true)}
+                onClick={() => {
+                  setFilesModalOpen(true);
+                  void refreshSandboxFiles();
+                }}
                 onMouseDown={(e) => e.preventDefault()}
-                title="View uploaded files"
+                title="View files in the sandbox FUSE workspace"
               >
                 <FileText size={16} />
-                <span>Files{uploadedFiles.length > 0 ? ` (${uploadedFiles.length})` : ""}</span>
+                <span>Files{sandboxFiles.length > 0 ? ` (${sandboxFiles.length})` : ""}</span>
               </button>
               <TerminalMicButton
                 onText={(text) => {
@@ -1622,7 +1668,7 @@ export function OpenrindShellTerminal(props: OpenrindShellTerminalProps) {
             <div className="p-4 border-b border-gray-6/70 flex items-center justify-between">
               <h3 className="text-sm font-medium text-gray-12 flex items-center gap-2">
                 <FileText size={16} className="text-gray-9" />
-                Uploaded Files
+                Sandbox Files
               </h3>
               <button
                 type="button"
@@ -1633,18 +1679,36 @@ export function OpenrindShellTerminal(props: OpenrindShellTerminalProps) {
               </button>
             </div>
             <div className="p-2 max-h-[60vh] overflow-y-auto">
-              {uploadedFiles.length === 0 ? (
-                <div className="p-6 text-center text-sm text-gray-10">No files uploaded.</div>
+              {filesLoading && sandboxFiles.length === 0 ? (
+                <div className="flex items-center justify-center gap-2 p-6 text-sm text-gray-10">
+                  <Loader2 className="animate-spin" size={15} />
+                  Reading /sandbox/work/inbox…
+                </div>
+              ) : filesError ? (
+                <div className="flex flex-col items-center gap-3 p-6 text-center text-sm text-red-11">
+                  <span>{filesError}</span>
+                  <button
+                    type="button"
+                    className="rounded-md border border-gray-6 px-3 py-1.5 text-xs text-gray-11 hover:bg-gray-3"
+                    onClick={() => void refreshSandboxFiles()}
+                  >
+                    Retry
+                  </button>
+                </div>
+              ) : sandboxFiles.length === 0 ? (
+                <div className="p-6 text-center text-sm text-gray-10">
+                  No files in /sandbox/work/inbox.
+                </div>
               ) : (
                 <div className="flex flex-col gap-1">
-                  {uploadedFiles.map((file) => (
-                    <div key={file.id} className="flex items-center gap-3 rounded-xl px-4 py-3 transition-colors hover:bg-gray-3/50 group">
+                  {sandboxFiles.map((file) => (
+                    <div key={file.path} className="flex items-center gap-3 rounded-xl px-4 py-3 transition-colors hover:bg-gray-3/50 group">
                       <div className="flex-1 min-w-0">
                         <div className="truncate text-[13px] font-medium text-gray-11 flex items-baseline gap-2">
                           {file.name}
                           <span className="text-[11px] font-normal text-gray-9">{formatBytes(file.size)}</span>
                         </div>
-                        <div className="truncate text-[11px] text-gray-10 mt-0.5">/sandbox/work/inbox/{file.name}</div>
+                        <div className="truncate text-[11px] text-gray-10 mt-0.5">{file.path}</div>
                       </div>
                       <div className="flex items-center gap-1 opacity-100">
                         <button
@@ -1653,7 +1717,7 @@ export function OpenrindShellTerminal(props: OpenrindShellTerminalProps) {
                           title="Copy path"
                           onClick={async (e) => {
                             e.stopPropagation();
-                            const path = `/sandbox/work/inbox/${file.name}`;
+                            const path = file.path;
                             try {
                               if (navigator.clipboard && navigator.clipboard.writeText) {
                                 await navigator.clipboard.writeText(path);
@@ -1694,8 +1758,8 @@ export function OpenrindShellTerminal(props: OpenrindShellTerminalProps) {
                           onClick={async (e) => {
                             e.preventDefault();
                             e.stopPropagation();
-                            const success = await removeUploadedFile(file.id, file.name);
-                            if (success && uploadedFiles.length === 1) setFilesModalOpen(false);
+                            const success = await removeUploadedFile(file.name);
+                            if (success && sandboxFiles.length === 1) setFilesModalOpen(false);
                           }}
                         >
                           <Trash2 size={15} />
@@ -1897,7 +1961,7 @@ function BootstrapErrorCard(props: BootstrapErrorCardProps) {
   } else if (missingApiKey) {
     title = "ANTHROPIC_API_KEY is not configured.";
     detail =
-      "Openrind Shell needs an Anthropic API key to auto-provision the Claude provider. " +
+      "Openrind Shell needs an Anthropic API key to provision the selected agent provider. " +
       "Open Settings → Environment → Sandbox credentials and paste your Anthropic API key.";
   } else if (gatewayUnresponsive) {
     title = "OpenShell gateway is not responding.";

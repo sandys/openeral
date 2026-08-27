@@ -8,6 +8,7 @@ if [ -f "$RUNTIME_DIR/session.env" ]; then
 fi
 
 export HOME="${OPENRIND_SHELL_CLAUDE_HOME:-/sandbox/claude-home}"
+export PATH="$HOME/.local/bin:${PATH:-/usr/local/bin:/usr/bin:/bin}"
 export OPENRIND_SHELL_HOME=/sandbox/work
 export OPENRIND_SHELL_RUNTIME_DIR="$RUNTIME_DIR"
 export OPENRIND_SHELL_STATE_DIR="$RUNTIME_DIR"

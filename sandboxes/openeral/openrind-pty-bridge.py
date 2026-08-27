@@ -56,12 +56,15 @@ sandbox image.
 import errno
 import fcntl
 import os
+import re
 import select
 import signal
 import struct
 import sys
 import termios
 import time
+
+_ANSI_CSI_RE = re.compile(rb"\x1b\[[0-?]*[ -/]*[@-~]")
 
 LOG_PATH = "/tmp/openrind-pty-bridge.log"
 
@@ -109,6 +112,7 @@ _keeper = None
 # and reset SGR. The agent re-enables whatever it needs on startup.
 _TERM_RESET_MODES = (
     b"\x1b[?1049l"  # leave alternate screen buffer
+    b"\x1b[?6l\x1b[r"  # disable origin mode and reset scrolling margins
     b"\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1015l"  # disable mouse reporting
     b"\x1b[?2004l"  # disable bracketed paste
     b"\x1b[?25h"  # show cursor
@@ -191,6 +195,9 @@ KEEP_SCROLLBACK_ENV = "OPENRIND_SHELL_PTY_KEEP_SCROLLBACK"
 # never required for the agent's own rendering to be correct.
 MAX_SCROLL_REWRITES = 4
 MAX_SCROLL_REWRITES_ENV = "OPENRIND_SHELL_PTY_MAX_SCROLL_REWRITES"
+SHOW_OPENCLAW_BANNER_ENV = "OPENRIND_SHELL_PTY_SHOW_OPENCLAW_BANNER"
+OPENCLAW_BANNER_MARKER = b"OpenClaw "
+MAX_BANNER_SCAN = 64 * 1024
 
 
 def _env_int(name, default):
@@ -203,7 +210,13 @@ def _env_int(name, default):
 class ScrollbackKeeper:
     """Stream filter over the agent's PTY output. See the comment above."""
 
-    def __init__(self, rows, enabled=True, max_rewrites=MAX_SCROLL_REWRITES):
+    def __init__(
+        self,
+        rows,
+        enabled=True,
+        max_rewrites=MAX_SCROLL_REWRITES,
+        show_openclaw_banner=False,
+    ):
         self.enabled = enabled
         self.scrolls = 0
         self.drops = 0
@@ -218,6 +231,9 @@ class ScrollbackKeeper:
         # full screen also pushes the blank tail, which is what buried OpenClaw's
         # banner 29 lines above the viewport instead of ~8.
         self._used_rows = 0
+        self._show_openclaw_banner = bool(show_openclaw_banner)
+        self._openclaw_banner = b""
+        self._banner_scan = bytearray()
 
     def set_rows(self, rows):
         """Track the live screen height; the scroll can never exceed one screen."""
@@ -242,68 +258,77 @@ class ScrollbackKeeper:
             pass
 
     def _scroll_out(self):
-        """Push the drawn region into the scrollback, then guarantee a blank
-        screen for the agent to paint on.
-
-        The trailing ESC[2J is what makes the row estimate safe: if it is short,
-        the erase removes whatever is left; if it is long, we only pushed a few
-        blank lines. Either way the agent gets exactly the clean screen it asked
-        for, and only the rows it actually used reach the scrollback.
-        """
+        """Push the drawn region into scrollback, then leave a blank viewport."""
         used = max(1, min(self._used_rows + 1, self._rows))
         self._used_rows = 0
         return (
-            b"\x1b[%d;1H" % self._rows  # park on the last row
-            + b"\n" * used  # push the drawn rows into scrollback
-            + b"\x1b[2J"  # erase whatever remains (in place; ED never moves the cursor)
-            + b"\x1b[H"  # ...then home, as the agent asked
+            b"\x1b[%d;1H" % self._rows
+            + b"\n" * used
+            + b"\x1b[2J"
+            + b"\x1b[H"
         )
+
+    def _observe_openclaw_banner(self, data):
+        """Remember OpenClaw's dynamic banner without delaying terminal output."""
+        if not self._show_openclaw_banner or self._openclaw_banner:
+            return
+
+        self._banner_scan.extend(data)
+        captured = bytes(self._banner_scan)
+        marker = captured.find(OPENCLAW_BANNER_MARKER)
+        if marker == -1:
+            if len(self._banner_scan) > MAX_BANNER_SCAN:
+                # Keep only enough tail bytes for a marker split across reads.
+                keep = max(0, len(OPENCLAW_BANNER_MARKER) - 1)
+                del self._banner_scan[:-keep]
+            return
+
+        line_end = len(captured)
+        for separator in (b"\r", b"\n"):
+            candidate = captured.find(separator, marker)
+            if candidate != -1:
+                line_end = min(line_end, candidate)
+        if line_end == len(captured):
+            return
+
+        printable = _ANSI_CSI_RE.sub(b"", captured[marker:line_end]).strip()
+        if printable:
+            self._openclaw_banner = b"\x1b[31m" + printable + b"\x1b[0m"
+        self._banner_scan.clear()
 
     def feed(self, chunk):
         """Return the bytes to forward for this read. May buffer a partial
         sequence; see expired() / flush()."""
         data = self._held + chunk if self._held else chunk
         self._held = b""
+        # Observation is deliberately side-effect-only: unlike the removed
+        # banner gate, it never withholds a single byte from the desktop.
+        self._observe_openclaw_banner(data)
         out = bytearray()
         index = 0
         size = len(data)
         while index < size:
             esc = data.find(0x1B, index)
             if esc == -1:
-                # Plain output to the end of the chunk. Count it too: a burst
-                # with no escape at all is the common case for a log-style
-                # screen, and missing it left the row estimate at zero.
                 self._note_output(data, index, size)
                 out += data[index:]
                 break
             self._note_output(data, index, esc)
             out += data[index:esc]
             window = data[esc : esc + _REWRITE_WINDOW]
+            if self._openclaw_banner and window.startswith(CLEAR_AND_HOME):
+                index = esc + len(CLEAR_AND_HOME)
+                out += CLEAR_AND_HOME + self._openclaw_banner + b"\r\n"
+                self._used_rows = 0
+                continue
             if self.enabled and window.startswith(CLEAR_AND_HOME):
                 index = esc + len(CLEAR_AND_HOME)
                 if self.scrolls < self._max_rewrites:
-                    used = self._used_rows
                     out += self._scroll_out()
                     self.scrolls += 1
-                    if self.scrolls == 1:
-                        log(
-                            "scrollback: rewrote agent full-screen clear "
-                            "(rows=%d, pushed=%d) — banner/launch log preserved"
-                            % (self._rows, min(used + 1, self._rows))
-                        )
                     continue
-                # Budget spent: hand the agent's own clear straight through, the
-                # way an unbridged terminal would. Reset the row estimate anyway
-                # — the screen really is being cleared, so the drawn-rows count
-                # restarts regardless of who performs the erase.
                 self._used_rows = 0
                 self.passthroughs += 1
-                if self.passthroughs == 1:
-                    log(
-                        "scrollback: rewrite budget (%d) reached — later clears "
-                        "pass through so repeated redraws cannot evict the "
-                        "preserved banner/launch log" % self._max_rewrites
-                    )
                 out += CLEAR_AND_HOME
                 continue
             # Absolute cursor positioning tells us how far down the agent draws.
@@ -317,7 +342,10 @@ class ScrollbackKeeper:
                 continue
             if len(window) < _REWRITE_WINDOW and (
                 ERASE_SCROLLBACK.startswith(window)
-                or (self.enabled and CLEAR_AND_HOME.startswith(window))
+                or (
+                    (self.enabled or bool(self._openclaw_banner))
+                    and CLEAR_AND_HOME.startswith(window)
+                )
             ):
                 # Truncated at the read boundary and still a possible match.
                 self._held = bytes(window)
@@ -357,7 +385,7 @@ class ScrollbackKeeper:
         """Held-back bytes, unconditionally (session teardown)."""
         held = self._held
         self._held = b""
-        return held
+        return held.replace(ERASE_SCROLLBACK, b"")
 
 
 def log(message):
@@ -468,14 +496,12 @@ def set_winsize(fd, cols, rows):
     to the agent, which is exactly how a real terminal triggers a repaint."""
     cols = max(1, min(65535, int(cols)))
     rows = max(1, min(65535, int(rows)))
+    if _keeper is not None:
+        _keeper.set_rows(rows)
     try:
         fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
     except Exception as exc:  # pragma: no cover - depends on kernel/pty state
         log("set_winsize(%d,%d) failed: %r" % (cols, rows, exc))
-    # Every resize path in this file targets the agent PTY, so this is the one
-    # place the ScrollbackKeeper's screen height has to be kept current.
-    if _keeper is not None:
-        _keeper.set_rows(rows)
 
 
 def classify(buf):
@@ -696,6 +722,10 @@ def main():
         enabled=os.environ.get(KEEP_SCROLLBACK_ENV, "1").strip().lower()
         not in ("0", "false", "no"),
         max_rewrites=_env_int(MAX_SCROLL_REWRITES_ENV, MAX_SCROLL_REWRITES),
+        show_openclaw_banner=os.environ.get(SHOW_OPENCLAW_BANNER_ENV, "0")
+        .strip()
+        .lower()
+        in ("1", "true", "yes"),
     )
 
     # os.openpty() opens /dev/ptmx (a symlink to /dev/pts/ptmx). The sandbox's

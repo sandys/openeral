@@ -145,6 +145,12 @@ function persist(baseUrl) {
   settings.env.ANTHROPIC_BASE_URL = baseUrl;
   delete settings.env.ANTHROPIC_API_KEY;
   delete settings.env.ANTHROPIC_AUTH_TOKEN;
+  delete settings.env.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY;
+  delete settings.env.ANTHROPIC_DEFAULT_OPUS_MODEL;
+  delete settings.env.ANTHROPIC_DEFAULT_SONNET_MODEL;
+  delete settings.env.ANTHROPIC_DEFAULT_HAIKU_MODEL;
+  delete settings.env.ANTHROPIC_DEFAULT_FABLE_MODEL;
+  delete settings.env.CLAUDE_CODE_SUBAGENT_MODEL;
   writeFileSync(settingsPath, `${JSON.stringify(settings, null, 2)}\n`);
 
   writeFileSync(baseUrlPath, `${baseUrl}\n`, { mode: 0o600 });

@@ -11,12 +11,35 @@ import {
 } from "./fuse-runtime.mjs";
 import { DISTRO_NAME, ensureWslKeepalive, wslRun, wslSpawn } from "./wsl.mjs";
 
-const IMAGE_CONTRACT = "fuse-metadata-cache-v11";
+const IMAGE_CONTRACT = "fuse-openclaw-anthropic-v18";
 const SESSION_MARKER = "/var/lib/openrind-shell/runtime/desktop-session";
 const CLAUDE_HOME_MOUNT = "/sandbox/claude-home";
 const CLAUDE_HOME_VOLUME_PREFIX = "openrind-claude-home-";
+const OPENCLAW_HOME_MOUNT = "/sandbox/openclaw-home";
+const OPENCLAW_HOME_VOLUME_PREFIX = "openrind-openclaw-home-";
 const CLAUDE_SESSION_NAMESPACE = "6f9b1e2a-0c3d-4b7a-9e21-8a4c1d5f7b30";
 const MAX_CAPTURE_BYTES = 2 * 1024 * 1024;
+
+const AGENTS = {
+  "openrind-shell-claude": {
+    id: "claude",
+    label: "Claude Code",
+    homeMount: CLAUDE_HOME_MOUNT,
+    volumePrefix: CLAUDE_HOME_VOLUME_PREFIX,
+  },
+  "openrind-shell-openclaw": {
+    id: "openclaw",
+    label: "OpenClaw",
+    homeMount: OPENCLAW_HOME_MOUNT,
+    volumePrefix: OPENCLAW_HOME_VOLUME_PREFIX,
+  },
+};
+
+function agentForProfile(profile) {
+  const agent = AGENTS[profile];
+  if (!agent) throw new Error(`Unsupported Openrind Shell FUSE profile: ${profile}`);
+  return agent;
+}
 
 export function shellQuote(value) {
   return `'${String(value).replace(/'/g, `'\\''`)}'`;
@@ -210,15 +233,23 @@ async function requireFuseImage(onProgress) {
 }
 
 export function resolveClaudeHomeVolumeName(sandboxName) {
-  const value = String(sandboxName ?? "").trim().toLowerCase();
-  if (!/^[a-z0-9][a-z0-9_.-]{0,127}$/.test(value)) {
-    throw new Error("The sandbox name cannot be used for persistent Claude storage.");
-  }
-  return `${CLAUDE_HOME_VOLUME_PREFIX}${value}`;
+  return resolveAgentHomeVolumeName(sandboxName, AGENTS["openrind-shell-claude"]);
 }
 
-async function ensureClaudeHomeVolume(sandboxName, workspaceId) {
-  const volumeName = resolveClaudeHomeVolumeName(sandboxName);
+export function resolveOpenClawHomeVolumeName(sandboxName) {
+  return resolveAgentHomeVolumeName(sandboxName, AGENTS["openrind-shell-openclaw"]);
+}
+
+function resolveAgentHomeVolumeName(sandboxName, agent) {
+  const value = String(sandboxName ?? "").trim().toLowerCase();
+  if (!/^[a-z0-9][a-z0-9_.-]{0,127}$/.test(value)) {
+    throw new Error(`The sandbox name cannot be used for persistent ${agent.label} storage.`);
+  }
+  return `${agent.volumePrefix}${value}`;
+}
+
+async function ensureAgentHomeVolume(sandboxName, workspaceId, agent) {
+  const volumeName = resolveAgentHomeVolumeName(sandboxName, agent);
   const result = await wslRun(
     [
       "-d",
@@ -228,7 +259,7 @@ async function ensureClaudeHomeVolume(sandboxName, workspaceId) {
       "volume",
       "create",
       "--label",
-      "com.openrind.desktop.claude-home=true",
+      `com.openrind.desktop.agent-home=${agent.id}`,
       "--label",
       `com.openrind.desktop.workspace=${workspaceId}`,
       volumeName,
@@ -237,7 +268,7 @@ async function ensureClaudeHomeVolume(sandboxName, workspaceId) {
   );
   if (result.exitCode !== 0) {
     throw new Error(
-      `Could not prepare persistent Claude storage: ${(result.stderr || result.stdout).trim() || `exit ${result.exitCode}`}`,
+      `Could not prepare persistent ${agent.label} storage: ${(result.stderr || result.stdout).trim() || `exit ${result.exitCode}`}`,
     );
   }
   return volumeName;
@@ -273,7 +304,7 @@ async function collectFailedSandboxDiagnostics(name) {
   return sections.join("\n\n");
 }
 
-async function existingFuseSandboxIsWritable(name) {
+async function existingFuseSandboxIsWritable(name, agent) {
   const result = await runFuseOpenShell(
     [
       "sandbox",
@@ -283,7 +314,7 @@ async function existingFuseSandboxIsWritable(name) {
       "--",
       "sh",
       "-c",
-      `test "$(cat /opt/openrind-shell/desktop-contract 2>/dev/null)" = ${shellQuote(IMAGE_CONTRACT)} && test -x /opt/openrind-shell/openrind-pty-bridge.py && exec openrind-shell-fused health`,
+      `test "$(cat /opt/openrind-shell/desktop-contract 2>/dev/null)" = ${shellQuote(IMAGE_CONTRACT)} && test -x /opt/openrind-shell/openrind-pty-bridge.py && test -r /var/lib/openrind-shell/runtime/session.env && . /var/lib/openrind-shell/runtime/session.env && test "\${OPENRIND_SHELL_AGENT:-}" = ${shellQuote(agent.id)} && exec openrind-shell-fused health`,
     ],
     { ensure: false, timeout: 15_000 },
   );
@@ -350,9 +381,7 @@ export async function createOpenrindShellSandbox(options) {
   const { name, profile, onProgress } = options ?? {};
   const workspaceId = String(options?.workspaceId ?? name ?? "").trim();
   if (!name || !workspaceId) throw new Error("A sandbox name and workspace id are required.");
-  if (profile !== "openrind-shell-claude") {
-    throw new Error("The primary FUSE runtime currently supports Claude Code only.");
-  }
+  const agent = agentForProfile(profile);
 
   ensureWslKeepalive();
   onProgress?.({ phase: "control-plane", message: "Checking the paired OpenShell FUSE gateway…" });
@@ -369,14 +398,14 @@ export async function createOpenrindShellSandbox(options) {
 
   const provider = await ensureClaudeProvider(anthropicApiKey, onProgress);
   await requireFuseImage(onProgress);
-  const claudeHomeVolume = await ensureClaudeHomeVolume(name, workspaceId);
+  const agentHomeVolume = await ensureAgentHomeVolume(name, workspaceId, agent);
   const driverConfig = JSON.stringify({
     docker: {
       mounts: [
         {
           type: "volume",
-          source: claudeHomeVolume,
-          target: CLAUDE_HOME_MOUNT,
+          source: agentHomeVolume,
+          target: agent.homeMount,
           read_only: false,
         },
       ],
@@ -387,7 +416,7 @@ export async function createOpenrindShellSandbox(options) {
     if (
       !provider.replaced &&
       /^ready$/i.test(existing.phase) &&
-      (await existingFuseSandboxIsWritable(name))
+      (await existingFuseSandboxIsWritable(name, agent))
     ) {
       onProgress?.({ phase: "ready", message: `FUSE workspace ${name} is ready.` });
       return { name, profile, imageRef: FUSE_IMAGE, existed: true };
@@ -414,6 +443,7 @@ export async function createOpenrindShellSandbox(options) {
       "  --provider claude",
       "  --auto-providers",
       `  --env ${shellQuote(`OPENRIND_SHELL_WORKSPACE_ID=${workspaceId}`)}`,
+      `  --env ${shellQuote(`OPENRIND_SHELL_AGENT=${agent.id}`)}`,
       "  --no-tty",
       "  -- openrind-shell-init",
     ].join(" \\\n"),
@@ -435,7 +465,7 @@ export async function createOpenrindShellSandbox(options) {
     );
   }
 
-  onProgress?.({ phase: "ready", message: `FUSE workspace ${name} is initialized; starting Claude…` });
+  onProgress?.({ phase: "ready", message: `FUSE workspace ${name} is initialized; starting ${agent.label}…` });
   return { name, profile, imageRef: FUSE_IMAGE, existed: false };
 }
 
@@ -480,6 +510,64 @@ ${cli} sandbox upload ${shellQuote(name)} ${shellQuote(tempPath)} ${shellQuote(d
   return { path: destination };
 }
 
+export async function listWorkspaceFiles(name) {
+  if (!name) throw new Error("A sandbox name is required.");
+  const directory = "/sandbox/work/inbox";
+  const script = `
+const fs = require("node:fs");
+const path = require("node:path");
+const directory = ${JSON.stringify(directory)};
+let entries = [];
+try {
+  entries = fs.readdirSync(directory, { withFileTypes: true });
+} catch (error) {
+  if (error?.code !== "ENOENT") throw error;
+}
+const files = entries.flatMap((entry) => {
+  if (!entry.isFile()) return [];
+  const absolute = path.join(directory, entry.name);
+  const stat = fs.lstatSync(absolute);
+  if (!stat.isFile()) return [];
+  return [{
+    name: entry.name,
+    path: absolute,
+    size: stat.size,
+    modifiedAt: stat.mtimeMs,
+  }];
+});
+files.sort((left, right) => left.name.localeCompare(right.name));
+process.stdout.write(JSON.stringify(files));`;
+  const result = await runFuseOpenShell(
+    ["sandbox", "exec", "-n", name, "--", "/usr/bin/node", "-e", script],
+    { ensure: true, timeout: 20_000 },
+  );
+  if (result.exitCode !== 0) {
+    throw new Error(
+      `OpenShell FUSE workspace listing failed: ${(result.stderr || result.stdout).trim() || `exit ${result.exitCode}`}`,
+    );
+  }
+  const files = parseJson(result.stdout);
+  if (!Array.isArray(files)) {
+    throw new Error("OpenShell FUSE workspace returned an invalid file listing.");
+  }
+  return files
+    .map((file) => ({
+      name: String(file?.name ?? ""),
+      path: String(file?.path ?? ""),
+      size: Number(file?.size ?? 0),
+      modifiedAt: Number(file?.modifiedAt ?? 0),
+    }))
+    .filter(
+      (file) =>
+        file.name &&
+        !/[/\\]/.test(file.name) &&
+        file.path === `${directory}/${file.name}` &&
+        Number.isFinite(file.size) &&
+        file.size >= 0 &&
+        Number.isFinite(file.modifiedAt),
+    );
+}
+
 export async function deleteWorkspaceFile(name, filename) {
   if (!name) throw new Error("A sandbox name is required.");
   const safeFilename = assertWorkspaceFilename(filename);
@@ -505,9 +593,19 @@ function formatUuid(bytes) {
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`;
 }
 
-export function resolveAgentSessionValue(_profile, sessionId) {
+export function resolveAgentSessionValue(profile, sessionId) {
   const value = String(sessionId ?? "").trim();
   if (!value) return "default";
+  if (profile === "openrind-shell-openclaw") {
+    const normalized = value
+      .replace(/[^A-Za-z0-9._-]+/g, "-")
+      .replace(/^-+|-+$/g, "")
+      .slice(0, 64);
+    return normalized || "default";
+  }
+  if (profile !== "openrind-shell-claude") {
+    throw new Error(`Unsupported Openrind Shell FUSE profile: ${profile}`);
+  }
   const digest = createHash("sha1")
     .update(uuidToBytes(CLAUDE_SESSION_NAMESPACE))
     .update(Buffer.from(value, "utf8"))
@@ -527,7 +625,7 @@ export async function writeCurrentSessionMarker(name, value) {
   );
   if (result.exitCode !== 0) {
     throw new Error(
-      `Could not prepare the desktop Claude session: ${(result.stderr || result.stdout).trim() || `exit ${result.exitCode}`}`,
+      `Could not prepare the desktop agent session: ${(result.stderr || result.stdout).trim() || `exit ${result.exitCode}`}`,
     );
   }
 }
@@ -562,7 +660,7 @@ export async function probeDatabaseUrl() {
 }
 
 export function imageForProfile(profile) {
-  if (profile !== "openrind-shell-claude") throw new Error(`Unsupported FUSE profile: ${profile}`);
+  agentForProfile(profile);
   return FUSE_IMAGE;
 }
 

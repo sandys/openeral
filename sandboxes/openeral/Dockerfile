@@ -10,9 +10,11 @@ RUN cargo build --locked --release -p openeral-fused \
 
 FROM ghcr.io/nvidia/openshell-community/sandboxes/base:latest
 
-LABEL com.openrind.desktop.fuse-contract="fuse-metadata-cache-v11"
+LABEL com.openrind.desktop.fuse-contract="fuse-openclaw-anthropic-v18"
 
 USER root
+
+ARG OPENCLAW_VERSION=2026.7.1-2
 
 # Refresh Node.js 22 from NodeSource. The current upstream base pins 22.22.1,
 # which its Dockerfile documents as affected by multiple known CVEs.
@@ -20,6 +22,7 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl gnupg python3 \
     && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
+    && SHARP_IGNORE_GLOBAL_LIBVIPS=1 npm install -g --loglevel=error "openclaw@${OPENCLAW_VERSION}" \
     && rm -rf /var/lib/apt/lists/*
 
 # TypeScript owns migrations and one-time legacy import. Rust never migrates.
@@ -43,17 +46,25 @@ COPY sandboxes/openeral/pg-client-fuse.mjs /usr/local/bin/pg
 COPY sandboxes/openeral/setup-fuse.sh /opt/openrind-shell/setup.sh
 COPY sandboxes/openeral/openrind-pty-bridge.py /opt/openrind-shell/openrind-pty-bridge.py
 COPY sandboxes/openeral/configure-stringcost.mjs /opt/openrind-shell/configure-openrind-gateway.mjs
+COPY sandboxes/openeral/configure-openclaw-fuse.mjs /opt/openrind-shell/configure-openclaw-fuse.mjs
+COPY sandboxes/openeral/openrind-openclaw-fuse.sh /usr/local/bin/openrind-openclaw
 COPY sandboxes/openeral/supabase-root-2021-ca.pem /opt/openrind-shell/certs/supabase-root-2021-ca.pem
 RUN chmod 755 /usr/local/bin/openrind-shell-fused /usr/local/bin/claude /usr/local/bin/pg \
+        /usr/local/bin/openrind-openclaw \
         /opt/openrind-shell/setup.sh /opt/openrind-shell/openrind-pty-bridge.py \
         /opt/openrind-shell/configure-openrind-gateway.mjs \
+        /opt/openrind-shell/configure-openclaw-fuse.mjs \
     && chmod 644 /opt/openrind-shell/certs/supabase-root-2021-ca.pem \
     && install -m 0644 /opt/openrind-shell/certs/supabase-root-2021-ca.pem /usr/local/share/ca-certificates/supabase-root-2021-ca.crt \
     && cat /opt/openrind-shell/certs/supabase-root-2021-ca.pem >> /etc/ssl/certs/ca-certificates.crt \
     && sed -i 's/\r$//' /usr/local/bin/claude /usr/local/bin/pg \
+        /usr/local/bin/openrind-openclaw \
         /opt/openrind-shell/setup.sh /opt/openrind-shell/openrind-pty-bridge.py \
         /opt/openrind-shell/configure-openrind-gateway.mjs \
-    && printf '%s' fuse-metadata-cache-v11 > /opt/openrind-shell/desktop-contract \
+        /opt/openrind-shell/configure-openclaw-fuse.mjs \
+    && bash -n /usr/local/bin/openrind-openclaw \
+    && node --check /opt/openrind-shell/configure-openclaw-fuse.mjs \
+    && printf '%s' fuse-openclaw-anthropic-v18 > /opt/openrind-shell/desktop-contract \
     && ln -sf /usr/local/bin/openrind-shell-fused /usr/local/bin/openeral-fused \
     && ln -sf /opt/openrind-shell/setup.sh /usr/local/bin/openrind-shell \
     && ln -sf /opt/openrind-shell/setup.sh /usr/local/bin/openrind-shell-init \
@@ -62,7 +73,7 @@ RUN chmod 755 /usr/local/bin/openrind-shell-fused /usr/local/bin/claude /usr/loc
     && ln -sf /usr/local/bin/openrind-shell-init /usr/local/bin/openeral-init \
     && ln -sf /usr/local/bin/openrind-shell-start /usr/local/bin/openeral-start \
     && install -d -o sandbox -g sandbox -m 0700 \
-        /var/lib/openrind-shell/runtime /sandbox/claude-home
+        /var/lib/openrind-shell/runtime /sandbox/claude-home /sandbox/openclaw-home
 
 # Override the upstream base policy
 COPY sandboxes/openeral/policy.yaml /etc/openshell/policy.yaml
