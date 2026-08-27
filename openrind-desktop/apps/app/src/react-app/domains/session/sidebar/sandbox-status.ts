@@ -179,9 +179,14 @@ export function formatSandboxAge(
     if (unit === "year") return `${value}y`;
   }
 
-  // `openshell sandbox list` prints local time without a zone ("2026-07-27
-  // 09:01:33"), which Date.parse reads as local on every engine we target.
-  const normalized = trimmed.replace(" ", "T");
+  // OpenShell formats epoch milliseconds as UTC but emits no zone suffix
+  // ("2026-07-27 09:01:33"). Date.parse otherwise interprets that value in the
+  // viewer's local timezone, making a new sandbox look hours old. Add the UTC
+  // suffix only to OpenShell's zone-less timestamp; preserve explicit offsets.
+  const isoLike = trimmed.replace(" ", "T");
+  const normalized = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?$/.test(isoLike)
+    ? `${isoLike}Z`
+    : isoLike;
   const parsed = Date.parse(normalized);
   if (!Number.isFinite(parsed)) return null;
   const seconds = Math.max(0, Math.floor((now - parsed) / 1000));

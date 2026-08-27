@@ -140,10 +140,14 @@ describe("sortByStatus", () => {
 });
 
 describe("formatSandboxAge", () => {
-  const base = Date.parse("2026-07-27T12:00:00");
+  const base = Date.parse("2026-07-27T12:00:00Z");
 
-  test("parses the space-separated local timestamp openshell prints", () => {
+  test("parses the space-separated UTC timestamp openshell prints", () => {
     expect(formatSandboxAge("2026-07-27 11:58:00", base)).toBe("2m");
+  });
+
+  test("preserves an explicit timezone offset", () => {
+    expect(formatSandboxAge("2026-07-27T17:28:00+05:30", base)).toBe("2m");
   });
 
   test("steps through the units and stays compact", () => {
