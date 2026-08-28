@@ -5,12 +5,15 @@ FROM rust:1.95-bookworm AS fused-builder
 WORKDIR /source
 COPY Cargo.toml Cargo.lock ./
 COPY crates/ crates/
+COPY sandboxes/openeral/openclaw-agent-launcher.c ./
 RUN cargo build --locked --release -p openeral-fused \
-    && strip target/release/openeral-fused
+    && cc -std=c11 -D_POSIX_C_SOURCE=200809L -O2 -Wall -Wextra -Werror \
+        -o openrind-openclaw-agent openclaw-agent-launcher.c \
+    && strip target/release/openeral-fused openrind-openclaw-agent
 
 FROM ghcr.io/nvidia/openshell-community/sandboxes/base:latest
 
-LABEL com.openrind.desktop.fuse-contract="fuse-openclaw-anthropic-v18"
+LABEL com.openrind.desktop.fuse-contract="fuse-openclaw-identity-v19"
 
 USER root
 
@@ -23,6 +26,8 @@ RUN apt-get update \
     && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
     && SHARP_IGNORE_GLOBAL_LIBVIPS=1 npm install -g --loglevel=error "openclaw@${OPENCLAW_VERSION}" \
+    && test -x /usr/bin/openclaw \
+    && test -f /usr/lib/node_modules/openclaw/openclaw.mjs \
     && rm -rf /var/lib/apt/lists/*
 
 # TypeScript owns migrations and one-time legacy import. Rust never migrates.
@@ -40,6 +45,8 @@ RUN test -x /usr/local/bin/claude \
 # The supervisor validates this root-owned binary and supplies /dev/fuse and
 # readiness descriptors. No fusermount helper or workload mount capability ships.
 COPY --from=fused-builder /source/target/release/openeral-fused /usr/local/bin/openrind-shell-fused
+# OpenShell authorizes this kernel-visible parent, never the shared Node runtime.
+COPY --from=fused-builder /source/openrind-openclaw-agent /usr/local/bin/openrind-openclaw-agent
 
 COPY sandboxes/openeral/openeral-claude-fuse.sh /usr/local/bin/claude
 COPY sandboxes/openeral/pg-client-fuse.mjs /usr/local/bin/pg
@@ -50,7 +57,7 @@ COPY sandboxes/openeral/configure-openclaw-fuse.mjs /opt/openrind-shell/configur
 COPY sandboxes/openeral/openrind-openclaw-fuse.sh /usr/local/bin/openrind-openclaw
 COPY sandboxes/openeral/supabase-root-2021-ca.pem /opt/openrind-shell/certs/supabase-root-2021-ca.pem
 RUN chmod 755 /usr/local/bin/openrind-shell-fused /usr/local/bin/claude /usr/local/bin/pg \
-        /usr/local/bin/openrind-openclaw \
+        /usr/local/bin/openrind-openclaw /usr/local/bin/openrind-openclaw-agent \
         /opt/openrind-shell/setup.sh /opt/openrind-shell/openrind-pty-bridge.py \
         /opt/openrind-shell/configure-openrind-gateway.mjs \
         /opt/openrind-shell/configure-openclaw-fuse.mjs \
@@ -64,7 +71,7 @@ RUN chmod 755 /usr/local/bin/openrind-shell-fused /usr/local/bin/claude /usr/loc
         /opt/openrind-shell/configure-openclaw-fuse.mjs \
     && bash -n /usr/local/bin/openrind-openclaw \
     && node --check /opt/openrind-shell/configure-openclaw-fuse.mjs \
-    && printf '%s' fuse-openclaw-anthropic-v18 > /opt/openrind-shell/desktop-contract \
+    && printf '%s' fuse-openclaw-identity-v19 > /opt/openrind-shell/desktop-contract \
     && ln -sf /usr/local/bin/openrind-shell-fused /usr/local/bin/openeral-fused \
     && ln -sf /opt/openrind-shell/setup.sh /usr/local/bin/openrind-shell \
     && ln -sf /opt/openrind-shell/setup.sh /usr/local/bin/openrind-shell-init \

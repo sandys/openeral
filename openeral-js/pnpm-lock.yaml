@@ -11,6 +11,9 @@ importers:
       '@electric-sql/pglite':
         specifier: ^0.2.0
         version: 0.2.17
+      json5:
+        specifier: 2.2.3
+        version: 2.2.3
       just-bash:
         specifier: ^2.0.0
         version: 2.14.0
@@ -541,6 +544,11 @@ packages:
 
   js-tokens@9.0.1:
     resolution: {integrity: sha512-mxa9E9ITFOt0ban3j6L5MpjwegGz6lBQmM1IJkWeBZGcMxto50+eWdjC/52xDbS2vy0k7vIMK0Fe2wfL9OQSpQ==}
+
+  json5@2.2.3:
+    resolution: {integrity: sha512-XmOWe7eyHYH14cLdVPoyg+GOH3rYX++KpzrylJwSW98t3Nk+U8XOl8FWKOgwtzdb8lXGf6zYwDUzeHMWfxasyg==}
+    engines: {node: '>=6'}
+    hasBin: true
 
   just-bash@2.14.0:
     resolution: {integrity: sha512-hiwsAa7OugRX5/fHhRijpyASioZ/UGjt/fjS15DQmrcFJmsBFabefZogdBJifw0WJUVqUiqATVRbhcwKScrD3w==}
@@ -1327,6 +1335,8 @@ snapshots:
   ini@6.0.0: {}
 
   js-tokens@9.0.1: {}
+
+  json5@2.2.3: {}
 
   just-bash@2.14.0:
     dependencies:

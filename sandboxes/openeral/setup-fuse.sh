@@ -338,11 +338,14 @@ SESSION_ENV="$OPENRIND_SHELL_RUNTIME_DIR/session.env"
   printf 'export SHELL=/bin/bash\n'
   [ ! -f "$OPENRIND_SHELL_NPMRC" ] || printf 'export NPM_CONFIG_USERCONFIG=%s\n' "$(shell_quote "$OPENRIND_SHELL_NPMRC")"
   if [ "$OPENRIND_SHELL_AGENT" = openclaw ]; then
-    # OpenClaw owns the terminal screen; pass its TUI output through immediately.
+    # OpenClaw owns the terminal screen; pass output through immediately and
+    # replay its observed banner only within the shared clear-rewrite budget.
     printf 'export OPENRIND_SHELL_PTY_KEEP_SCROLLBACK=0\n'
     printf 'export OPENRIND_SHELL_PTY_SHOW_OPENCLAW_BANNER=1\n'
-  fi
-  if [ -f "$OPENRIND_SHELL_RUNTIME_DIR/anthropic-base-url" ]; then
+    # Its explicit openrind-gateway provider owns the endpoint; never let the
+    # built-in Anthropic provider inherit Claude's optional proxy override.
+    printf 'unset ANTHROPIC_BASE_URL\n'
+  elif [ -f "$OPENRIND_SHELL_RUNTIME_DIR/anthropic-base-url" ]; then
     printf 'export ANTHROPIC_BASE_URL='; shell_quote "$(cat "$OPENRIND_SHELL_RUNTIME_DIR/anthropic-base-url")"; printf '\n'
   fi
 } > "$SESSION_ENV"

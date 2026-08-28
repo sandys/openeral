@@ -218,6 +218,7 @@ class ScrollbackKeeper:
         show_openclaw_banner=False,
     ):
         self.enabled = enabled
+        # Shared by scroll-preserving and banner-injecting clear rewrites.
         self.scrolls = 0
         self.drops = 0
         # Clears forwarded untouched after the rewrite budget ran out.
@@ -316,15 +317,16 @@ class ScrollbackKeeper:
             self._note_output(data, index, esc)
             out += data[index:esc]
             window = data[esc : esc + _REWRITE_WINDOW]
-            if self._openclaw_banner and window.startswith(CLEAR_AND_HOME):
-                index = esc + len(CLEAR_AND_HOME)
-                out += CLEAR_AND_HOME + self._openclaw_banner + b"\r\n"
-                self._used_rows = 0
-                continue
-            if self.enabled and window.startswith(CLEAR_AND_HOME):
+            if (self.enabled or self._openclaw_banner) and window.startswith(
+                CLEAR_AND_HOME
+            ):
                 index = esc + len(CLEAR_AND_HOME)
                 if self.scrolls < self._max_rewrites:
-                    out += self._scroll_out()
+                    if self._openclaw_banner:
+                        out += CLEAR_AND_HOME + self._openclaw_banner + b"\r\n"
+                        self._used_rows = 0
+                    else:
+                        out += self._scroll_out()
                     self.scrolls += 1
                     continue
                 self._used_rows = 0

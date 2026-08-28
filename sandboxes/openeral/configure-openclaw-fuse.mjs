@@ -9,9 +9,13 @@ import {
   writeFileSync,
 } from "node:fs";
 import { dirname, join, resolve } from "node:path";
+import JSON5 from "json5";
 
 const OPENCLAW_HOME = "/sandbox/openclaw-home";
 const WORKSPACE = "/sandbox/work";
+const PROVIDER_ID = "openrind-gateway";
+const PROVIDER_BASE_URL = "https://api.anthropic.com";
+const DEFAULT_MODEL_ID = "claude-sonnet-4-6";
 const home = resolve(process.env.HOME || OPENCLAW_HOME);
 
 if (home !== OPENCLAW_HOME) {
@@ -28,20 +32,13 @@ function readConfig() {
   if (!existsSync(configPath)) return {};
   const source = readFileSync(configPath, "utf8");
   if (!source.trim()) return {};
+  let parsed;
   try {
-    const parsed = JSON.parse(source);
-    return isObject(parsed) ? parsed : {};
+    parsed = JSON.parse(source);
   } catch {
-    // OpenClaw accepts JSON5. This deliberately handles only comments and
-    // trailing commas so an invalid user file is preserved rather than being
-    // silently replaced by an over-eager parser.
+    // Match OpenClaw's parser: strict JSON first, then json5@2.2.3.
     try {
-      const normalized = source
-        .replace(/\/\*[\s\S]*?\*\//g, "")
-        .replace(/(^|[^:\"'\\])\/\/[^\n]*/g, "$1")
-        .replace(/,(\s*[}\]])/g, "$1");
-      const parsed = JSON.parse(normalized);
-      return isObject(parsed) ? parsed : {};
+      parsed = JSON5.parse(source);
     } catch {
       const backup = `${configPath}.invalid-${Date.now()}`;
       renameSync(configPath, backup);
@@ -49,6 +46,7 @@ function readConfig() {
       return {};
     }
   }
+  return isObject(parsed) ? parsed : {};
 }
 
 const config = readConfig();
@@ -69,18 +67,25 @@ config.agents.defaults.model = isObject(config.agents.defaults.model)
 config.agents.defaults.models = isObject(config.agents.defaults.models)
   ? config.agents.defaults.models
   : {};
+config.models = isObject(config.models) ? config.models : {};
+config.models.providers = isObject(config.models.providers)
+  ? config.models.providers
+  : {};
 
 const requestedModel = String(process.env.OPENRIND_SHELL_OPENCLAW_MODEL || "").trim();
 const configuredModel = String(config.agents.defaults.model.primary || "").trim();
-const defaultModel = "anthropic/claude-sonnet-4-6";
+const providerPrefix = `${PROVIDER_ID}/`;
+const defaultModel = `${providerPrefix}${DEFAULT_MODEL_ID}`;
 
-// Credentials are injected by the OpenShell Claude provider. Preserve a user's
-// Anthropic model choice, while migrating any temporary test-provider model
-// back to the production Anthropic default.
+// OpenShell injects the Anthropic credential into OpenClaw's fixed-target
+// launcher. Keep the OpenClaw model route distinct from the built-in Anthropic
+// provider so ambient Anthropic settings cannot change the gateway endpoint.
 const candidateModel = requestedModel || configuredModel;
-const primaryModel = candidateModel.startsWith("anthropic/")
-  ? candidateModel
-  : defaultModel;
+const primaryModel =
+  candidateModel.startsWith(providerPrefix) && candidateModel.length > providerPrefix.length
+    ? candidateModel
+    : defaultModel;
+const modelId = primaryModel.slice(providerPrefix.length);
 config.agents.defaults.model.primary = primaryModel;
 
 config.agents.defaults.models[primaryModel] = isObject(
@@ -88,6 +93,18 @@ config.agents.defaults.models[primaryModel] = isObject(
 )
   ? config.agents.defaults.models[primaryModel]
   : {};
+
+config.models.providers[PROVIDER_ID] = {
+  baseUrl: PROVIDER_BASE_URL,
+  apiKey: "${ANTHROPIC_API_KEY}",
+  api: "anthropic-messages",
+  models: [
+    {
+      id: modelId,
+      name: modelId === DEFAULT_MODEL_ID ? "Claude Sonnet 4.6" : modelId,
+    },
+  ],
+};
 
 mkdirSync(dirname(configPath), { recursive: true, mode: 0o700 });
 mkdirSync(join(home, ".openclaw", "logs"), { recursive: true, mode: 0o700 });
