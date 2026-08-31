@@ -33,20 +33,97 @@ if command -v openrind-shell-daemon-ensure >/dev/null 2>&1; then
   openrind-shell-daemon-ensure
 fi
 
+sync_bundled_skills() {
+  local src="$1"
+  local dst="$2"
+  [ -d "$src" ] || return 0
+  node - "$src" "$dst" << 'EOF'
+const fs = require('node:fs');
+const path = require('node:path');
+const crypto = require('node:crypto');
+
+const [,, srcBase, dstBase] = process.argv;
+if (!srcBase || !dstBase || !fs.existsSync(srcBase)) process.exit(0);
+
+function hashFile(filePath) {
+  try {
+    return crypto.createHash('sha256').update(fs.readFileSync(filePath)).digest('hex');
+  } catch {
+    return null;
+  }
+}
+
+try {
+  fs.mkdirSync(dstBase, { recursive: true });
+  const entries = fs.readdirSync(srcBase, { withFileTypes: true });
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const skillName = entry.name;
+    const srcDir = path.join(srcBase, skillName);
+    const dstDir = path.join(dstBase, skillName);
+    const manifestPath = path.join(dstDir, '.managed-manifest.json');
+
+    let oldManifest = {};
+    if (fs.existsSync(manifestPath)) {
+      try {
+        oldManifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+      } catch {
+        oldManifest = {};
+      }
+    }
+
+    if (!fs.existsSync(dstDir)) {
+      fs.mkdirSync(dstDir, { recursive: true });
+    }
+
+    const newManifest = {};
+
+    function syncDir(currentSrc, currentDst, relPrefix = '') {
+      fs.mkdirSync(currentDst, { recursive: true });
+      const items = fs.readdirSync(currentSrc, { withFileTypes: true });
+      for (const item of items) {
+        if (item.name === '.managed-manifest.json' || item.name === '.git') continue;
+        const srcItemPath = path.join(currentSrc, item.name);
+        const dstItemPath = path.join(currentDst, item.name);
+        const relPath = relPrefix ? `${relPrefix}/${item.name}` : item.name;
+
+        if (item.isDirectory()) {
+          syncDir(srcItemPath, dstItemPath, relPath);
+        } else if (item.isFile()) {
+          const srcHash = hashFile(srcItemPath);
+          if (!srcHash) continue;
+          newManifest[relPath] = srcHash;
+
+          if (!fs.existsSync(dstItemPath)) {
+            fs.copyFileSync(srcItemPath, dstItemPath);
+          } else {
+            const dstHash = hashFile(dstItemPath);
+            if (dstHash !== srcHash) {
+              const prevHash = oldManifest[relPath];
+              if (!prevHash || dstHash === prevHash) {
+                fs.copyFileSync(srcItemPath, dstItemPath);
+              }
+            }
+          }
+        }
+      }
+    }
+
+    syncDir(srcDir, dstDir);
+    fs.writeFileSync(manifestPath, JSON.stringify(newManifest, null, 2) + '\n');
+  }
+} catch (err) {
+  console.error('sync_bundled_skills warning:', err.message);
+}
+EOF
+}
+
 # Ensure bundled skills are present in Claude's home
 COMPAT_SKILLS_SRC=""
 [ -d /opt/openrind-shell/skills ] && COMPAT_SKILLS_SRC=/opt/openrind-shell/skills
 [ -z "$COMPAT_SKILLS_SRC" ] && [ -d /sandbox/.skills ] && COMPAT_SKILLS_SRC=/sandbox/.skills
 if [ -n "$COMPAT_SKILLS_SRC" ]; then
-  mkdir -p "$HOME/.claude/skills" 2>/dev/null || true
-  for skill_dir in "$COMPAT_SKILLS_SRC"/*; do
-    if [ -d "$skill_dir" ]; then
-      skill_name="$(basename "$skill_dir")"
-      if [ ! -d "$HOME/.claude/skills/$skill_name" ]; then
-        cp -r "$skill_dir" "$HOME/.claude/skills/" 2>/dev/null || true
-      fi
-    fi
-  done
+  sync_bundled_skills "$COMPAT_SKILLS_SRC" "$HOME/.claude/skills"
 fi
 
 # Keep the terminal on Claude's stdin. A non-interactive shell gives an
