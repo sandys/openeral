@@ -62,6 +62,14 @@ def col_letter_to_index(col_str):
             idx = idx * 26 + (ord(char) - ord('A') + 1)
     return idx - 1
 
+def index_to_col_letter(idx):
+    res = []
+    idx += 1
+    while idx > 0:
+        idx, rem = divmod(idx - 1, 26)
+        res.append(chr(ord('A') + rem))
+    return ''.join(reversed(res))
+
 def parse_cell_ref(cell_ref):
     m = re.match(r'([A-Za-z]+)([0-9]+)', cell_ref)
     if m:
@@ -285,18 +293,29 @@ def is_sensitive_name(name):
 def analyze_matrix(matrix):
     if not matrix:
         return {'total_rows': 0, 'total_cols': 0, 'duplicate_rows': 0, 'headers': [], 'sample': [], 'columns': {}}
-    headers = [str(c) if c is not None and str(c).strip() != '' else f'Column_{i+1}' for i, c in enumerate(matrix[0])]
+    raw_headers = [str(c) if c is not None and str(c).strip() != '' else f'Column_{i+1}' for i, c in enumerate(matrix[0])]
     data_rows = matrix[1:]
     total_rows = len(data_rows)
-    total_cols = len(headers)
+    total_cols = len(raw_headers)
     row_tuples = [tuple(r) for r in data_rows]
     dup_count = len(row_tuples) - len(set(row_tuples)) if total_rows > 0 else 0
-    sensitive_cols = {col_idx for col_idx, col_name in enumerate(headers) if is_sensitive_name(col_name)}
+
+    seen_header_counts = {}
+    unique_keys = []
+    for h in raw_headers:
+        if h in seen_header_counts:
+            seen_header_counts[h] += 1
+            unique_keys.append(f"{h}_{seen_header_counts[h]}")
+        else:
+            seen_header_counts[h] = 1
+            unique_keys.append(h)
+
+    sensitive_cols = {col_idx for col_idx, col_name in enumerate(raw_headers) if is_sensitive_name(col_name)}
     redacted_sample = []
     for r in data_rows[:5]:
-        redacted_sample.append([('[REDACTED]' if c_idx in sensitive_cols else (r[c_idx] if c_idx < len(r) else None)) for c_idx in range(len(headers))])
+        redacted_sample.append([('[REDACTED]' if c_idx in sensitive_cols else (r[c_idx] if c_idx < len(r) else None)) for c_idx in range(len(raw_headers))])
     columns_info = {}
-    for col_idx, col_name in enumerate(headers):
+    for col_idx, (col_name, col_key) in enumerate(zip(raw_headers, unique_keys)):
         values = [r[col_idx] if col_idx < len(r) else None for r in data_rows]
         non_null_values = [v for v in values if v is not None and v != '']
         null_count = total_rows - len(non_null_values)
@@ -312,7 +331,15 @@ def analyze_matrix(matrix):
                 except ValueError:
                     pass
         is_numeric = len(numeric_vals) == len(non_null_values) and len(non_null_values) > 0
-        col_info = {'dtype': 'numeric' if is_numeric else 'text', 'missing_count': null_count, 'missing_pct': round(null_pct, 2), 'unique_count': unique_count}
+        col_info = {
+            'header': col_name,
+            'col_index': col_idx,
+            'col_letter': index_to_col_letter(col_idx),
+            'dtype': 'numeric' if is_numeric else 'text',
+            'missing_count': null_count,
+            'missing_pct': round(null_pct, 2),
+            'unique_count': unique_count
+        }
         if is_numeric and numeric_vals:
             numeric_vals.sort()
             n = len(numeric_vals)
@@ -336,8 +363,8 @@ def analyze_matrix(matrix):
             else:
                 counts = Counter([str(v) for v in non_null_values]).most_common(5)
                 col_info['top_values'] = [{'value': k, 'count': c, 'pct': round(c/len(non_null_values)*100, 1) if non_null_values else 0} for k, c in counts]
-        columns_info[col_name] = col_info
-    return {'total_rows': total_rows, 'total_cols': total_cols, 'duplicate_rows': dup_count, 'headers': headers, 'sample': redacted_sample, 'columns': columns_info}
+        columns_info[col_key] = col_info
+    return {'total_rows': total_rows, 'total_cols': total_cols, 'duplicate_rows': dup_count, 'headers': raw_headers, 'sample': redacted_sample, 'columns': columns_info}
 
 def process_file(p):
     path = Path(p)
