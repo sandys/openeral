@@ -16,10 +16,11 @@ argument-hint: [optional: path to .xlsx or .csv file(s)]
 
 ## Core Rules
 
-- **Zero External Dependencies**: Standard `python3` (built-in `zipfile`, `xml.etree.ElementTree`, `csv`, `math`, `statistics`, `json`) is used directly.
+- **Zero External Dependencies**: Standard `python3` (built-in `zipfile`, `xml.etree.ElementTree`, `csv`, `math`, `statistics`, `json`, `datetime`) is used directly.
 - **Never probe or search for tools**: Do NOT execute `which libreoffice`, `which csvkit`, `which unzip`, or `apt list`.
 - **Never run network package installs**: Do NOT run `pip install`, `uv pip install`, or attempt downloading external packages. The built-in Python script parses `.xlsx` OpenXML and `.csv` natively, offline, and in milliseconds.
 - **Generic for ANY File**: Works on any user-provided `.xlsx` or `.csv` files regardless of schema, number of sheets, column types, or missing values.
+- **Privacy & Security Gate**: Strictly prohibit exposing secrets, credentials (tokens, passwords, API keys, private keys, database URLs), and unnecessary personal data (PII, SSNs, credit card numbers). Redact sensitive columns and values (`[REDACTED]`). Row-level samples must be redacted, and do not dump raw row-level data or full reports in chat when row-level or sensitive records are present.
 
 ## Step 1: Locate Target Files
 
@@ -279,6 +280,11 @@ def read_csv(file_path):
         matrix.append(converted)
     return {'CSV Data': matrix}
 
+def is_sensitive_name(name):
+    n = str(name).lower()
+    patterns = ['password', 'secret', 'token', 'key', 'ssn', 'auth', 'credential', 'credit_card', 'card_number', 'api_key', 'private', 'bearer', 'cvv', 'pin']
+    return any(p in n for p in patterns)
+
 def analyze_matrix(matrix):
     if not matrix:
         return {'total_rows': 0, 'total_cols': 0, 'duplicate_rows': 0, 'headers': [], 'sample': [], 'columns': {}}
@@ -288,6 +294,10 @@ def analyze_matrix(matrix):
     total_cols = len(headers)
     row_tuples = [tuple(r) for r in data_rows]
     dup_count = len(row_tuples) - len(set(row_tuples)) if total_rows > 0 else 0
+    sensitive_cols = {col_idx for col_idx, col_name in enumerate(headers) if is_sensitive_name(col_name)}
+    redacted_sample = []
+    for r in data_rows[:5]:
+        redacted_sample.append([('[REDACTED]' if c_idx in sensitive_cols else (r[c_idx] if c_idx < len(r) else None)) for c_idx in range(len(headers))])
     columns_info = {}
     for col_idx, col_name in enumerate(headers):
         values = [r[col_idx] if col_idx < len(r) else None for r in data_rows]
@@ -324,10 +334,13 @@ def analyze_matrix(matrix):
                 'q3': round(q3, 2), 'max': round(numeric_vals[-1], 2), 'iqr': round(iqr, 2), 'outlier_count': len(outliers)
             }
         else:
-            counts = Counter([str(v) for v in non_null_values]).most_common(5)
-            col_info['top_values'] = [{'value': k, 'count': c, 'pct': round(c/len(non_null_values)*100, 1) if non_null_values else 0} for k, c in counts]
+            if col_idx in sensitive_cols:
+                col_info['top_values'] = [{'value': '[REDACTED]', 'count': len(non_null_values), 'pct': 100.0}]
+            else:
+                counts = Counter([str(v) for v in non_null_values]).most_common(5)
+                col_info['top_values'] = [{'value': k, 'count': c, 'pct': round(c/len(non_null_values)*100, 1) if non_null_values else 0} for k, c in counts]
         columns_info[col_name] = col_info
-    return {'total_rows': total_rows, 'total_cols': total_cols, 'duplicate_rows': dup_count, 'headers': headers, 'sample': data_rows[:5], 'columns': columns_info}
+    return {'total_rows': total_rows, 'total_cols': total_cols, 'duplicate_rows': dup_count, 'headers': headers, 'sample': redacted_sample, 'columns': columns_info}
 
 def process_file(p):
     path = Path(p)
@@ -359,9 +372,9 @@ Read `/tmp/parsed-excel.json` and generate `$INBOX/analysis-report.md` with:
 1. **Executive Summary** — concise, factual overview of the files analyzed and critical findings.
 2. **Data Scope** — table showing file names, worksheet names, dimensions (rows × columns), and duplicate rows.
 3. **Key Metrics And Statistics** — tables with counts, means, medians, std dev, min, max, IQR outliers, and missing counts.
-4. **Detailed Findings** — column diagnostics, data distributions, categorical frequencies, and data previews.
+4. **Detailed Findings** — column diagnostics, data distributions, categorical frequencies, and redacted/opt-in data previews.
 5. **Data-Quality Risks** — explicit itemization of missing values, duplicate records, and outliers tied to specific workbooks, sheets, and columns.
 6. **Next Steps** — actionable recommendations and investigative questions for further analysis.
 
 Tie each finding to a named workbook, sheet, and column. Distinguish observed facts
-from inference. After writing the file, tell the user its exact path and include the full report in chat.
+from inference. Ensure secrets, credentials, and unnecessary personal data are never printed in plaintext; redact sensitive columns and values. After writing the file, tell the user its exact path. Present an executive summary and high-level findings in chat; do not require or dump the full report in chat when it contains row-level data or sensitive details.
