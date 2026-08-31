@@ -13,16 +13,25 @@ const pnpmCmd = process.platform === "win32" ? "pnpm.cmd" : "pnpm";
 const nodeCmd = process.execPath;
 
 function run(command, args, cwd, env) {
-  // Only .cmd/.bat shims (e.g. pnpm.cmd) need a shell on Windows. Running an
-  // .exe such as node.exe through a shell breaks when its path contains a
-  // space (e.g. "C:\Program Files\nodejs\node.exe"), so spawn those directly.
+  // Only .cmd/.bat shims (e.g. pnpm.cmd) need a shell on Windows. To avoid
+  // Node's DEP0190 DeprecationWarning, pass the formatted command string
+  // when shell is true instead of passing an args array with shell: true.
   const useShell = process.platform === "win32" && /\.(cmd|bat)$/i.test(command);
-  const result = spawnSync(command, args, {
-    cwd,
-    stdio: "inherit",
-    shell: useShell,
-    env: env ? { ...process.env, ...env } : process.env,
-  });
+  const result = useShell
+    ? spawnSync(
+        [command, ...args.map((a) => (a.includes(" ") ? `"${a}"` : a))].join(" "),
+        {
+          cwd,
+          stdio: "inherit",
+          shell: true,
+          env: env ? { ...process.env, ...env } : process.env,
+        },
+      )
+    : spawnSync(command, args, {
+        cwd,
+        stdio: "inherit",
+        env: env ? { ...process.env, ...env } : process.env,
+      });
   if (result.status !== 0) {
     process.exit(result.status ?? 1);
   }

@@ -43,18 +43,35 @@ async function runFuseCli(args, timeoutMs = 30_000) {
   );
 }
 
+export function normalizePrimaryFuseSandboxes(stdout) {
+  let parsed;
+  try {
+    parsed = JSON.parse(String(stdout ?? ""));
+  } catch {
+    throw new Error("OpenShell sandbox list returned invalid JSON.");
+  }
+  const rows = Array.isArray(parsed)
+    ? parsed
+    : ["sandboxes", "items", "data", "results"]
+        .map((key) => parsed?.[key])
+        .find(Array.isArray) ?? [];
+  return rows
+    .map((row) => ({
+      name: String(row?.name ?? ""),
+      created: String(row?.created_at ?? row?.createdAt ?? row?.created ?? ""),
+      phase: String(row?.phase ?? row?.status ?? "unknown"),
+    }))
+    .filter((row) => row.name);
+}
+
 export async function listPrimaryFuseSandboxes() {
-  const result = await runFuseCli(["sandbox", "list", "--names"]);
+  const result = await runFuseCli(["sandbox", "list", "-o", "json"]);
   if (result.exitCode !== 0) {
     throw new Error(
       `OpenShell sandbox list failed: ${redactDatabaseUrl((result.stderr || result.stdout).trim()) || "(no output)"}`,
     );
   }
-  return result.stdout
-    .split(/\r?\n/)
-    .map((name) => name.trim())
-    .filter(Boolean)
-    .map((name) => ({ name, created: "", phase: "unknown" }));
+  return normalizePrimaryFuseSandboxes(result.stdout);
 }
 
 export async function deletePrimaryFuseSandbox(name) {
@@ -103,16 +120,12 @@ export async function validatePrimaryFuseDatabaseUrl() {
  */
 export async function probePrimaryFuseDatabase() {
   await validatePrimaryFuseDatabaseUrl();
-  const [databaseUrl, openrouterApiKey, anthropicApiKey] = await Promise.all([
+  const [databaseUrl, anthropicApiKey] = await Promise.all([
     getCredential("databaseUrl"),
-    getCredential("openrouterApiKey"),
     getCredential("anthropicApiKey"),
   ]);
   if (!databaseUrl) throw new Error("DATABASE_URL is not configured.");
-  const provider = anthropicApiKey ? "claude" : openrouterApiKey ? "openrouter" : null;
-  if (!provider) {
-    throw new Error("Configure OPENROUTER_API_KEY or ANTHROPIC_API_KEY before testing the sandbox database connection.");
-  }
+  if (!anthropicApiKey) throw new Error("Configure ANTHROPIC_API_KEY before testing the sandbox database connection.");
 
   await ensureManagedFuseGateway();
   const name = `or-db-${randomUUID().replace(/-/g, "").slice(0, 12)}`;
@@ -122,7 +135,7 @@ export async function probePrimaryFuseDatabase() {
     "sandbox", "create", "--name", name, "--from", FUSE_IMAGE, "--fuse",
     "--upload", `${databasePath}:/sandbox/db-url`,
     "--upload", `${programPath}:/sandbox/openrind-db-probe.mjs`,
-    "--provider", provider, "--no-tty", "--", "/bin/bash", "-lc",
+    "--provider", "claude", "--no-tty", "--", "/bin/bash", "-lc",
     "if [ -n \"${SSL_CERT_FILE:-}\" ]; then export NODE_EXTRA_CA_CERTS=\"${NODE_EXTRA_CA_CERTS:-$SSL_CERT_FILE}\"; fi; exec node /sandbox/openrind-db-probe.mjs",
   ]);
   const script = [

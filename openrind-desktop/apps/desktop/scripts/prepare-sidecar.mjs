@@ -151,6 +151,25 @@ const resolveBuildScript = (dir) => {
   return scriptPath;
 };
 
+function safeCopyFileSync(src, dest) {
+  try {
+    if (existsSync(dest)) {
+      try {
+        unlinkSync(dest);
+      } catch {
+        // ignore
+      }
+    }
+    copyFileSync(src, dest);
+  } catch (err) {
+    if (err && err.code === "EBUSY" && existsSync(dest)) {
+      console.warn(`[prepare-sidecar] Warning: Destination file ${dest} is currently in use; skipping overwrite.`);
+      return;
+    }
+    throw err;
+  }
+}
+
 // orchestrator paths
 const orchestratorBaseName = "openrind-desktop-orchestrator";
 const orchestratorName =
@@ -323,7 +342,6 @@ if (shouldBuildOpenrindDesktopServer) {
   const buildResult = spawnSync("bun", openrindDesktopServerArgs, {
     cwd: openrindDesktopServerDir,
     stdio: "inherit",
-    shell: true,
   });
 
   if (buildResult.status !== 0) {
@@ -336,28 +354,14 @@ if (shouldBuildOpenrindDesktopServer) {
 if (existsSync(openrindDesktopServerBuildPath)) {
   const shouldCopyCanonical = didBuildOpenrindDesktopServer || !existsSync(openrindDesktopServerPath) || isStubBinary(openrindDesktopServerPath);
   if (shouldCopyCanonical && openrindDesktopServerBuildPath !== openrindDesktopServerPath) {
-    try {
-      if (existsSync(openrindDesktopServerPath)) {
-        unlinkSync(openrindDesktopServerPath);
-      }
-    } catch {
-      // ignore
-    }
-    copyFileSync(openrindDesktopServerBuildPath, openrindDesktopServerPath);
+    safeCopyFileSync(openrindDesktopServerBuildPath, openrindDesktopServerPath);
   }
 
   if (openrindDesktopServerTargetPath) {
     const shouldCopyTarget =
       didBuildOpenrindDesktopServer || !existsSync(openrindDesktopServerTargetPath) || isStubBinary(openrindDesktopServerTargetPath);
     if (shouldCopyTarget && openrindDesktopServerBuildPath !== openrindDesktopServerTargetPath) {
-      try {
-        if (existsSync(openrindDesktopServerTargetPath)) {
-          unlinkSync(openrindDesktopServerTargetPath);
-        }
-      } catch {
-        // ignore
-      }
-      copyFileSync(openrindDesktopServerBuildPath, openrindDesktopServerTargetPath);
+      safeCopyFileSync(openrindDesktopServerBuildPath, openrindDesktopServerTargetPath);
     }
   }
 }
@@ -474,18 +478,11 @@ if (shouldDownloadOpencode) {
 
   const opencodeTargets = [opencodeTargetPath, opencodePath].filter(Boolean);
   for (const target of opencodeTargets) {
-    try {
-      if (existsSync(target)) {
-        unlinkSync(target);
-      }
-    } catch {
-      // ignore
-    }
-    copyFileSync(extractedBinary, target);
+    safeCopyFileSync(extractedBinary, target);
     try {
       chmodSync(target, 0o755);
     } catch {
-      // ignore
+      // ignore chmod errors on Windows
     }
   }
 
@@ -523,7 +520,6 @@ if (shouldBuildOrchestrator) {
   const result = spawnSync("bun", orchestratorArgs, {
     cwd: orchestratorDir,
     stdio: "inherit",
-    shell: true,
     env: {
       ...process.env,
       NODE_ENV: "production",
@@ -541,26 +537,14 @@ if (existsSync(orchestratorBuildPath)) {
   const shouldCopyCanonical =
     didBuildOrchestrator || !existsSync(orchestratorPath) || isStubBinary(orchestratorPath);
   if (shouldCopyCanonical && orchestratorBuildPath !== orchestratorPath) {
-    try {
-      if (existsSync(orchestratorPath)) unlinkSync(orchestratorPath);
-    } catch {
-      // ignore
-    }
-    copyFileSync(orchestratorBuildPath, orchestratorPath);
+    safeCopyFileSync(orchestratorBuildPath, orchestratorPath);
   }
 
   if (orchestratorTargetPath) {
     const shouldCopyTarget =
-      didBuildOrchestrator ||
-      !existsSync(orchestratorTargetPath) ||
-      isStubBinary(orchestratorTargetPath);
+      didBuildOrchestrator || !existsSync(orchestratorTargetPath) || isStubBinary(orchestratorTargetPath);
     if (shouldCopyTarget && orchestratorBuildPath !== orchestratorTargetPath) {
-      try {
-        if (existsSync(orchestratorTargetPath)) unlinkSync(orchestratorTargetPath);
-      } catch {
-        // ignore
-      }
-      copyFileSync(orchestratorBuildPath, orchestratorTargetPath);
+      safeCopyFileSync(orchestratorBuildPath, orchestratorTargetPath);
     }
   }
 }
@@ -598,7 +582,6 @@ if (shouldBuildChromeDevtools) {
   const result = spawnSync("bun", chromeDevtoolsArgs, {
     cwd: __dirname,
     stdio: "inherit",
-    shell: true,
     env: {
       ...process.env,
       NODE_ENV: "production",
@@ -616,26 +599,14 @@ if (existsSync(chromeDevtoolsBuildPath)) {
   const shouldCopyCanonical =
     didBuildChromeDevtools || !existsSync(chromeDevtoolsPath) || isStubBinary(chromeDevtoolsPath);
   if (shouldCopyCanonical && chromeDevtoolsBuildPath !== chromeDevtoolsPath) {
-    try {
-      if (existsSync(chromeDevtoolsPath)) unlinkSync(chromeDevtoolsPath);
-    } catch {
-      // ignore
-    }
-    copyFileSync(chromeDevtoolsBuildPath, chromeDevtoolsPath);
+    safeCopyFileSync(chromeDevtoolsBuildPath, chromeDevtoolsPath);
   }
 
   if (chromeDevtoolsTargetPath) {
     const shouldCopyTarget =
-      didBuildChromeDevtools ||
-      !existsSync(chromeDevtoolsTargetPath) ||
-      isStubBinary(chromeDevtoolsTargetPath);
+      didBuildChromeDevtools || !existsSync(chromeDevtoolsTargetPath) || isStubBinary(chromeDevtoolsTargetPath);
     if (shouldCopyTarget && chromeDevtoolsBuildPath !== chromeDevtoolsTargetPath) {
-      try {
-        if (existsSync(chromeDevtoolsTargetPath)) unlinkSync(chromeDevtoolsTargetPath);
-      } catch {
-        // ignore
-      }
-      copyFileSync(chromeDevtoolsBuildPath, chromeDevtoolsTargetPath);
+      safeCopyFileSync(chromeDevtoolsBuildPath, chromeDevtoolsTargetPath);
     }
   }
 }

@@ -34,15 +34,14 @@ async function getSafeStorage() {
   return safeStorage;
 }
 
-/** @typedef {"databaseUrl" | "anthropicApiKey" | "openrouterApiKey" | "openrindGatewayApiKey" | "elevenLabsApiKey"} CredentialKey */
+/** @typedef {"databaseUrl" | "anthropicApiKey" | "openrindGatewayApiKey" | "elevenLabsApiKey"} CredentialKey */
 
 const CREDENTIAL_KEYS = /** @type {const} */ ([
   "databaseUrl",
   "anthropicApiKey",
-  "openrouterApiKey",
   "openrindGatewayApiKey",
-  // ElevenLabs Scribe API key — optional, only used when the voice-input
-  // engine is set to ElevenLabs (cloud) instead of on-device Whisper.
+  // ElevenLabs Scribe API key — optional, used for voice dictation
+  // in the composer and sandbox terminal.
   "elevenLabsApiKey",
 ]);
 
@@ -60,7 +59,16 @@ async function loadBlob() {
   try {
     const text = await readFile(credentialsFile(), "utf8");
     const parsed = JSON.parse(text);
-    return parsed && typeof parsed === "object" ? parsed : {};
+    if (!parsed || typeof parsed !== "object") return {};
+    // Remove the retired temporary-testing credential from existing installs.
+    if ("openrouterApiKey" in parsed) {
+      delete parsed.openrouterApiKey;
+      if (parsed.updatedAt && typeof parsed.updatedAt === "object") {
+        delete parsed.updatedAt.openrouterApiKey;
+      }
+      await saveBlob(parsed);
+    }
+    return parsed;
   } catch {
     return {};
   }
@@ -183,6 +191,8 @@ export async function getCredentialStatus() {
   const testDir = testCredentialsDir();
   const status = {};
   if (testDir) {
+    const { rm } = await import("node:fs/promises");
+    await rm(path.join(testDir, "openrouterApiKey"), { force: true }).catch(() => {});
     for (const key of CREDENTIAL_KEYS) {
       try {
         const filePath = path.join(testDir, key);

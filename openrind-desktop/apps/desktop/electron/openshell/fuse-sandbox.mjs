@@ -1,16 +1,18 @@
 import { createHash, randomUUID } from "node:crypto";
 
 import { getCredential } from "./openrind-shell-credentials.mjs";
+import { createSandboxProvisioningCoordinator } from "./sandbox-provisioning-coordinator.mjs";
 import {
   ensureFuseRuntime,
   buildFuseCliCommand,
+  buildFuseWslEnv,
   FUSE_IMAGE,
   FUSE_IMAGE_PULL_POLICY,
   runFuseOpenShell,
 } from "./fuse-runtime.mjs";
 import { DISTRO_NAME, ensureWslKeepalive, wslRun, wslSpawn } from "./wsl.mjs";
 
-const IMAGE_CONTRACT = "fuse-openclaw-identity-v19";
+const IMAGE_CONTRACT = "fuse-openclaw-identity-v22";
 const SESSION_MARKER = "/var/lib/openrind-shell/runtime/desktop-session";
 const CLAUDE_HOME_MOUNT = "/sandbox/claude-home";
 const CLAUDE_HOME_VOLUME_PREFIX = "openrind-claude-home-";
@@ -18,6 +20,7 @@ const OPENCLAW_HOME_MOUNT = "/sandbox/openclaw-home";
 const OPENCLAW_HOME_VOLUME_PREFIX = "openrind-openclaw-home-";
 const CLAUDE_SESSION_NAMESPACE = "6f9b1e2a-0c3d-4b7a-9e21-8a4c1d5f7b30";
 const MAX_CAPTURE_BYTES = 2 * 1024 * 1024;
+const sandboxProvisioning = createSandboxProvisioningCoordinator();
 
 const AGENTS = {
   "openrind-shell-claude": {
@@ -42,15 +45,6 @@ function agentForProfile(profile) {
 
 export function shellQuote(value) {
   return `'${String(value).replace(/'/g, `'\\''`)}'`;
-}
-
-function buildWslEnv(extra) {
-  const names = Object.keys(extra);
-  return {
-    ...process.env,
-    ...extra,
-    WSLENV: [process.env.WSLENV, ...names].filter(Boolean).join(":"),
-  };
 }
 
 function parseJson(value, fallback = null) {
@@ -97,7 +91,7 @@ function normalizeProviderRows(stdout) {
 }
 
 async function ensureClaudeProvider(anthropicApiKey, onProgress) {
-  const env = buildWslEnv({ ANTHROPIC_API_KEY: anthropicApiKey });
+  const env = buildFuseWslEnv({ ANTHROPIC_API_KEY: anthropicApiKey });
   const listed = await runFuseOpenShell(
     ["provider", "list", "-o", "json"],
     { ensure: false, env, timeout: 20_000 },
@@ -142,8 +136,8 @@ async function ensureClaudeProvider(anthropicApiKey, onProgress) {
   onProgress?.({
     phase: "provider",
     message: current && !replaced
-      ? "Refreshing the gateway-managed Anthropic credential..."
-      : "Creating the gateway-managed Claude provider...",
+      ? "Refreshing the Anthropic credential..."
+      : "Creating the Claude provider...",
   });
   const configured = await runFuseOpenShell(command, {
     ensure: false,
@@ -156,109 +150,6 @@ async function ensureClaudeProvider(anthropicApiKey, onProgress) {
     );
   }
   return { replaced };
-}
-
-const OPENROUTER_PROVIDER_NAME = "openrouter";
-const OPENROUTER_PROVIDER_TYPE = "openrouter-claude";
-const OPENROUTER_PROFILE_MARKER = "OpenRouter Anthropic-compatible Claude Code gateway";
-const OPENROUTER_PROFILE_YAML = `id: openrouter-claude
-display_name: OpenRouter Claude Code
-description: OpenRouter Anthropic-compatible Claude Code gateway
-category: agent
-inference_capable: true
-credentials:
-  - name: api_key
-    description: OpenRouter API key used by Claude Code
-    env_vars: [OPENROUTER_API_KEY, ANTHROPIC_AUTH_TOKEN]
-    required: true
-    auth_style: bearer
-    header_name: authorization
-discovery:
-  credentials: [api_key]
-endpoints:
-  - host: openrouter.ai
-    port: 443
-    protocol: rest
-    access: read-write
-    enforcement: enforce
-binaries:
-  - /usr/local/bin/claude
-  - /usr/local/bin/claude-real
-  - /usr/bin/node
-`;
-
-async function ensureManagedProvider({ apiKey, envKey, name, type, profileYaml = null }) {
-  const providerGet = buildFuseCliCommand(["provider", "get", name]);
-  const providerCreate = buildFuseCliCommand([
-    "provider",
-    "create",
-    "--name",
-    name,
-    "--type",
-    type,
-    "--credential",
-    envKey,
-  ]);
-  const providerUpdate = buildFuseCliCommand([
-    "provider",
-    "update",
-    name,
-    "--credential",
-    envKey,
-  ]);
-  const lines = ["set -euo pipefail", "umask 077"];
-
-  if (profileYaml) {
-    const profilePath = `/tmp/openrind-openrouter-profile-${randomUUID()}.yaml`;
-    const profileImport = buildFuseCliCommand([
-      "provider",
-      "profile",
-      "import",
-      "--file",
-      profilePath,
-    ]);
-    const profileExport = buildFuseCliCommand([
-      "provider",
-      "profile",
-      "export",
-      type,
-      "--output",
-      "yaml",
-    ]);
-    lines.push(
-      `trap ${shellQuote(`rm -f ${profilePath}`)} EXIT`,
-      `printf '%s' ${shellQuote(profileYaml)} > ${shellQuote(profilePath)}`,
-      `if ! ${profileImport} >/dev/null 2>&1; then`,
-      `  if ! ${profileExport} | grep -F -- ${shellQuote(OPENROUTER_PROFILE_MARKER)} >/dev/null; then`,
-      "    echo 'OpenRouter provider profile conflicts with the desktop profile.' >&2",
-      "    exit 1",
-      "  fi",
-      "fi",
-    );
-  }
-
-  lines.push(
-    `if ${providerGet} >/dev/null 2>&1; then`,
-    `  if ! ${providerGet} | grep -F -- ${shellQuote(type)} >/dev/null; then`,
-    "    echo 'Existing OpenShell provider has an unexpected type.' >&2",
-    "    exit 1",
-    "  fi",
-    `  ${providerUpdate}`,
-    "else",
-    `  ${providerCreate}`,
-    "fi",
-  );
-
-  const result = await wslRun(
-    ["-d", DISTRO_NAME, "--", "bash", "-lc", lines.join("\n")],
-    {
-      env: buildWslEnv({ [envKey]: apiKey }),
-      timeout: 60_000,
-    },
-  );
-  if (result.exitCode !== 0) {
-    throw new Error(`OpenShell provider ${name} setup failed (exit ${result.exitCode}): ${(result.stderr || result.stdout).trim()}`);
-  }
 }
 
 export async function listSandboxes(options = {}) {
@@ -479,7 +370,7 @@ function streamCreate({ script, env, databaseUrl, timeoutMs, onProgress }) {
  * upload, one-shot initialization, and its exit status. There are no parallel
  * uploads, polling loops, or a second setup pass.
  */
-export async function createOpenrindShellSandbox(options) {
+async function provisionOpenrindShellSandbox(options) {
   const { name, profile, onProgress } = options ?? {};
   const workspaceId = String(options?.workspaceId ?? name ?? "").trim();
   if (!name || !workspaceId) throw new Error("A sandbox name and workspace id are required.");
@@ -494,33 +385,11 @@ export async function createOpenrindShellSandbox(options) {
     throw new Error("DATABASE_URL is required. Configure the PostgreSQL session-mode URL in Settings → Environment.");
   }
   const anthropicApiKey = await getCredential("anthropicApiKey");
-  const openrouterApiKey = await getCredential("openrouterApiKey");
-  if (!anthropicApiKey && !openrouterApiKey) {
-    throw new Error("A provider credential is required. Configure ANTHROPIC_API_KEY or OPENROUTER_API_KEY in Settings → Environment.");
+  if (!anthropicApiKey) {
+    throw new Error("ANTHROPIC_API_KEY is required. Configure it in Settings > Environment.");
   }
-
-  let providerName = "claude";
-  let wslEnv = {};
-  let replaced = false;
-
-  if (anthropicApiKey) {
-    providerName = "claude";
-    wslEnv = { ANTHROPIC_API_KEY: anthropicApiKey };
-    const provider = await ensureClaudeProvider(anthropicApiKey, onProgress);
-    replaced = provider.replaced;
-  } else {
-    providerName = OPENROUTER_PROVIDER_NAME;
-    wslEnv = { OPENROUTER_API_KEY: openrouterApiKey };
-    onProgress?.({ phase: "provider", message: "Configuring gateway-managed OpenRouter test provider..." });
-    await ensureManagedProvider({
-      apiKey: openrouterApiKey,
-      envKey: "OPENROUTER_API_KEY",
-      name: OPENROUTER_PROVIDER_NAME,
-      type: OPENROUTER_PROVIDER_TYPE,
-      profileYaml: OPENROUTER_PROFILE_YAML,
-    });
-  }
-
+  const provider = await ensureClaudeProvider(anthropicApiKey, onProgress);
+  const replaced = Boolean(provider?.replaced);
   await requireFuseImage(onProgress);
   const agentHomeVolume = await ensureAgentHomeVolume(name, workspaceId, agent);
   const driverConfig = JSON.stringify({
@@ -571,7 +440,7 @@ export async function createOpenrindShellSandbox(options) {
     "--upload",
     `${dbPath}:/sandbox/db-url`,
     "--provider",
-    providerName,
+    "claude",
     "--auto-providers",
     "--env",
     `OPENRIND_SHELL_WORKSPACE_ID=${workspaceId}`,
@@ -593,7 +462,7 @@ export async function createOpenrindShellSandbox(options) {
   onProgress?.({ phase: "create", message: `Creating ${name}, mounting /sandbox/work, and initializing it once…` });
   const result = await streamCreate({
     script: create,
-    env: buildWslEnv(wslEnv),
+    env: buildFuseWslEnv({ ANTHROPIC_API_KEY: anthropicApiKey }),
     databaseUrl,
     timeoutMs: options.createTimeoutMs ?? 5 * 60_000,
     onProgress,
@@ -608,6 +477,23 @@ export async function createOpenrindShellSandbox(options) {
 
   onProgress?.({ phase: "ready", message: `FUSE workspace ${name} is initialized; starting ${agent.label}…` });
   return { name, profile, imageRef: FUSE_IMAGE, existed: false };
+}
+
+/**
+ * Provisioning is deliberately single-flight per sandbox. The promise lives in
+ * this main-process module, so closing Settings or switching sessions only
+ * detaches the renderer; it cannot cancel or restart the underlying FUSE create.
+ */
+export function createOpenrindShellSandbox(options) {
+  const name = String(options?.name ?? "").trim();
+  const profile = String(options?.profile ?? "").trim();
+  return sandboxProvisioning.run({
+    sandboxName: name,
+    profile,
+    onProgress: options?.onProgress,
+    provision: (onProgress) =>
+      provisionOpenrindShellSandbox({ ...options, name, profile, onProgress }),
+  });
 }
 
 export async function deleteOpenrindShellSandbox(name) {
@@ -723,6 +609,29 @@ process.stdout.write(JSON.stringify(files));`;
         file.size >= 0 &&
         Number.isFinite(file.modifiedAt),
     );
+}
+
+export async function downloadWorkspaceFile(name, filename, localDestination) {
+  if (!name) throw new Error("A sandbox name is required.");
+  const safeFilename = assertWorkspaceFilename(filename);
+  const destination = String(localDestination ?? "").trim();
+  if (!destination) {
+    throw new Error("A local download destination is required.");
+  }
+
+  // OpenShell accepts absolute sources that remain inside the sandbox's
+  // canonical working directory and enforces that they cannot escape it.
+  const source = `/sandbox/work/inbox/${safeFilename}`;
+  const result = await runFuseOpenShell(
+    ["sandbox", "download", name, source, destination],
+    { ensure: true, timeout: 5 * 60_000 },
+  );
+  if (result.exitCode !== 0) {
+    throw new Error(
+      `OpenShell FUSE workspace download failed: ${(result.stderr || result.stdout).trim() || `exit ${result.exitCode}`}`,
+    );
+  }
+  return { path: destination };
 }
 
 export async function deleteWorkspaceFile(name, filename) {

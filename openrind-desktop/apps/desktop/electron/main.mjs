@@ -47,6 +47,10 @@ import {
   deriveOpenrindShellSandboxName,
   launchExternalTerminalToSandbox,
 } from "./openshell/openrind-shell-terminal.mjs";
+import {
+  downloadDialogFilters,
+  preserveDownloadExtension,
+} from "./openshell/download-destination.mjs";
 import { openshellDoctor } from "./openshell/doctor.mjs";
 import {
   installOpenShellStack,
@@ -56,6 +60,7 @@ import {
   DISTRO_NAME as OPENSHELL_DISTRO_NAME,
   distroExists,
   ensureDistroRunning,
+  toWslPath,
   wslRun,
 } from "./openshell/wsl.mjs";
 
@@ -624,7 +629,7 @@ async function dumpOpenrindShellPtyBuffer(sessionId) {
 
 /**
  * Build the extra env forwarded into the Openrind Shell PTY at spawn time:
- * decrypted Anthropic / OpenRouter / OpenrindGateway keys (so Claude Code auto-configures
+ * decrypted Anthropic / OpenrindGateway keys (so Claude Code auto-configures
  * its provider on first run without an interactive prompt) plus COLUMNS /
  * LINES belt-and-suspenders alongside the stty call in openrind-shell-pty.mjs.
  * Shared by the openrindPtyOpen and openrindPtyAttachOrOpen handlers.
@@ -642,13 +647,6 @@ async function buildOpenrindShellPtyEnv(cols, rows, profile) {
     if (anthropicApiKey) extraEnv.ANTHROPIC_API_KEY = anthropicApiKey;
   } catch {
     /* safeStorage may be unavailable in some test environments */
-  }
-  try {
-    const openrouterApiKey =
-      await openrindCredentials.getCredential("openrouterApiKey");
-    if (openrouterApiKey) extraEnv.OPENROUTER_API_KEY = openrouterApiKey;
-  } catch {
-    /* optional */
   }
   try {
     const openrindGatewayApiKey =
@@ -739,25 +737,6 @@ function openOpenrindShellPtySession(opts) {
         openrindMarkerPending.delete(sandboxName);
       }
       await writeOpenrindShellSessionMarker(sandboxName, profile, agentSessionId);
-      try {
-        const gatewayApiKey = await openrindCredentials.getCredential("openrindGatewayApiKey");
-        if (gatewayApiKey) {
-          // Retry loop: wait up to 10 seconds for the sandbox to finish provisioning and reach Ready
-          // so `sandbox exec` does not fail with "sandbox is not ready".
-          for (let attempt = 0; attempt < 20; attempt++) {
-            const result = await wslRun([
-              "-d", OPENSHELL_DISTRO_NAME, "--user", "banker", "--",
-              "sh", "-c", `CID=\$(docker ps -q --filter "name=openshell-.*--${sandboxName}-" | head -n 1) && [ -n "\$CID" ] && docker exec -u root "\$CID" sh -c "echo '${gatewayApiKey}' > /sandbox/openrind-shell-gateway-api-key && chown sandbox:sandbox /sandbox/openrind-shell-gateway-api-key && chmod 600 /sandbox/openrind-shell-gateway-api-key"`
-            ], { timeout: 10_000 }).catch(() => null);
-            if (result && result.exitCode === 0) {
-              break;
-            }
-            await new Promise((resolve) => setTimeout(resolve, 500));
-          }
-        }
-      } catch (err) {
-        /* non-fatal */
-      }
       // Even a desktop launch without a session id writes the `auto` marker, so
       // every fresh connect must wait for this marker to be consumed.
       openrindMarkerPending.add(sandboxName);
@@ -2423,10 +2402,9 @@ async function handleDesktopInvoke(event, command, ...args) {
       return openrindCredentials.getCredentialStatus();
     }
     case "voiceTranscribe": {
-      // Cloud speech-to-text for the composer/terminal mic when the voice
-      // engine is set to ElevenLabs. The renderer captures audio and posts the
-      // raw bytes here; the API key stays in the main process (never shipped to
-      // the renderer) and this also sidesteps browser CORS to ElevenLabs.
+      // Speech-to-text for the composer/terminal mic via ElevenLabs. The renderer
+      // captures audio and posts the raw bytes here; the API key stays in the main
+      // process (never shipped to the renderer) and this also sidesteps browser CORS.
       const input = args[0] ?? {};
       const audio = input.audio;
       const mimeType =
@@ -2541,10 +2519,9 @@ async function handleDesktopInvoke(event, command, ...args) {
     }
     case "openrindListSessions":
     case "openrindListSandboxes": {
-      // Returns the subset of `openshell sandbox list` whose names start with
-      // the openrind-shell- prefix — the sandboxes Openrind Desktop created. Uses the text
-      // parser in openrind-shell.mjs because CLI 0.0.45 rejects `sandbox list --json`,
-      // which left openshellClient.listSandboxes() (and this handler) empty.
+      // Returns the Openrind Desktop subset of the primary FUSE gateway's JSON
+      // list. Structured output retains the lifecycle phase and creation time;
+      // the names-only form intentionally omits both.
       // Failures PROPAGATE to the renderer so a cold gateway at boot reads as
       // "still loading, retry" rather than "no sandboxes exist".
       const list = await openrindShell.listSandboxes();
@@ -2734,40 +2711,11 @@ async function handleDesktopInvoke(event, command, ...args) {
         throw new Error("Invalid filename");
       }
 
-      // We upload to /home/agent/inbox so that the sync daemon picks it up and
-      // it persists in the workspace.
-      const destDir = `/home/agent/inbox`;
-      const destPath = `${destDir}/${filename}`;
-
-      // We use a multi-step bash command to safely construct the file.
-      // 1. Write the raw base64 data to a text file using `cat`
-      // 2. Decode the text file into the binary file
-      // 3. Ensure destination dir exists in the sandbox
-      // 4. Run openshell sandbox upload
-      // 5. Cleanup
-      const tmpTxt = `/tmp/openrind_upload_${Date.now()}_tmp.txt`;
-      const tmpBin = `/tmp/openrind_upload_${Date.now()}_${filename.replace(/[^a-zA-Z0-9.-]/g, "_")}`;
-
-      const bashCmd = [
-        `trap 'rm -f ${openrindShell.shellQuote(tmpTxt)} ${openrindShell.shellQuote(tmpBin)}' EXIT`,
-        "mkdir -p /tmp",
-        `cat > ${openrindShell.shellQuote(tmpTxt)}`,
-        `base64 -d < ${openrindShell.shellQuote(tmpTxt)} > ${openrindShell.shellQuote(tmpBin)}`,
-        `openshell sandbox exec --name ${openrindShell.shellQuote(sandboxName)} -- bash -c "mkdir -p ${openrindShell.shellQuote(destDir)}"`,
-        `openshell sandbox upload ${openrindShell.shellQuote(sandboxName)} ${openrindShell.shellQuote(tmpBin)} ${openrindShell.shellQuote(destPath)}`
-      ].join(" && ");
-
-      const result = await wslRun([
-        "-d", OPENSHELL_DISTRO_NAME,
-        "--",
-        "bash", "-c", bashCmd
-      ], {
-        stdin: base64Data
-      });
-      if (result.exitCode !== 0) {
-        throw new Error(`openshell sandbox upload failed with exit code ${result.exitCode}: ${result.stderr || result.stdout}`);
-      }
-      return true;
+      return openrindShell.uploadWorkspaceFile(
+        sandboxName,
+        filename,
+        base64Data,
+      );
     }
     case "openrindShellListFiles": {
       const sandboxName = String(args[0] ?? "").trim();
@@ -2775,6 +2723,32 @@ async function handleDesktopInvoke(event, command, ...args) {
         throw new Error("sandboxName is required");
       }
       return openrindShell.listWorkspaceFiles(sandboxName);
+    }
+    case "openrindShellDownloadFile": {
+      const sandboxName = String(args[0] ?? "").trim();
+      const filename = String(args[1] ?? "").trim();
+      if (!sandboxName || !filename) {
+        throw new Error("sandboxName and filename are required");
+      }
+      if (/[/\\]/.test(filename) || filename.includes("..")) {
+        throw new Error("Invalid filename");
+      }
+
+      const result = await dialog.showSaveDialog(activeWindowFromEvent(event), {
+        title: `Download ${filename}`,
+        defaultPath: path.join(app.getPath("downloads"), filename),
+        filters: downloadDialogFilters(filename),
+      });
+      if (result.canceled || !result.filePath) {
+        return { canceled: true };
+      }
+      const destinationPath = preserveDownloadExtension(result.filePath, filename);
+      await openrindShell.downloadWorkspaceFile(
+        sandboxName,
+        filename,
+        toWslPath(destinationPath),
+      );
+      return { canceled: false, path: destinationPath };
     }
     case "openrindShellDeleteFile": {
       const sandboxName = String(args[0] ?? "").trim();
@@ -2785,19 +2759,7 @@ async function handleDesktopInvoke(event, command, ...args) {
       if (/[/\\]/.test(filename) || filename.includes("..")) {
         throw new Error("Invalid filename");
       }
-      const destPath = `/home/agent/inbox/${filename}`;
-      const bashCmd = `rm -f ${openrindShell.shellQuote(destPath)}`;
-
-      const result = await wslRun([
-        "-d", OPENSHELL_DISTRO_NAME,
-        "--",
-        "openshell", "sandbox", "exec", "--name", sandboxName,
-        "--", "bash", "-c", bashCmd
-      ]);
-      if (result.exitCode !== 0) {
-        throw new Error(`openshell exec failed with exit code ${result.exitCode}`);
-      }
-      return true;
+      return openrindShell.deleteWorkspaceFile(sandboxName, filename);
     }
     case "openrindPtyWrite": {
       const input = args[0] ?? {};

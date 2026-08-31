@@ -28,9 +28,6 @@ const outFile = resolve(outDir, "ubuntu-24.04-openshell.tar.gz");
 const dockerfile = resolve(scriptDir, "openshell-rootfs.Dockerfile");
 const tag = `openrind-desktop/openshell-rootfs:build-${Date.now()}`;
 
-const isWindows = process.platform === "win32";
-const shellOpt = { shell: isWindows };
-
 function fail(msg, code = 1) {
   console.error(`[rootfs] ${msg}`);
   process.exit(code);
@@ -40,7 +37,6 @@ function dockerSync(args, opts = {}) {
   return spawnSync("docker", args, {
     stdio: opts.stdio ?? "inherit",
     encoding: "utf8",
-    ...shellOpt,
     ...opts,
   });
 }
@@ -123,7 +119,6 @@ console.log("[rootfs] exporting rootfs → gzip → tarball...");
 // the same job portably.
 const exportProc = spawn("docker", ["export", containerId], {
   stdio: ["ignore", "pipe", "inherit"],
-  ...shellOpt,
 });
 const gzip = createGzip({ level: 9 });
 const out = createWriteStream(outFile);

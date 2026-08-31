@@ -18,6 +18,10 @@ import { DISTRO_NAME, wslRun } from "./wsl.mjs";
 
 export {
   createOpenrindShellSandbox,
+  deleteWorkspaceFile,
+  downloadWorkspaceFile,
+  listWorkspaceFiles,
+  uploadWorkspaceFile,
 } from "./fuse-sandbox.mjs";
 export {
   deletePrimaryFuseSandbox as deleteOpenrindShellSandbox,
