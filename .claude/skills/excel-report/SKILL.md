@@ -205,11 +205,8 @@ def read_xlsx(file_path):
                             except ValueError:
                                 val = v_el.text
                     elif t == 'inlineStr':
-                        t_el = c_el.find('.//{*}is/{*}t')
-                        if t_el is None:
-                            t_el = c_el.find('.//{*}t')
-                        if t_el is not None and t_el.text:
-                            val = t_el.text
+                        texts = [t_el.text for t_el in c_el.findall('.//{*}t') if t_el.text is not None]
+                        val = ''.join(texts) if texts else None
                     elif t == 'b':
                         v_el = c_el.find('.//{*}v')
                         val = (v_el.text == '1') if v_el is not None and v_el.text else False
