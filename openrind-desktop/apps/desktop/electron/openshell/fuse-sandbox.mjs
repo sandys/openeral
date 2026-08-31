@@ -152,6 +152,48 @@ async function ensureClaudeProvider(anthropicApiKey, onProgress) {
   return { replaced };
 }
 
+async function ensureGatewayProvider(openrindGatewayApiKey, onProgress) {
+  if (!openrindGatewayApiKey) return;
+  const env = buildFuseWslEnv({ OPENRIND_GATEWAY_API_KEY: openrindGatewayApiKey });
+  const listed = await runFuseOpenShell(
+    ["provider", "list", "-o", "json"],
+    { ensure: false, env, timeout: 20_000 },
+  );
+  if (listed.exitCode !== 0) return;
+
+  const current = normalizeProviderRows(listed.stdout).find(
+    (row) => row.name === "openrind-gateway" || row.name === "stringcost",
+  );
+  const providerName = current?.name ?? "openrind-gateway";
+  const credentialKey = current?.name === "stringcost" ? "STRINGCOST_API_KEY" : "OPENRIND_GATEWAY_API_KEY";
+  const command = current
+    ? ["provider", "update", providerName, "--credential", credentialKey]
+    : [
+        "provider",
+        "create",
+        "--name",
+        "openrind-gateway",
+        "--type",
+        "generic",
+        "--credential",
+        "OPENRIND_GATEWAY_API_KEY",
+      ];
+  onProgress?.({
+    phase: "provider",
+    message: current
+      ? "Refreshing the Openrind Gateway credential..."
+      : "Configuring the Openrind Gateway provider...",
+  });
+  await runFuseOpenShell(command, {
+    ensure: false,
+    env: buildFuseWslEnv({
+      [credentialKey]: openrindGatewayApiKey,
+      OPENRIND_GATEWAY_API_KEY: openrindGatewayApiKey,
+    }),
+    timeout: 20_000,
+  });
+}
+
 export async function listSandboxes(options = {}) {
   if (options.ensure !== false) await ensureFuseRuntime();
   const result = await runFuseOpenShell(
@@ -388,7 +430,9 @@ async function provisionOpenrindShellSandbox(options) {
   if (!anthropicApiKey) {
     throw new Error("ANTHROPIC_API_KEY is required. Configure it in Settings > Environment.");
   }
+  const openrindGatewayApiKey = await getCredential("openrindGatewayApiKey");
   const provider = await ensureClaudeProvider(anthropicApiKey, onProgress);
+  await ensureGatewayProvider(openrindGatewayApiKey, onProgress);
   const replaced = Boolean(provider?.replaced);
   await requireFuseImage(onProgress);
   const agentHomeVolume = await ensureAgentHomeVolume(name, workspaceId, agent);
@@ -462,7 +506,10 @@ async function provisionOpenrindShellSandbox(options) {
   onProgress?.({ phase: "create", message: `Creating ${name}, mounting /sandbox/work, and initializing it once…` });
   const result = await streamCreate({
     script: create,
-    env: buildFuseWslEnv({ ANTHROPIC_API_KEY: anthropicApiKey }),
+    env: buildFuseWslEnv({
+      ANTHROPIC_API_KEY: anthropicApiKey,
+      ...(openrindGatewayApiKey ? { OPENRIND_GATEWAY_API_KEY: openrindGatewayApiKey } : {}),
+    }),
     databaseUrl,
     timeoutMs: options.createTimeoutMs ?? 5 * 60_000,
     onProgress,
