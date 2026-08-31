@@ -52,6 +52,8 @@ describe("resolveSandboxStatus", () => {
     // Without a session all we honestly know is that a container exists.
     expect(resolveSandboxStatus({ phase: "Ready" })).toBe("idle");
     expect(resolveSandboxStatus({ phase: "Ready", hasLiveSession: true })).toBe("active");
+    expect(resolveSandboxStatus({ phase: "Unknown", hasLiveSession: true })).toBe("active");
+    expect(resolveSandboxStatus({ hasLiveSession: true })).toBe("active");
   });
 
   test("unhealthy means provisioned-but-agent-never-came-up", () => {

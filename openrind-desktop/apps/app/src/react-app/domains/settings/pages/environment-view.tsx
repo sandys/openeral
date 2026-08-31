@@ -67,14 +67,6 @@ const PREDEFINED_CREDENTIALS: PredefinedCredentialDef[] = [
     placeholder: "sk-ant-...",
   },
   {
-    statusKey: "openrouterApiKey",
-    envVarName: "OPENROUTER_API_KEY",
-    label: "OPENROUTER_API_KEY",
-    description:
-      "OpenRouter API key (sk-or-...). Used as an alternative when ANTHROPIC_API_KEY is not set.",
-    placeholder: "sk-or-...",
-  },
-  {
     statusKey: "openrindGatewayApiKey",
     envVarName: "OPENRIND_GATEWAY_API_KEY",
     label: "OPENRIND_GATEWAY_API_KEY",

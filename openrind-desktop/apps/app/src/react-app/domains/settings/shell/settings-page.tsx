@@ -1,10 +1,8 @@
 /** @jsxImportSource react */
 import type { ReactNode } from "react";
-import { RefreshCcw } from "lucide-react";
 
 import { t } from "../../../../i18n";
 import type { SettingsTab } from "../../../../app/types";
-import { Button } from "../../../design-system/button";
 import { isDesktopRuntime } from "../../../../app/utils";
 
 const settingsRailClass = "rounded-[24px] border border-dls-border bg-dls-sidebar p-3";
@@ -12,8 +10,6 @@ const settingsPanelClass = "rounded-[28px] border border-dls-border bg-dls-surfa
 
 export function getSettingsTabLabel(tab: SettingsTab) {
   switch (tab) {
-    case "den":
-      return t("settings.tab_cloud");
     case "skills":
       return t("settings.tab_skills");
     case "extensions":
@@ -26,10 +22,6 @@ export function getSettingsTabLabel(tab: SettingsTab) {
       return t("settings.tab_appearance");
     case "sandbox":
       return t("settings.tab_sandbox");
-    case "updates":
-      return t("settings.tab_updates");
-    case "recovery":
-      return t("settings.tab_recovery");
     case "billing":
       return t("settings.tab_billing");
     case "debug":
@@ -41,8 +33,6 @@ export function getSettingsTabLabel(tab: SettingsTab) {
 
 export function getSettingsTabDescription(tab: SettingsTab) {
   switch (tab) {
-    case "den":
-      return t("settings.tab_description_den");
     case "skills":
       return t("settings.tab_description_skills");
     case "extensions":
@@ -55,10 +45,6 @@ export function getSettingsTabDescription(tab: SettingsTab) {
       return t("settings.tab_description_appearance");
     case "sandbox":
       return t("settings.tab_description_sandbox");
-    case "updates":
-      return t("settings.tab_description_updates");
-    case "recovery":
-      return t("settings.tab_description_recovery");
     case "billing":
       return t("settings.tab_description_billing");
     case "debug":
@@ -73,14 +59,7 @@ export function getWorkspaceSettingsTabs(): SettingsTab[] {
 }
 
 export function getGlobalSettingsTabs(developerMode: boolean): SettingsTab[] {
-  const tabs: SettingsTab[] = [
-    "den",
-    "sandbox",
-    "appearance",
-    "environment",
-    "updates",
-    "recovery",
-  ];
+  const tabs: SettingsTab[] = ["sandbox", "appearance", "environment"];
   
   if (isDesktopRuntime()) {
     tabs.unshift("billing");
@@ -94,15 +73,6 @@ type SettingsPageProps = {
   activeTab: SettingsTab;
   onSelectTab: (tab: SettingsTab) => void;
   developerMode: boolean;
-  showUpdateToolbar?: boolean;
-  updateToolbarTone?: string;
-  updateToolbarTitle?: string;
-  updateToolbarSpinning?: boolean;
-  updateToolbarLabel?: string;
-  updateToolbarActionLabel?: string | null;
-  updateToolbarDisabled?: boolean;
-  updateRestartBlockedMessage?: string | null;
-  onUpdateToolbarAction?: () => void;
   children: ReactNode;
 };
 
@@ -169,35 +139,6 @@ export function SettingsPage(props: SettingsPageProps) {
             </p>
           </div>
 
-          {props.showUpdateToolbar && props.activeTab === "general" ? (
-            <div className="mt-4 space-y-2 md:mt-0 md:max-w-sm md:text-right">
-              <div className="flex flex-wrap items-center gap-2 md:justify-end">
-                <div
-                  className={`flex items-center gap-2 rounded-full border px-3 py-1.5 text-xs shadow-sm ${props.updateToolbarTone ?? "bg-gray-4/60 text-gray-11 border-gray-7/50"}`}
-                  title={props.updateToolbarTitle}
-                >
-                  {props.updateToolbarSpinning ? <RefreshCcw size={12} className="animate-spin" /> : null}
-                  <span className="tabular-nums whitespace-nowrap">{props.updateToolbarLabel}</span>
-                </div>
-                {props.updateToolbarActionLabel ? (
-                  <Button
-                    variant="outline"
-                    className="h-8 rounded-full border-gray-6/60 bg-gray-1/70 px-3 py-0 text-xs hover:bg-gray-2/70"
-                    onClick={props.onUpdateToolbarAction}
-                    disabled={props.updateToolbarDisabled}
-                    title={props.updateRestartBlockedMessage ?? ""}
-                  >
-                    {props.updateToolbarActionLabel}
-                  </Button>
-                ) : null}
-              </div>
-              {props.updateRestartBlockedMessage ? (
-                <div className="text-xs leading-relaxed text-amber-11/90 md:max-w-sm">
-                  {props.updateRestartBlockedMessage}
-                </div>
-              ) : null}
-            </div>
-          ) : null}
         </div>
 
         {props.children}

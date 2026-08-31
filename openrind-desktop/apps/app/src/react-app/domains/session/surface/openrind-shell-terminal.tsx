@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
   Copy,
+  Download,
   ExternalLink,
   FileText,
   Loader2,
@@ -31,14 +32,13 @@ import "@xterm/xterm/css/xterm.css";
 import type { SandboxProfile } from "../../../../app/lib/desktop";
 import { Button } from "../../../design-system/button";
 import { useVoiceInput } from "./composer/voice/use-voice-input";
-import { VoiceEngineMenu } from "./composer/voice/voice-engine-menu";
 import { formatBytes } from "../../../../app/utils";
 import { useStatusToasts } from "../../shell-feedback/status-toasts";
 
-// Shared flat "ghost" toolbar button, matching the chat session header so the
-// Openrind Shell terminal toolbar reads as the same product surface.
+// Shared flat toolbar button, matching the bottom status bar items (Docs, Feedback)
+// so the title bar toolbar reads with the exact same styling, colors, and font sizing.
 const TOOLBAR_BTN =
-  "flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-[13px] font-medium text-gray-10 transition-colors hover:bg-gray-2/70 hover:text-dls-text disabled:cursor-not-allowed disabled:opacity-60";
+  "inline-flex h-8 items-center gap-1.5 rounded-md px-2 text-dls-secondary transition-colors hover:bg-dls-hover hover:text-dls-text disabled:cursor-not-allowed disabled:opacity-60";
 
 // The PTY connects (phase "connected") well before the agent's TUI actually
 // paints — setup.sh runs its DB restore/flush silently, then Claude/OpenClaw
@@ -366,6 +366,7 @@ export function OpenrindShellTerminal(props: OpenrindShellTerminalProps) {
   const [sandboxFiles, setSandboxFiles] = useState<SandboxWorkspaceFile[]>([]);
   const [filesLoading, setFilesLoading] = useState(false);
   const [filesError, setFilesError] = useState<string | null>(null);
+  const [downloadingFile, setDownloadingFile] = useState<string | null>(null);
 
   useEffect(() => {
     filesRequestRef.current += 1;
@@ -491,6 +492,33 @@ export function OpenrindShellTerminal(props: OpenrindShellTerminalProps) {
     }
   }, [refreshSandboxFiles, sandboxName, showToast]);
 
+  const downloadSandboxFile = useCallback(async (file: SandboxWorkspaceFile) => {
+    const effectiveName = sandboxName ?? lastKnownSandboxNameRef.current;
+    if (!effectiveName || downloadingFile) return;
+
+    setDownloadingFile(file.name);
+    try {
+      const result = await invoke<{ canceled: boolean; path?: string }>(
+        "openrindShellDownloadFile",
+        effectiveName,
+        file.name,
+      );
+      if (result.canceled) return;
+      showToast({
+        title: `Downloaded ${file.name}`,
+        description: result.path,
+        tone: "success",
+      });
+    } catch (err) {
+      showToast({
+        title: err instanceof Error ? err.message : "Failed to download file",
+        tone: "warning",
+      });
+    } finally {
+      setDownloadingFile(null);
+    }
+  }, [downloadingFile, sandboxName, showToast]);
+
   // Overflow ("⋮") menu for secondary/management actions, so the main toolbar
   // stays to its essentials.
   const [filesModalOpen, setFilesModalOpen] = useState(false);
@@ -521,11 +549,11 @@ export function OpenrindShellTerminal(props: OpenrindShellTerminalProps) {
 
   useEffect(() => {
     let cancelled = false;
-    window.__OPENRIND_DESKTOP_ELECTRON__.invokeDesktop(
+    invoke<string>(
       "openrindDeriveSandboxName",
       props.workspaceId
     ).then((name) => {
-      if (!cancelled && name) {
+      if (!cancelled && typeof name === "string" && name) {
         setExpectedSandboxName(name);
       }
     }).catch(() => {});
@@ -888,7 +916,7 @@ export function OpenrindShellTerminal(props: OpenrindShellTerminalProps) {
         // openrindEnsureSandbox throws before returning (sandbox in error
         // state, stuck-provisioning, etc.) — i.e. before setSandboxName
         // is ever called. Only set if not already known from a prior run.
-        const authoritativeName = await window.__OPENRIND_DESKTOP_ELECTRON__.invokeDesktop(
+        const authoritativeName = await invoke<string>(
           "openrindDeriveSandboxName",
           props.workspaceId,
         );
@@ -931,6 +959,10 @@ export function OpenrindShellTerminal(props: OpenrindShellTerminalProps) {
         }
         unsubProgress = bridge?.openrindShell?.onSessionProgress?.((evt) => {
           if (cancelled) return;
+          // Progress is broadcast by Electron because provisioning outlives any
+          // one renderer view. Ignore activity from sandboxes that are running
+          // concurrently after the user switches sessions.
+          if (evt.sandboxName && evt.sandboxName !== authoritativeName) return;
           const message = String(evt.message ?? "").trim();
           if (!message) return;
           const timestamp = Date.now();
@@ -1495,37 +1527,7 @@ export function OpenrindShellTerminal(props: OpenrindShellTerminalProps) {
           </span>
         </div>
 
-        <div className="flex shrink-0 items-center gap-1">
-          {phase === "connected" ? (
-            <TerminalMicButton
-              onText={(text) => {
-                const id = sessionIdRef.current;
-                if (!id) return;
-                // Flatten newlines so dictation never accidentally submits the
-                // prompt — the user reviews the text and presses Enter.
-                const flat = text.replace(/\r?\n/g, " ").trim();
-                if (!flat) return;
-                void invoke("openrindPtyWrite", { sessionId: id, data: flat });
-                try {
-                  termRef.current?.focus();
-                } catch {
-                  /* ignore */
-                }
-              }}
-              onError={(message) => {
-                // Surface failures directly in the terminal so they're not
-                // lost behind a tooltip.
-                try {
-                  termRef.current?.write(
-                    `\r\n\x1b[31m[voice] ${message}\x1b[0m\r\n`,
-                  );
-                } catch {
-                  /* ignore */
-                }
-              }}
-            />
-          ) : null}
-
+        <div className="flex shrink-0 items-center gap-1.5">
           {phase === "exited" || phase === "error" ? (
             <button
               type="button"
@@ -1544,8 +1546,8 @@ export function OpenrindShellTerminal(props: OpenrindShellTerminalProps) {
                     : "Launch a new session"
               }
             >
-              <RotateCcw size={16} />
-              <span>
+              <RotateCcw className="h-4 w-4" />
+              <span className="text-[11px] font-medium">
                 {errorNeedsDelete
                   ? "Delete & relaunch"
                   : hasEverConnected
@@ -1563,7 +1565,7 @@ export function OpenrindShellTerminal(props: OpenrindShellTerminalProps) {
               onMouseDown={(e) => e.preventDefault()}
               title="Cancel provisioning and return to the launch screen"
             >
-              <span>Cancel</span>
+              <span className="text-[11px] font-medium">Cancel</span>
             </button>
           ) : null}
 
@@ -1575,8 +1577,8 @@ export function OpenrindShellTerminal(props: OpenrindShellTerminalProps) {
               onMouseDown={(e) => e.preventDefault()}
               title="Switch to the regular Openrind Desktop chat UI. The session keeps running — switch back to resume it instantly."
             >
-              <MessageSquare size={16} />
-              <span className="hidden lg:inline">Chat</span>
+              <MessageSquare className="h-4 w-4" />
+              <span className="hidden text-[11px] font-medium lg:inline">Chat</span>
             </button>
           ) : null}
 
@@ -1590,8 +1592,8 @@ export function OpenrindShellTerminal(props: OpenrindShellTerminalProps) {
                 onMouseDown={(e) => e.preventDefault()}
                 title="Attach files to the sandbox workspace"
               >
-                {uploadBusy ? <Loader2 className="animate-spin" size={16} /> : <Paperclip size={16} />}
-                <span>Attach</span>
+                {uploadBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Paperclip className="h-4 w-4" />}
+                <span className="text-[11px] font-medium">Attach</span>
               </button>
               <input
                 type="file"
@@ -1611,8 +1613,10 @@ export function OpenrindShellTerminal(props: OpenrindShellTerminalProps) {
                 onMouseDown={(e) => e.preventDefault()}
                 title="View files in the sandbox FUSE workspace"
               >
-                <FileText size={16} />
-                <span>Files{sandboxFiles.length > 0 ? ` (${sandboxFiles.length})` : ""}</span>
+                <FileText className="h-4 w-4" />
+                <span className="text-[11px] font-medium">
+                  Files{sandboxFiles.length > 0 ? ` (${sandboxFiles.length})` : ""}
+                </span>
               </button>
               <TerminalMicButton
                 onText={(text) => {
@@ -1706,13 +1710,11 @@ export function OpenrindShellTerminal(props: OpenrindShellTerminalProps) {
           // through here — don't show the spinner, just show the terminal.
           <div className="absolute inset-0 z-10 flex items-start justify-center overflow-y-auto bg-dls-surface p-4 md:p-6 md:items-center">
             <BootstrapProgress
-              phase={phase}
               bootstrapMessage={bootstrapMessage}
               events={bootstrapEvents}
               startedAt={bootstrapStartedAt}
               existed={false}
               onAbort={handleAbort}
-              profile={props.profile}
             />
           </div>
         ) : null}
@@ -1809,8 +1811,25 @@ export function OpenrindShellTerminal(props: OpenrindShellTerminalProps) {
                         </button>
                         <button
                           type="button"
-                          className="flex h-7 w-7 items-center justify-center rounded-md text-gray-10 hover:bg-red-3 hover:text-red-11 transition-colors"
+                          className="flex h-7 w-7 items-center justify-center rounded-md text-gray-10 hover:bg-gray-4 hover:text-gray-12 transition-colors disabled:cursor-not-allowed disabled:opacity-50"
+                          title="Download to computer"
+                          disabled={downloadingFile !== null}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            void downloadSandboxFile(file);
+                          }}
+                        >
+                          {downloadingFile === file.name ? (
+                            <Loader2 className="animate-spin" size={15} />
+                          ) : (
+                            <Download size={15} />
+                          )}
+                        </button>
+                        <button
+                          type="button"
+                          className="flex h-7 w-7 items-center justify-center rounded-md text-gray-10 hover:bg-red-3 hover:text-red-11 transition-colors disabled:cursor-not-allowed disabled:opacity-50"
                           title="Delete file"
+                          disabled={downloadingFile !== null}
                           onClick={async (e) => {
                             e.preventDefault();
                             e.stopPropagation();
@@ -1835,119 +1854,67 @@ export function OpenrindShellTerminal(props: OpenrindShellTerminalProps) {
 }
 
 /**
- * Microphone button for the terminal toolbar. Records speech, transcribes it
- * on-device (Whisper, via the shared useVoiceInput hook), and hands the text
- * to onText — which the terminal writes into the PTY so it lands in Claude
- * Code's input box. Renders nothing when the runtime can't record/transcribe.
+ * Microphone button for the terminal toolbar. Records speech, transcribes it,
+ * and hands the text to onText — which the terminal writes into the PTY so it lands
+ * in Claude Code's input box. Renders nothing when the runtime can't record/transcribe.
  */
 function TerminalMicButton(props: {
   onText: (text: string) => void;
   onError?: (message: string) => void;
   disabled?: boolean;
 }) {
-  const { status, error, modelProgress, modelReady, start, stop } =
+  const { status, error, start, stop } =
     useVoiceInput(props.onText, props.onError);
   if (status === "unsupported") return null;
 
   const recording = status === "recording";
   const transcribing = status === "transcribing";
-  // First-run only: the model is still downloading/loading. Subsequent runs
-  // have modelReady === true and just show a brief spinner.
-  const loadingModel = transcribing && !modelReady;
-  const pct = modelProgress != null ? Math.round(modelProgress * 100) : null;
 
-  let title = "Dictate into the terminal (on-device voice)";
+  let title = "Dictate into the terminal";
   if (recording) title = "Stop recording";
-  else if (loadingModel)
-    title =
-      pct != null
-        ? `Downloading speech model… ${pct}%`
-        : "Loading speech model…";
   else if (transcribing) title = "Transcribing…";
   else if (status === "error" && error) title = `${error} — click to try again`;
 
   return (
-    <div className="flex items-center gap-1.5">
-      {loadingModel ? (
-        <span className="whitespace-nowrap text-[11px] tabular-nums text-amber-11">
-          {pct != null
-            ? `Downloading speech model… ${pct}%`
-            : "Loading speech model…"}
-        </span>
-      ) : null}
-      <button
-        type="button"
-        className={`flex items-center justify-center rounded-md p-1.5 transition-colors disabled:cursor-not-allowed disabled:opacity-60 ${
-          recording
-            ? "bg-red-3 text-red-11 hover:bg-red-4"
-            : "text-gray-10 hover:bg-gray-2/70 hover:text-dls-text"
-        }`}
-        onClick={() => {
-          if (props.disabled || transcribing) return;
-          if (recording) stop();
-          else start();
-        }}
-        onMouseDown={(e) => e.preventDefault()}
-        disabled={props.disabled || transcribing}
-        title={title}
-        aria-label={title}
-        aria-pressed={recording}
-      >
-        {transcribing ? (
-          <Loader2 size={16} className="animate-spin" />
-        ) : recording ? (
-          <Square size={13} fill="currentColor" className="animate-pulse" />
-        ) : (
-          <Mic size={16} />
-        )}
-      </button>
-      <VoiceEngineMenu direction="down" align="right" />
-    </div>
+    <button
+      type="button"
+      className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-md transition-colors disabled:cursor-not-allowed disabled:opacity-60 ${
+        recording
+          ? "bg-red-3 text-red-11 hover:bg-red-4"
+          : "text-dls-secondary hover:bg-dls-hover hover:text-dls-text"
+      }`}
+      onClick={() => {
+        if (props.disabled || transcribing) return;
+        if (recording) stop();
+        else start();
+      }}
+      onMouseDown={(e) => e.preventDefault()}
+      disabled={props.disabled || transcribing}
+      title={title}
+      aria-label={title}
+      aria-pressed={recording}
+    >
+      {transcribing ? (
+        <Loader2 className="h-4 w-4 animate-spin" />
+      ) : recording ? (
+        <Square className="h-3.5 w-3.5 fill-current animate-pulse" />
+      ) : (
+        <Mic className="h-4 w-4" />
+      )}
+    </button>
   );
 }
 
 type BootstrapProgressProps = {
-  phase: Phase;
   bootstrapMessage: string | null;
   events: BootstrapProgressEvent[];
   startedAt: number | null;
   existed: boolean;
-  profile: SandboxProfile;
   /** When provided, renders a "Cancel provisioning" link inside the card.
    *  Calling it sets userAborted=true so run() exits immediately, and the
    *  user can re-launch manually via the toolbar "Launch session" button. */
   onAbort?: () => void;
 };
-
-const BOOTSTRAP_STEPS = [
-  { id: "gateway", label: "Start OpenShell control plane", detail: "Local gateway and supervisor" },
-  { id: "database", label: "Check persistent workspace", detail: "Secure PostgreSQL configuration" },
-  { id: "image", label: "Verify local runtime image", detail: "Openrind Shell FUSE image" },
-  { id: "provider", label: "Configure Claude provider", detail: "Gateway-managed credential" },
-  { id: "create", label: "Create sandbox and mount FUSE", detail: "Container, mount, and one-time initialization" },
-  { id: "health", label: "Verify writable workspace", detail: "FUSE daemon writer lease" },
-  { id: "pty", label: "Connect secure terminal", detail: "OpenShell session and Linux PTY bridge" },
-  { id: "agent", label: "Start Claude", detail: "Waiting for Claude to paint its first screen" },
-] as const;
-
-function bootstrapStageIndex(phase: string): number {
-  switch (phase) {
-    case "database": return 1;
-    case "image": return 2;
-    case "provider": return 3;
-    case "create": return 4;
-    case "health": return 5;
-    case "ready":
-    case "mounting-terminal":
-    case "connecting-pty": return 6;
-    case "connected": return 7;
-    case "gateway":
-    case "starting":
-    case "ensuring":
-    case "ensuring-sandbox": return 0;
-    default: return -1;
-  }
-}
 
 function formatBootstrapElapsed(milliseconds: number): string {
   const seconds = Math.max(0, Math.floor(milliseconds / 1_000));
@@ -1956,6 +1923,16 @@ function formatBootstrapElapsed(milliseconds: number): string {
   return minutes > 0 ? `${minutes}m ${String(remainder).padStart(2, "0")}s` : `${remainder}s`;
 }
 
+const BOOTSTRAP_LOG_DATE = new Intl.DateTimeFormat(undefined, {
+  day: "2-digit",
+  month: "short",
+});
+const BOOTSTRAP_LOG_TIME = new Intl.DateTimeFormat(undefined, {
+  hour: "2-digit",
+  minute: "2-digit",
+  second: "2-digit",
+});
+
 function BootstrapProgress(props: BootstrapProgressProps) {
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
@@ -1963,84 +1940,65 @@ function BootstrapProgress(props: BootstrapProgressProps) {
     return () => window.clearInterval(timer);
   }, []);
 
-  const isClaw = props.profile === "openrind-shell-openclaw";
-  const steps = [
-    { id: "gateway", label: "Start OpenShell control plane", detail: "Local gateway and supervisor" },
-    { id: "database", label: "Check persistent workspace", detail: "Secure PostgreSQL configuration" },
-    { id: "image", label: "Verify local runtime image", detail: "Openrind Shell FUSE image" },
-    { id: "provider", label: isClaw ? "Configure OpenRouter provider" : "Configure Claude provider", detail: "Gateway-managed credential" },
-    { id: "create", label: "Create sandbox and mount FUSE", detail: "Container, mount, and one-time initialization" },
-    { id: "health", label: "Verify writable workspace", detail: "FUSE daemon writer lease" },
-    { id: "pty", label: "Connect secure terminal", detail: "OpenShell session and Linux PTY bridge" },
-    { id: "agent", label: isClaw ? "Start OpenClaw" : "Start Claude", detail: isClaw ? "Waiting for OpenClaw to paint its first screen" : "Waiting for Claude to paint its first screen" },
-  ];
-
-  const eventStage = props.events.reduce(
-    (highest, event) => Math.max(highest, bootstrapStageIndex(event.phase)),
-    -1,
-  );
-  const currentStage = Math.max(eventStage, bootstrapStageIndex(props.phase), 0);
   const elapsed = props.startedAt ? formatBootstrapElapsed(now - props.startedAt) : "0s";
-  const activities = props.events.slice(-6).reverse();
+  const activities = props.events.slice(-8).reverse();
   const currentMessage = props.bootstrapMessage ?? "Waiting for the next OpenShell event...";
 
   return (
-    <div className="w-full max-w-2xl rounded-2xl border border-dls-border bg-dls-surface shadow-2xl">
-      <div className="flex items-start justify-between gap-4 border-b border-dls-border px-6 py-5">
-        <div className="flex items-center gap-3">
-          <Loader2 size={18} className="animate-spin text-amber-10" />
-          <div>
-            <div className="text-sm font-semibold text-gray-12">
-              {props.existed ? "Reconnecting to Openrind Shell" : "Provisioning Openrind Shell"}
-            </div>
-            <div className="mt-1 text-xs text-gray-9">
-              Step {Math.min(currentStage + 1, steps.length)} of {steps.length} · {elapsed} elapsed
-            </div>
-          </div>
+    <div className="w-full max-w-lg overflow-hidden rounded-xl border border-dls-border bg-dls-surface shadow-2xl">
+      <div className="flex items-center gap-2.5 border-b border-dls-border px-4 py-3">
+        <Loader2 size={15} className="shrink-0 animate-spin text-amber-10" />
+        <div className="min-w-0 truncate text-[13px] font-semibold text-gray-12">
+          {props.existed ? "Reconnecting to Openrind Shell" : "Provisioning Openrind Shell"}
         </div>
-        <span className="rounded-full border border-amber-8/40 bg-amber-3/20 px-2.5 py-1 text-[11px] font-medium text-amber-11">In progress</span>
+        <span
+          className="ml-auto shrink-0 font-mono text-[10px] tabular-nums text-gray-8"
+          title="Elapsed time"
+        >
+          {elapsed}
+        </span>
       </div>
 
-      <div className="space-y-4 p-6">
-        <div className="rounded-xl border border-amber-8/30 bg-amber-2/15 px-4 py-3" aria-live="polite">
-          <div className="text-[11px] font-medium uppercase tracking-wide text-amber-11">Current activity</div>
-          <div className="mt-1 break-words font-mono text-xs leading-5 text-gray-11">{currentMessage}</div>
-        </div>
-        <div className="space-y-1">
-          {steps.map((step, index) => {
-            const state = index < currentStage ? "done" : index === currentStage ? "active" : "pending";
-            const detail = [...props.events].reverse().find((event) => bootstrapStageIndex(event.phase) === index)?.message;
-            return (
-              <div key={step.id} className="flex gap-3 rounded-lg px-2 py-2">
-                <div className="flex w-4 shrink-0 justify-center pt-1">
-                  <div className={`h-2.5 w-2.5 rounded-full ${state === "done" ? "bg-green-9" : state === "active" ? "animate-pulse bg-amber-9 ring-4 ring-amber-8/15" : "bg-gray-6"}`} />
-                </div>
-                <div className="min-w-0 flex-1">
-                  <div className={`text-xs font-medium ${state === "pending" ? "text-gray-8" : "text-gray-11"}`}>{step.label}</div>
-                  <div className="mt-0.5 truncate text-[11px] text-gray-9">{state === "active" ? detail ?? step.detail : step.detail}</div>
-                </div>
-              </div>
-            );
-          })}
-        </div>
-        {activities.length > 0 ? (
-          <div className="rounded-xl border border-dls-border bg-gray-1/40 px-4 py-3">
-            <div className="mb-2 text-[11px] font-medium uppercase tracking-wide text-gray-9">Live activity</div>
-            <div className="max-h-32 space-y-1 overflow-y-auto font-mono text-[11px] leading-4 text-gray-10">
-              {activities.map((event, index) => (
-                <div key={`${event.timestamp}-${index}`} className="flex gap-3">
-                  <span className="shrink-0 tabular-nums text-gray-8">+{formatBootstrapElapsed(event.timestamp - (props.startedAt ?? event.timestamp))}</span>
-                  <span className="break-words">{event.message}</span>
-                </div>
-              ))}
-            </div>
+      <div className="p-4">
+        <div role="log" aria-live="polite" aria-relevant="additions text">
+          <div className="mb-2 text-[10px] font-medium uppercase tracking-[0.08em] text-gray-9">
+            Activity
           </div>
-        ) : null}
+          <div className="max-h-40 overflow-y-auto rounded-lg border border-dls-border bg-gray-1/40">
+            {activities.length > 0 ? (
+              activities.map((event, index) => {
+                const timestamp = new Date(event.timestamp);
+                return (
+                  <div
+                    key={`${event.timestamp}-${index}`}
+                    className="grid grid-cols-[7rem_minmax(0,1fr)] gap-2 border-b border-dls-border/60 px-3 py-1.5 last:border-b-0"
+                  >
+                    <time
+                      dateTime={timestamp.toISOString()}
+                      title={timestamp.toLocaleString()}
+                      className="whitespace-nowrap font-mono text-[9px] leading-4 tabular-nums text-gray-8"
+                    >
+                      {BOOTSTRAP_LOG_DATE.format(timestamp)}{" "}
+                      {BOOTSTRAP_LOG_TIME.format(timestamp)}
+                    </time>
+                    <span className={`min-w-0 break-words font-mono text-[10px] leading-4 ${index === 0 ? "text-gray-12" : "text-gray-9"}`}>
+                      {event.message}
+                    </span>
+                  </div>
+                );
+              })
+            ) : (
+              <div className="break-words px-3 py-2 font-mono text-[10px] leading-4 text-gray-10">
+                {currentMessage}
+              </div>
+            )}
+          </div>
+        </div>
         {props.onAbort ? (
-          <div className="flex justify-center pt-1">
+          <div className="flex justify-center pt-3">
             <button
               type="button"
-              className="text-xs text-gray-8 underline-offset-2 transition-colors hover:text-gray-11 hover:underline"
+              className="text-[10px] text-gray-8 underline-offset-2 transition-colors hover:text-gray-11 hover:underline"
               onClick={props.onAbort}
             >
               Cancel provisioning

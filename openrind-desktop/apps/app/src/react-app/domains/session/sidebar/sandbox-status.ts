@@ -124,7 +124,10 @@ export function resolveSandboxStatus(input: SandboxStatusInput): SandboxStatus {
   const base = statusFromPhase(input.phase);
   if (base === "starting" || base === "deleting" || base === "failed" || base === "stopped") return base;
   if (input.unhealthy) return "unhealthy";
-  if (base === "idle") return input.hasLiveSession ? "active" : "idle";
+  // A live PTY is stronger evidence than an absent or unrecognised gateway
+  // phase. Never label a visibly connected terminal as Unknown.
+  if (input.hasLiveSession) return "active";
+  if (base === "idle") return "idle";
   return base;
 }
 

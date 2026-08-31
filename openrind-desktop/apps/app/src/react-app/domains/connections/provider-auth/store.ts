@@ -95,6 +95,7 @@ type CreateProviderAuthStoreOptions = {
   setDisabledProviders: (value: string[]) => void;
   markOpencodeConfigReloadRequired: () => void;
   focusPromptSoon?: () => void;
+  cloudProvidersEnabled?: () => boolean;
 };
 
 type MutableState = {
@@ -175,14 +176,16 @@ export function createProviderAuthStore(options: CreateProviderAuthStoreOptions)
       });
     }
 
-    for (const provider of state.cloudOrgProviders) {
-      const id = provider.providerId.trim();
-      if (!id || merged.has(id)) continue;
-      merged.set(id, {
-        id,
-        name: provider.name.trim() || id,
-        env: getCloudProviderEnv(provider.providerConfig),
-      });
+    if (options.cloudProvidersEnabled?.() !== false) {
+      for (const provider of state.cloudOrgProviders) {
+        const id = provider.providerId.trim();
+        if (!id || merged.has(id)) continue;
+        merged.set(id, {
+          id,
+          name: provider.name.trim() || id,
+          env: getCloudProviderEnv(provider.providerConfig),
+        });
+      }
     }
 
     return [...merged.values()].sort(compareProviders);
@@ -897,9 +900,9 @@ export function createProviderAuthStore(options: CreateProviderAuthStoreOptions)
       throw new Error(t("providers.not_connected"));
     }
     const methods = unwrap(await c.provider.auth());
-    const cloudProviders = await refreshCloudOrgProviders().catch(
-      () => [] as DenOrgLlmProvider[],
-    );
+    const cloudProviders = options.cloudProvidersEnabled?.() === false
+      ? []
+      : await refreshCloudOrgProviders().catch(() => [] as DenOrgLlmProvider[]);
     return buildProviderAuthMethods(
       methods as Record<string, ProviderAuthMethod[]>,
       getProviderAuthProviders(),
@@ -1295,6 +1298,7 @@ export function createProviderAuthStore(options: CreateProviderAuthStoreOptions)
   };
 
   const hasCloudProviderSyncPrerequisites = () => {
+    if (options.cloudProvidersEnabled?.() === false) return false;
     const settings = readDenSettings();
     const workspaceTarget =
       options.selectedWorkspaceRoot().trim() || options.runtimeWorkspaceId() || "";
@@ -1549,7 +1553,7 @@ export function createProviderAuthStore(options: CreateProviderAuthStoreOptions)
     lastWorkspaceKey = workspaceKey;
     refreshSnapshot();
     emitChange();
-    if (workspaceChanged) {
+    if (workspaceChanged && options.cloudProvidersEnabled?.() !== false) {
       void refreshImportedCloudProviders();
     }
     if (!hasCloudProviderSyncPrerequisites()) {
@@ -1572,7 +1576,7 @@ export function createProviderAuthStore(options: CreateProviderAuthStoreOptions)
     disposed = false;
     started = true;
     lastWorkspaceKey = currentWorkspaceKey();
-    if (typeof window !== "undefined") {
+    if (typeof window !== "undefined" && options.cloudProvidersEnabled?.() !== false) {
       const handleDenSessionUpdate = (event: Event) => {
         cloudOrgProvidersLoadKey = "";
         cloudOrgProvidersInFlightKey = "";
@@ -1598,7 +1602,9 @@ export function createProviderAuthStore(options: CreateProviderAuthStoreOptions)
         );
       };
     }
-    void refreshImportedCloudProviders();
+    if (options.cloudProvidersEnabled?.() !== false) {
+      void refreshImportedCloudProviders();
+    }
     refreshSnapshot();
     emitChange();
   };

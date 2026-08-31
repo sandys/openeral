@@ -23,7 +23,6 @@ import { deriveSandboxName } from "../../session/sidebar/use-sandbox-rows";
 type CredentialStatus = {
   databaseUrl: "set" | "unset" | "unknown";
   anthropicApiKey: "set" | "unset" | "unknown";
-  openrouterApiKey: "set" | "unset" | "unknown";
   openrindShellAgent: string | null;
   openrindGatewayApiBase: string | null;
 };
@@ -57,7 +56,7 @@ export function CreateSandboxModal(props: CreateSandboxModalProps) {
   }, [props.open]);
 
   const dbReady = creds?.databaseUrl === "set";
-  const anthropicReady = creds?.anthropicApiKey === "set" || creds?.openrouterApiKey === "set";
+  const anthropicReady = creds?.anthropicApiKey === "set";
   const dbBlocked = !dbReady;
   const authBlocked = !anthropicReady;
   

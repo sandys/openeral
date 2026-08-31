@@ -171,15 +171,12 @@ export type OnboardingStep = "welcome" | "local" | "server" | "connecting";
 
 export type SettingsTab =
   | "general"
-  | "den"
   | "skills"
   | "extensions"
   | "environment"
   | "advanced"
   | "appearance"
   | "sandbox"
-  | "updates"
-  | "recovery"
   | "billing"
   | "debug";
 

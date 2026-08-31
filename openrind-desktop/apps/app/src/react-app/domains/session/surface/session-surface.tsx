@@ -61,6 +61,7 @@ export type SessionSurfaceProps = {
   openrindDesktopToken: string;
   developerMode: boolean;
   modelLabel: string;
+  initialDraft?: string;
   onModelClick: () => void;
   onSendDraft: (draft: ComposerDraft) => void;
   onDraftChange: (draft: ComposerDraft) => void;
@@ -232,6 +233,7 @@ function revokeAttachmentPreview(attachment: { previewUrl?: string | undefined }
 
 export function SessionSurface(props: SessionSurfaceProps) {
   const [draft, setDraft] = useState("");
+  const appliedInitialDraftRef = useRef<string | null>(null);
   const [attachments, setAttachments] = useState<ComposerAttachment[]>([]);
   const [mentions, setMentions] = useState<Record<string, "agent" | "file">>({});
   const [pasteParts, setPasteParts] = useState<Array<{ id: string; label: string; text: string; lines: number }>>([]);
@@ -243,6 +245,15 @@ export function SessionSurface(props: SessionSurfaceProps) {
   const [rendered, setRendered] = useState<{ sessionId: string; snapshot: OpenrindDesktopSessionSnapshot } | null>(null);
   const [toolSkills, setToolSkills] = useState<SkillCard[]>([]);
   const [toolMcpServers, setToolMcpServers] = useState<McpServerEntry[]>([]);
+
+  useEffect(() => {
+    const initialDraft = props.initialDraft?.trim();
+    if (!initialDraft) return;
+    const key = `${props.sessionId}:${initialDraft}`;
+    if (appliedInitialDraftRef.current === key) return;
+    appliedInitialDraftRef.current = key;
+    setDraft(initialDraft);
+  }, [props.initialDraft, props.sessionId]);
   const [toolMcpStatus, setToolMcpStatus] = useState<string | null>(null);
   const [toolMcpStatuses, setToolMcpStatuses] = useState<McpStatusMap>({});
   const [toolImportedPlugins, setToolImportedPlugins] = useState<CloudImportedPlugin[]>([]);

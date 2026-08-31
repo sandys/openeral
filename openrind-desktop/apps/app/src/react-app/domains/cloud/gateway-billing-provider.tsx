@@ -30,10 +30,22 @@ import { Button } from "../../design-system/button";
 
 export type BillingStatus = "unpaid" | "paid" | "none";
 
+export type TimeSeriesDataPoint = {
+  date: string;
+  requests?: number;
+  input_tokens?: number;
+  output_tokens?: number;
+  total_tokens?: number;
+};
+
 export type UsageStats = {
   total_requests: number;
   total_input_tokens: number;
   total_output_tokens: number;
+  daily_stats?: TimeSeriesDataPoint[];
+  daily_usage?: TimeSeriesDataPoint[];
+  history?: TimeSeriesDataPoint[];
+  time_series?: TimeSeriesDataPoint[];
 };
 
 export type GatewayBillingStore = {

@@ -1,7 +1,7 @@
-// Composer toolbar button for on-device voice dictation. Press to record,
+// Composer toolbar button for voice dictation. Press to record,
 // press again to stop; the transcript is delivered via onTranscript and the
 // composer appends it to the prompt draft. Renders nothing when the runtime
-// can't support recording/transcription (e.g. no mic API or Worker support).
+// can't support recording/transcription (e.g. no mic API).
 
 import { Loader2, Mic, Square } from "lucide-react";
 import { useVoiceInput } from "./use-voice-input";
@@ -15,7 +15,7 @@ const BASE_CLASS =
   "inline-flex h-9 max-h-9 w-9 items-center justify-center rounded-md transition-colors";
 
 export function MicButton(props: MicButtonProps) {
-  const { status, error, modelProgress, modelReady, start, stop } = useVoiceInput(
+  const { status, error, start, stop } = useVoiceInput(
     props.onTranscript,
   );
 
@@ -24,15 +24,10 @@ export function MicButton(props: MicButtonProps) {
   const recording = status === "recording";
   const transcribing = status === "transcribing";
   const busy = transcribing;
-  // First-run only: the model is still downloading/loading.
-  const loadingModel = transcribing && !modelReady;
-  const pct = modelProgress != null ? Math.round(modelProgress * 100) : null;
 
-  let title = "Dictate with your voice (on-device)";
+  let title = "Dictate with your voice";
   if (recording) title = "Stop recording";
-  else if (loadingModel) {
-    title = pct != null ? `Downloading speech model… ${pct}%` : "Loading speech model…";
-  } else if (transcribing) {
+  else if (transcribing) {
     title = "Transcribing…";
   } else if (status === "error" && error) {
     title = `${error} — click to try again`;
@@ -46,11 +41,6 @@ export function MicButton(props: MicButtonProps) {
 
   return (
     <div className="flex items-center gap-1.5">
-      {loadingModel ? (
-        <span className="whitespace-nowrap text-[11px] tabular-nums text-amber-11">
-          {pct != null ? `Downloading speech model… ${pct}%` : "Loading speech model…"}
-        </span>
-      ) : null}
       <button
         type="button"
         onClick={handleClick}

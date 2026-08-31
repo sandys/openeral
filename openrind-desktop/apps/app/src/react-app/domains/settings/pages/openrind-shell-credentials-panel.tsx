@@ -194,16 +194,6 @@ export function OpenrindShellCredentialsPanel(props: OpenrindShellCredentialsPan
         onClear={() => props.onClearCredential("anthropicApiKey")}
       />
       <CredentialRow
-        label="OPENROUTER_API_KEY"
-        description="OpenRouter API key (sk-or-...). Used as an alternative when ANTHROPIC_API_KEY is not set."
-        placeholder="sk-or-..."
-        statusKey="openrouterApiKey"
-        status={props.credentialStatus}
-        busy={props.actionBusy}
-        onSet={(v) => props.onSetCredential("openrouterApiKey", v)}
-        onClear={() => props.onClearCredential("openrouterApiKey")}
-      />
-      <CredentialRow
         label="OPENRIND_GATEWAY_API_KEY"
         description="Routes Claude Code API calls through a Openrind Gateway proxy for token + cost metering. Leave unset to talk to Anthropic directly."
         placeholder="sk-st-..."

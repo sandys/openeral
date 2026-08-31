@@ -26,22 +26,17 @@ import { GeneralSettingsView } from "../domains/settings/pages/general-view";
 import { AdvancedView } from "../domains/settings/pages/advanced-view";
 import { AppearanceView } from "../domains/settings/pages/appearance-view";
 import { DebugView } from "../domains/settings/pages/debug-view";
-import { DenView } from "../domains/settings/pages/den-view";
 import { EnvironmentView } from "../domains/settings/pages/environment-view";
 import { SandboxPanel } from "../domains/session/sidebar/sandbox-panel";
 import { useSandboxRows } from "../domains/session/sidebar/use-sandbox-rows";
 import type { SidebarTab } from "../domains/session/sidebar/sidebar-tabs";
-import { OpenrindShellCredentialsPanel } from "../domains/settings/pages/openrind-shell-credentials-panel";
 import { GatewayBillingPanel } from "../domains/settings/pages/gateway-billing-panel";
 import { ExtensionsView } from "../domains/settings/pages/extensions-view";
 import { McpView } from "../domains/settings/pages/mcp-view";
-import { RecoveryView } from "../domains/settings/pages/recovery-view";
 import { SandboxView } from "../domains/settings/pages/sandbox-view";
 import { SkillsView } from "../domains/settings/pages/skills-view";
-import { UpdatesView } from "../domains/settings/pages/updates-view";
 import { useOpenShellState } from "../domains/settings/state/openshell-state";
 import { useDebugViewModel } from "../domains/settings/state/debug-view-model";
-import { useElectronUpdaterState } from "../domains/settings/state/electron-updater-state";
 import { useBootState } from "./boot-state";
 import { SettingsShell } from "../domains/settings/shell/settings-shell";
 import { createExtensionsStore, useExtensionsStoreSnapshot } from "../domains/settings/state/extensions-store";
@@ -67,9 +62,8 @@ import {
   type WorkspaceInfo,
 } from "../../app/lib/desktop";
 import { isDesktopProviderBlocked } from "../../app/cloud/desktop-app-restrictions";
-import { useCheckDesktopRestriction, useDesktopConfig } from "../domains/cloud/desktop-config-provider";
-import { useCloudProviderAutoSync } from "../domains/cloud/use-cloud-provider-auto-sync";
-import { isDesktopRuntime, isElectronRuntime, isMacPlatform, normalizeDirectoryPath, safeStringify } from "../../app/utils";
+import { useCheckDesktopRestriction } from "../domains/cloud/desktop-config-provider";
+import { isDesktopRuntime, normalizeDirectoryPath, safeStringify } from "../../app/utils";
 import { CreateWorkspaceModal } from "../domains/workspace/create-workspace-modal";
 import { CreateSandboxModal } from "../domains/session/modals/create-sandbox-modal";
 import { ModelPickerModal } from "../domains/session/modals/model-picker-modal";
@@ -79,7 +73,6 @@ import { ensureDesktopLocalOpenrindDesktopConnection } from "./desktop-local-ope
 import { resolveOpenrindDesktopConnection } from "./openrind-desktop-connection";
 import { abortSessionSafe } from "../../app/lib/opencode-session";
 import { useReloadCoordinator } from "./reload-coordinator";
-import { buildFeedbackUrl } from "../../app/lib/feedback";
 
 type RouteWorkspace = OpenrindDesktopWorkspaceInfo & {
   displayNameResolved: string;
@@ -202,9 +195,6 @@ function folderNameFromPath(path: string) {
 type PersistedThemeMode = "light" | "dark" | "system";
 
 const SETTINGS_THEME_KEY = "openrind-desktop.react.settings.theme-mode";
-const SETTINGS_HIDE_TITLEBAR_KEY = "openrind-desktop.react.settings.hide-titlebar";
-const SETTINGS_UPDATE_AUTO_CHECK_KEY = "openrind-desktop.react.settings.update-auto-check";
-const SETTINGS_UPDATE_AUTO_DOWNLOAD_KEY = "openrind-desktop.react.settings.update-auto-download";
 
 function workspaceLabel(workspace: OpenrindDesktopWorkspaceInfo) {
   return (
@@ -250,14 +240,11 @@ function parseSettingsPath(pathname: string): {
   const [head, tail] = trimmed.split("/");
   switch (head) {
     case "general":
-    case "den":
     case "skills":
     case "advanced":
     case "appearance":
     case "environment":
     case "sandbox":
-    case "updates":
-    case "recovery":
     case "billing":
     case "debug":
       return { tab: head, redirectPath: null };
@@ -267,26 +254,6 @@ function parseSettingsPath(pathname: string): {
       return { tab: "extensions", redirectPath: null, extensionsSection: "all" };
     default:
       return { tab: "general", redirectPath: "/settings/general" };
-  }
-}
-
-function readStoredBoolean(key: string, fallback: boolean) {
-  if (typeof window === "undefined") return fallback;
-  try {
-    const raw = window.localStorage.getItem(key);
-    if (raw == null) return fallback;
-    return raw === "1";
-  } catch {
-    return fallback;
-  }
-}
-
-function writeStoredBoolean(key: string, value: boolean) {
-  if (typeof window === "undefined") return;
-  try {
-    window.localStorage.setItem(key, value ? "1" : "0");
-  } catch {
-    // ignore persistence failures
   }
 }
 
@@ -307,22 +274,12 @@ function applyThemeMode(mode: PersistedThemeMode) {
   document.documentElement.dataset.theme = resolved;
 }
 
-function PlaceholderSettingsView(props: { title: string; detail: string }) {
-  return (
-    <div className="rounded-[28px] border border-dls-border bg-dls-surface p-5 text-sm text-gray-10 md:p-6">
-      <div className="font-medium text-gray-12">{props.title}</div>
-      <div className="mt-2 leading-relaxed">{props.detail}</div>
-    </div>
-  );
-}
-
 export function SettingsRoute() {
   const navigate = useNavigate();
   const location = useLocation();
   const local = useLocal();
   const platform = usePlatform();
   const checkDesktopRestriction = useCheckDesktopRestriction();
-  const desktopConfig = useDesktopConfig();
   const reloadCoordinator = useReloadCoordinator();
   const route = parseSettingsPath(location.pathname);
   const openshellState = useOpenShellState({ active: route.tab === "sandbox" });
@@ -351,16 +308,7 @@ export function SettingsRoute() {
   const [disabledProviders, setDisabledProviders] = useState<string[]>([]);
   const [developerMode, setDeveloperMode] = useState(false);
   const [themeMode, setThemeMode] = useState<PersistedThemeMode>(readStoredThemeMode);
-  const [hideTitlebar, setHideTitlebar] = useState(() => readStoredBoolean(SETTINGS_HIDE_TITLEBAR_KEY, false));
-  const [updateAutoCheck, setUpdateAutoCheck] = useState(() =>
-    readStoredBoolean(SETTINGS_UPDATE_AUTO_CHECK_KEY, true),
-  );
-  const [updateAutoDownload, setUpdateAutoDownload] = useState(() =>
-    readStoredBoolean(SETTINGS_UPDATE_AUTO_DOWNLOAD_KEY, false),
-  );
   const [configActionStatus, setConfigActionStatus] = useState<string | null>(null);
-  const [revealConfigBusy, setRevealConfigBusy] = useState(false);
-  const [resetConfigBusy, setResetConfigBusy] = useState(false);
   const [createWorkspaceOpen, setCreateWorkspaceOpen] = useState(false);
   const [createSandboxOpen, setCreateSandboxOpen] = useState(false);
   const [createWorkspaceBusy, setCreateWorkspaceBusy] = useState(false);
@@ -579,6 +527,7 @@ export function SettingsRoute() {
             action: "updated",
           });
         },
+        cloudProvidersEnabled: () => false,
       }),
     [openrindDesktopServerStore, reloadCoordinator.markReloadRequired],
   );
@@ -613,20 +562,6 @@ export function SettingsRoute() {
     selectedWorkspaceRoot,
     setRouteError,
   });
-  const onReleaseChannelChange = useCallback(
-    (next: "stable" | "alpha") => {
-      local.setPrefs((previous) => ({ ...previous, releaseChannel: next }));
-    },
-    [local],
-  );
-  const electronUpdaterState = useElectronUpdaterState({
-    releaseChannel: local.prefs.releaseChannel ?? "stable",
-    onReleaseChannelChange,
-    updateAutoDownload,
-    desktopConfig: desktopConfig.config,
-    setError: setRouteError,
-  });
-
   const workspaceSessionGroups = useMemo(
     () => toSessionGroups(workspaces, sessionsByWorkspaceId, errorsByWorkspaceId),
     [errorsByWorkspaceId, sessionsByWorkspaceId, workspaces],
@@ -709,18 +644,6 @@ export function SettingsRoute() {
       window.localStorage.setItem(SETTINGS_THEME_KEY, themeMode);
     }
   }, [themeMode]);
-
-  useEffect(() => {
-    writeStoredBoolean(SETTINGS_HIDE_TITLEBAR_KEY, hideTitlebar);
-  }, [hideTitlebar]);
-
-  useEffect(() => {
-    writeStoredBoolean(SETTINGS_UPDATE_AUTO_CHECK_KEY, updateAutoCheck);
-  }, [updateAutoCheck]);
-
-  useEffect(() => {
-    writeStoredBoolean(SETTINGS_UPDATE_AUTO_DOWNLOAD_KEY, updateAutoDownload);
-  }, [updateAutoDownload]);
 
   const { markRouteReady: markBootRouteReady } = useBootState();
   const refreshRouteState = useMemo(() => async () => {
@@ -874,16 +797,6 @@ export function SettingsRoute() {
     };
   }, [connectionsStore, extensionsStore, openrindDesktopServerStore, providerAuthStore]);
 
-  // Periodically reconcile workspace-imported cloud providers from Den while
-  // signed in (dev #1509 "auto-sync cloud providers"). Mounted here because
-  // the settings route owns the provider-auth store.
-  useCloudProviderAutoSync(providerAuthStore.runCloudProviderSync);
-
-  useEffect(() => {
-    if (route.tab !== "den") return;
-    void providerAuthStore.runCloudProviderSync("settings_cloud_opened");
-  }, [providerAuthStore, route.tab]);
-
   useEffect(() => {
     openrindDesktopServerStore.syncFromOptions();
     connectionsStore.syncFromOptions();
@@ -925,7 +838,6 @@ export function SettingsRoute() {
   const defaultModelRef = local.prefs.defaultModel
     ? `${local.prefs.defaultModel.providerID}/${local.prefs.defaultModel.modelID}`
     : t("settings.default_label");
-  const defaultModelVariantLabel = local.prefs.modelVariant ?? t("settings.default_label");
   const providerStatusLabel = providerConnectedIds.length > 0 ? t("status.connected") : t("status.disconnected_label");
   const providerStatusStyle = providerConnectedIds.length > 0
     ? "bg-green-7/10 text-green-11 border-green-7/20"
@@ -1120,18 +1032,6 @@ export function SettingsRoute() {
             onToggleShowThinking={() => {
               local.setPrefs((previous) => ({ ...previous, showThinking: !previous.showThinking }));
             }}
-            defaultModelVariantLabel={defaultModelVariantLabel}
-            onConfigureModelBehavior={() => {
-              setRouteError("Model behavior picker is not wired into the React settings route yet.");
-            }}
-            autoCompactContext={false}
-            autoCompactContextBusy={false}
-            onToggleAutoCompactContext={() => {
-              setRouteError("Auto-compact controls are not wired into the React settings route yet.");
-            }}
-            onSendFeedback={() => platform.openLink(buildFeedbackUrl({ entrypoint: "settings" }))}
-            onJoinDiscord={() => platform.openLink("https://discord.gg/VEhNQXxYMB")}
-            onReportIssue={() => platform.openLink("https://github.com/different-ai/openwork/issues/new?template=bug.yml")}
           />
         );
       case "skills":
@@ -1143,9 +1043,8 @@ export function SettingsRoute() {
             canUseDesktopTools={!isRemoteWorkspace}
             accessHint={isRemoteWorkspace ? t("app.skills_hint_readonly") : null}
             extensions={extensionsStore}
-            onOpenLink={(url) => platform.openLink(url)}
-            createSessionAndOpen={async (_command?: string): Promise<string | undefined> => {
-              navigate("/session");
+            createSessionAndOpen={async (command?: string): Promise<string | undefined> => {
+              navigate("/session", { state: { initialPrompt: command } });
               return undefined;
             }}
           />
@@ -1202,20 +1101,6 @@ export function SettingsRoute() {
             }
           />
         );
-      case "den":
-        return (
-          <DenView
-            developerMode={developerMode}
-            extensions={extensionsStore}
-            openLink={(url) => platform.openLink(url)}
-            connectRemoteWorkspace={async () => false}
-            cloudOrgProviders={providerAuthSnapshot.cloudOrgProviders}
-            importedCloudProviders={providerAuthSnapshot.importedCloudProviders}
-            refreshCloudOrgProviders={providerAuthStore.refreshCloudOrgProviders}
-            connectCloudProvider={providerAuthStore.connectCloudProvider}
-            removeCloudProvider={providerAuthStore.removeCloudProvider}
-          />
-        );
       case "advanced":
         return (
           <AdvancedView
@@ -1228,27 +1113,8 @@ export function SettingsRoute() {
             openrindDesktopServerUrl={openrindDesktopServerSnapshot.openrindDesktopServerUrl}
             openrindDesktopReconnectBusy={openrindDesktopServerSnapshot.openrindDesktopReconnectBusy}
             reconnectOpenrindDesktopServer={openrindDesktopServerStore.reconnectOpenrindDesktopServer}
-            engineInfo={null}
-            restartLocalServer={async () => false}
-            stopHost={() => {}}
             developerMode={developerMode}
             toggleDeveloperMode={() => setDeveloperMode((current) => !current)}
-            opencodeDevModeEnabled={false}
-            openDebugDeepLink={async () => ({ ok: false, message: "Debug deep links are not wired into the React settings route yet." })}
-            opencodeEnableExa={false}
-            toggleOpencodeEnableExa={() => {
-              setRouteError("EXA controls are not wired into the React settings route yet.");
-            }}
-            microsandboxCreateSandboxEnabled={local.prefs.featureFlags.microsandboxCreateSandbox}
-            toggleMicrosandboxCreateSandbox={() => {
-              local.setPrefs((previous) => ({
-                ...previous,
-                featureFlags: {
-                  ...previous.featureFlags,
-                  microsandboxCreateSandbox: !previous.featureFlags.microsandboxCreateSandbox,
-                },
-              }));
-            }}
             configView={{
               busy,
               clientConnected: Boolean(opencodeClient),
@@ -1277,8 +1143,6 @@ export function SettingsRoute() {
             setThemeMode={setThemeMode}
             language={currentLocale() as Language}
             setLanguage={setLocale}
-            hideTitlebar={hideTitlebar}
-            toggleHideTitlebar={() => setHideTitlebar((current) => !current)}
           />
         );
       case "sandbox":
@@ -1303,57 +1167,6 @@ export function SettingsRoute() {
             onRefreshDoctor={() => void openshellState.refreshDoctor()}
             onOpenPolicyFolder={() => void openshellState.openPoliciesFolder()}
             os={platform.os}
-          />
-        );
-      case "updates":
-        return (
-          <UpdatesView
-            busy={busy}
-            webDeployment={platform.platform === "web"}
-            appVersion={electronUpdaterState.appVersion}
-            updateEnv={electronUpdaterState.updateEnv}
-            updateAutoCheck={updateAutoCheck}
-            toggleUpdateAutoCheck={() => setUpdateAutoCheck((current) => !current)}
-            updateAutoDownload={updateAutoDownload}
-            toggleUpdateAutoDownload={() => setUpdateAutoDownload((current) => !current)}
-            updateStatus={electronUpdaterState.updateStatus}
-            anyActiveRuns={activeReloadBlockingSessions.length > 0}
-            checkForUpdates={electronUpdaterState.checkForUpdates}
-            downloadUpdate={electronUpdaterState.downloadUpdate}
-            installUpdateAndRestart={electronUpdaterState.installUpdateAndRestart}
-            releaseChannel={local.prefs.releaseChannel ?? "stable"}
-            onReleaseChannelChange={electronUpdaterState.setReleaseChannel}
-            alphaChannelSupported={isElectronRuntime() && isMacPlatform()}
-          />
-        );
-      case "recovery":
-        return (
-          <RecoveryView
-            anyActiveRuns={false}
-            workspaceConfigPath={selectedWorkspaceRoot ? `${selectedWorkspaceRoot}/opencode.json` : ""}
-            revealConfigBusy={revealConfigBusy}
-            onRevealWorkspaceConfig={async () => {
-              setRevealConfigBusy(true);
-              setConfigActionStatus("Reveal workspace config is not wired into the React settings route yet.");
-              setRevealConfigBusy(false);
-            }}
-            resetConfigBusy={resetConfigBusy}
-            onResetAppConfigDefaults={async () => {
-              setResetConfigBusy(true);
-              setConfigActionStatus("Reset app config defaults is not wired into the React settings route yet.");
-              setResetConfigBusy(false);
-            }}
-            configActionStatus={configActionStatus}
-            cacheRepairBusy={false}
-            cacheRepairResult={null}
-            onRepairOpencodeCache={() => {
-              setRouteError("Cache repair is not wired into the React settings route yet.");
-            }}
-            dockerCleanupBusy={false}
-            dockerCleanupResult={null}
-            onCleanupOpenrindDesktopDockerContainers={() => {
-              setRouteError("Docker cleanup is not wired into the React settings route yet.");
-            }}
           />
         );
       case "environment":
@@ -1423,6 +1236,7 @@ export function SettingsRoute() {
           ) : undefined
         }
         workspaceSessionListProps={{
+          workspaceActionsEnabled: false,
           workspaceSessionGroups,
           selectedWorkspaceId,
           developerMode,

@@ -49,14 +49,12 @@ export type OpenShellInstallStatus = {
 export type OpenrindShellCredentialKey =
   | "databaseUrl"
   | "anthropicApiKey"
-  | "openrouterApiKey"
   | "openrindGatewayApiKey"
   | "elevenLabsApiKey";
 
 export type OpenrindShellCredentialStatus = {
   databaseUrl: "set" | "unset";
   anthropicApiKey: "set" | "unset";
-  openrouterApiKey: "set" | "unset";
   openrindGatewayApiKey: "set" | "unset";
   elevenLabsApiKey: "set" | "unset";
   encryptionAvailable: boolean;
@@ -64,8 +62,6 @@ export type OpenrindShellCredentialStatus = {
   databaseUrl_updatedAt?: number;
   anthropicApiKey_masked?: string;
   anthropicApiKey_updatedAt?: number;
-  openrouterApiKey_masked?: string;
-  openrouterApiKey_updatedAt?: number;
   openrindGatewayApiKey_masked?: string;
   openrindGatewayApiKey_updatedAt?: number;
   elevenLabsApiKey_masked?: string;

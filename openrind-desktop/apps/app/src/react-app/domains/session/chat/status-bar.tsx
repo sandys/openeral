@@ -1,12 +1,10 @@
 /** @jsxImportSource react */
 import { useEffect, useState } from "react";
-import { BookOpen, MessageCircle, Settings } from "lucide-react";
+import { Settings } from "lucide-react";
 
 import { t } from "../../../../i18n";
-import { usePlatform } from "../../../kernel/platform";
 import type { OpenrindDesktopServerStatus } from "../../../../app/lib/openrind-desktop-server";
 
-const DOCS_URL = "https://openrind-desktoplabs.com/docs";
 const STATUS_BAR_BOOT_STARTED_AT = Date.now();
 const STATUS_BAR_INITIALIZING_MS = 15_000;
 
@@ -15,7 +13,6 @@ export type StatusBarProps = {
   openrindDesktopServerStatus: OpenrindDesktopServerStatus;
   developerMode: boolean;
   settingsOpen: boolean;
-  onSendFeedback: () => void;
   onOpenSettings: () => void;
   providerConnectedIds: string[];
   mcpConnectedCount: number;
@@ -102,7 +99,6 @@ function deriveStatusCopy(props: StatusBarProps): StatusCopy {
 }
 
 export function StatusBar(props: StatusBarProps) {
-  const platform = usePlatform();
   const [initializing, setInitializing] = useState(
     () => Date.now() - STATUS_BAR_BOOT_STARTED_AT < STATUS_BAR_INITIALIZING_MS,
   );
@@ -142,28 +138,6 @@ export function StatusBar(props: StatusBarProps) {
         </div>
 
         <div className="flex items-center gap-1.5">
-          <button
-            type="button"
-            className="inline-flex h-8 items-center gap-1.5 rounded-md px-2 text-dls-secondary transition-colors hover:bg-dls-hover hover:text-dls-text"
-            onClick={() => platform.openLink(DOCS_URL)}
-            title={t("status.open_docs")}
-            aria-label={t("status.open_docs")}
-          >
-            <BookOpen className="h-4 w-4" />
-            <span className="text-[11px] font-medium">{t("status.docs")}</span>
-          </button>
-          <button
-            type="button"
-            className="inline-flex h-8 items-center gap-1.5 rounded-md px-2 text-dls-secondary transition-colors hover:bg-dls-hover hover:text-dls-text"
-            onClick={props.onSendFeedback}
-            title={t("status.send_feedback")}
-            aria-label={t("status.send_feedback")}
-          >
-            <MessageCircle className="h-4 w-4" />
-            <span className="text-[11px] font-medium">
-              {t("status.feedback")}
-            </span>
-          </button>
           {props.showSettingsButton !== false ? (
             <button
               type="button"

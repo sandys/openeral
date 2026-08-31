@@ -93,7 +93,7 @@ Openrind Desktop desktop ships through two release channels:
 Guidelines:
 
 - The Tauri alpha channel is an opt-in preference (`LocalPreferences.releaseChannel`). The normal Updates toggle is rendered only when `isTauriRuntime()` and `isMacPlatform()` both resolve true; other platforms silently fall back to stable even if the stored preference says `"alpha"`.
-- The Electron alpha channel is Debug-only during the migration window. Migrated Electron users can switch feeds from Settings → Debug → Electron alpha channel; the normal Updates page stays on the selected Electron feed and defaults to stable.
+- The Electron alpha channel is Debug-only during the migration window. Migrated Electron users can switch feeds from Settings → Debug → Electron alpha channel; stable remains the default feed.
 - Alpha builds advertise the next patch version plus an `-alpha.<runNumber>+<sha>` prerelease suffix. That keeps semver ordering `stable < alpha.1 < alpha.2 < next stable` so alpha users migrate forward cleanly when the next stable ships.
 - Alpha and stable share the same Tauri updater signing keypair so an installed stable can upgrade into alpha and vice versa without re-installing manually.
 - Apple signing and notarization are required on both channels; `alpha-macos-aarch64.yml` fails closed unless `MACOS_NOTARIZE=true`, and the `Release App` Electron job reuses the same Tauri Apple signing/notary secrets.
@@ -104,7 +104,7 @@ Code references:
 - Workflow: `.github/workflows/alpha-macos-aarch64.yml`
 - Endpoint resolution: `apps/app/src/app/lib/release-channels.ts`
 - Electron alpha resolver: `apps/app/src/app/lib/electron-alpha.ts`
-- Preference plumbing: `apps/app/src/react-app/kernel/local-provider.tsx`, `apps/app/src/react-app/domains/settings/pages/updates-view.tsx`, `apps/app/src/react-app/domains/settings/pages/debug-view.tsx`
+- Preference plumbing: `apps/app/src/react-app/kernel/local-provider.tsx`, `apps/app/src/react-app/domains/settings/pages/debug-view.tsx`
 - Stable workflow (reference): `.github/workflows/release-macos-aarch64.yml`
 
 ## Reload-required flow

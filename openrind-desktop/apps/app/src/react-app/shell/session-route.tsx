@@ -53,7 +53,6 @@ import type {
   ProviderListItem,
   WorkspaceSessionGroup,
 } from "../../app/types";
-import { buildFeedbackUrl } from "../../app/lib/feedback";
 import { isDesktopRuntime, isSandboxWorkspace, normalizeDirectoryPath, safeStringify } from "../../app/utils";
 import { t } from "../../i18n";
 import { useLocal } from "../kernel/local-provider";
@@ -379,6 +378,8 @@ export function SessionRoute() {
   const [routeError, setRouteError] = useState<string | null>(null);
   const [selectedWorkspaceId, setSelectedWorkspaceId] = useState<string>(() => readActiveWorkspaceId() ?? "");
   const [selectedAgent, setSelectedAgent] = useState<string | null>(null);
+  const [initialSessionDraft, setInitialSessionDraft] = useState<{ sessionId: string; text: string } | null>(null);
+  const initialPromptHandoffRef = useRef<string | null>(null);
   // One-way latch for "a refreshRouteState is currently running"; prevents
   // overlapping route refreshes from queueing up when the user clicks fast.
   const refreshInFlightRef = useRef(false);
@@ -959,6 +960,7 @@ export function SessionRoute() {
     const handoff = (
       location.state as {
         openrindSandbox?: { name?: string; profile?: string };
+        initialPrompt?: string;
       } | null
     )?.openrindSandbox;
     const openModal = (location.state as any)?.openCreateSandboxModal;
@@ -1374,12 +1376,24 @@ export function SessionRoute() {
       openrindDesktopToken: token,
       developerMode: false,
       modelLabel,
+      initialDraft:
+        initialSessionDraft?.sessionId === selectedSessionId
+          ? initialSessionDraft.text
+          : undefined,
       onModelClick: () => {
         setModelPickerQuery("");
         setModelPickerOpen(true);
       },
       onOpenSettingsSection: (section: "commands" | "skills" | "mcps" | "plugins") => {
-        navigate(section === "skills" ? "/settings/skills" : section === "mcps" ? "/settings/mcp" : section === "plugins" ? "/settings/den" : "/settings/general");
+        navigate(
+          section === "skills"
+            ? "/settings/skills"
+            : section === "mcps"
+              ? "/settings/extensions/mcp"
+              : section === "plugins"
+                ? "/settings/extensions/plugins"
+                : "/settings/general",
+        );
       },
       onSendDraft: async (draft: ComposerDraft) => {
         const text = (draft.resolvedText ?? draft.text).trim();
@@ -1465,6 +1479,7 @@ export function SessionRoute() {
     };
   }, [
     client,
+    initialSessionDraft,
     local,
     listSlashCommands,
     modelLabel,
@@ -1610,7 +1625,7 @@ export function SessionRoute() {
     await refreshRouteState();
   }, [client, forgetWorkspaceId, navigate, refreshRouteState, selectedWorkspaceId]);
 
-  const handleCreateTaskInWorkspace = useCallback(async (workspaceId: string) => {
+  const handleCreateTaskInWorkspace = useCallback(async (workspaceId: string, initialPrompt?: string) => {
     const workspace = workspaces.find((item) => item.id === workspaceId);
     if (
       !workspace ||
@@ -1639,8 +1654,13 @@ export function SessionRoute() {
         ...current,
         [workspaceId]: [session as any, ...(current[workspaceId] ?? [])],
       }));
+      const prompt = initialPrompt?.trim();
+      if (prompt) {
+        setInitialSessionDraft({ sessionId: session.id, text: prompt });
+      }
       navigate(`/session/${session.id}`);
       void refreshRouteState();
+      return session.id;
     } catch (error) {
       const message = describeRouteError(error);
       setRouteError(message);
@@ -1656,6 +1676,19 @@ export function SessionRoute() {
       }
     }
   }, [baseUrl, errorsByWorkspaceId, loading, navigate, refreshRouteState, retryingWorkspaceIds, token, workspaces]);
+
+  useEffect(() => {
+    const initialPrompt = (
+      location.state as { initialPrompt?: string } | null
+    )?.initialPrompt?.trim();
+    if (!initialPrompt || !selectedWorkspaceId || loading) return;
+    const handoffKey = `${selectedWorkspaceId}:${initialPrompt}`;
+    if (initialPromptHandoffRef.current === handoffKey) return;
+    initialPromptHandoffRef.current = handoffKey;
+    void handleCreateTaskInWorkspace(selectedWorkspaceId, initialPrompt).then((sessionId) => {
+      if (!sessionId) initialPromptHandoffRef.current = null;
+    });
+  }, [handleCreateTaskInWorkspace, loading, location.state, selectedWorkspaceId]);
 
   // Global shortcuts:
   //   Cmd/Ctrl+N  -> new task in selected workspace
@@ -1936,13 +1969,6 @@ export function SessionRoute() {
       providerConnectedIds={providerConnectedIds}
       providers={providers}
       mcpConnectedCount={0}
-      onSendFeedback={() => {
-        platform.openLink(
-          buildFeedbackUrl({
-            entrypoint: "status-bar",
-          }),
-        );
-      }}
       onOpenSettings={() => navigate("/settings/general")}
       sidebar={{
         workspaceSessionGroups,

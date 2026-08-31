@@ -119,7 +119,7 @@ function useNativeMenuActions() {
           navigate("/session", { state: { openCreateSandboxModal: true } });
           break;
         case "about":
-          navigate("/settings/updates");
+          navigate("/settings/general");
           break;
         default:
           break;

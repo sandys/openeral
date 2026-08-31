@@ -22,6 +22,7 @@ type Props = {
   developerMode: boolean;
   selectedSessionId: string | null;
   showSessionActions?: boolean;
+  workspaceActionsEnabled?: boolean;
   sessionStatusById?: Record<string, string>;
   connectingWorkspaceId: string | null;
   workspaceConnectionStateById: Record<string, WorkspaceConnectionState>;
@@ -469,7 +470,7 @@ export function WorkspaceSessionList(props: Props) {
               isConnecting || connectionState.status === "connecting";
             const canRecover =
               workspace.workspaceType === "remote" && connectionState.status === "error";
-            const isMenuOpen = workspaceMenuId === workspace.id;
+            const isMenuOpen = props.workspaceActionsEnabled !== false && workspaceMenuId === workspace.id;
             const taskLoadError = getWorkspaceTaskLoadErrorDisplay(workspace, group.error);
             const statusLabel = (() => {
               if (group.status === "error") return taskLoadError.label;
@@ -564,17 +565,19 @@ export function WorkspaceSessionList(props: Props) {
                           <Plus size={14} />
                         </button>
 
-                        <button
-                          type="button"
-                          className="rounded-md p-1 text-gray-9 hover:bg-gray-3/80 hover:text-gray-11"
-                          onClick={(event) => {
-                            event.stopPropagation();
-                            setWorkspaceMenuId((current) => (current === workspace.id ? null : workspace.id));
-                          }}
-                          aria-label={t("workspace_list.workspace_options")}
-                        >
-                          <MoreHorizontal size={14} />
-                        </button>
+                        {props.workspaceActionsEnabled !== false ? (
+                          <button
+                            type="button"
+                            className="rounded-md p-1 text-gray-9 hover:bg-gray-3/80 hover:text-gray-11"
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              setWorkspaceMenuId((current) => (current === workspace.id ? null : workspace.id));
+                            }}
+                            aria-label={t("workspace_list.workspace_options")}
+                          >
+                            <MoreHorizontal size={14} />
+                          </button>
+                        ) : null}
                       </div>
 
                       <button
