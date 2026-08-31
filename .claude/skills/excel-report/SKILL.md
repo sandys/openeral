@@ -1,66 +1,295 @@
 ---
 name: excel-report
-description: Create an auditable Markdown report for uploaded Microsoft Excel .xlsx workbooks in an Openrind Shell sandbox.
+description: Create an auditable Markdown report for any uploaded Microsoft Excel (.xlsx) or CSV files in an Openrind Shell sandbox.
 disable-model-invocation: false
 user-invocable: true
-allowed-tools: Read, Bash, Glob
-argument-hint: [path to .xlsx file]
+allowed-tools: Read, Bash, Glob, Write
+argument-hint: [optional: path to .xlsx or .csv file(s)]
 ---
 
-# Excel Reporting
+# Excel & CSV Reporting
 
-Perform the analysis yourself when this skill loads; skills do not run background
-jobs. Never claim a workbook was analyzed until the parsing command succeeds.
+**CRITICAL INSTRUCTION FOR CLAUDE**:
+- This skill does **NOT** spawn background processes or background task IDs. There is **NO** task ID (never call `Task Output` or wait for `skill_run`).
+- You (Claude) must directly and immediately execute the `Bash` command in Step 2 to generate the parsed data and then write the final report.
+- Never claim data was analyzed until the parsing command succeeds.
 
-## Locate Input And Output
+## Core Rules
 
-Determine the runtime first:
+- **Zero External Dependencies**: Standard `python3` (built-in `zipfile`, `xml.etree.ElementTree`, `csv`, `math`, `statistics`, `json`) is used directly.
+- **Never probe or search for tools**: Do NOT execute `which libreoffice`, `which csvkit`, `which unzip`, or `apt list`.
+- **Never run network package installs**: Do NOT run `pip install`, `uv pip install`, or attempt downloading external packages. The built-in Python script parses `.xlsx` OpenXML and `.csv` natively, offline, and in milliseconds.
+- **Generic for ANY File**: Works on any user-provided `.xlsx` or `.csv` files regardless of schema, number of sheets, column types, or missing values.
+
+## Step 1: Locate Target Files
+
+Determine the inbox directory and find the target file(s):
 
 ```bash
 if mountpoint -q /sandbox/work 2>/dev/null; then
   INBOX=/sandbox/work/inbox
-else
+elif [ -d "/sandbox/inbox" ]; then
   INBOX=/sandbox/inbox
+else
+  INBOX="."
 fi
 mkdir -p "$INBOX"
-find "$INBOX" /sandbox -maxdepth 3 -type f -iname '*.xlsx' -print 2>/dev/null
 ```
 
-Prefer the persisted FUSE inbox when available. In compatibility mode, `/sandbox/inbox`
-is sandbox-local unless it lies under an explicitly synchronized prefix.
-
-## Read Workbooks
-
-Use Python rather than `cat`:
+If specific file path(s) were given in the user prompt or skill argument, use those.
+Otherwise, discover all workbooks dynamically:
 
 ```bash
-uv venv /tmp/openrind-excel-venv
-uv pip install --python /tmp/openrind-excel-venv openpyxl pandas tabulate
+find "$INBOX" /sandbox . -maxdepth 3 -type f \( -iname '*.xlsx' -o -iname '*.csv' \) 2>/dev/null | sort -u
 ```
 
-Write a short parser under `/tmp` that calls
-`pandas.read_excel(path, sheet_name=None)` and prints, for every worksheet:
+## Step 2: Run The Self-Contained Parser
 
-- row and column counts;
-- column names and data types;
-- null and duplicate counts;
-- date/numeric ranges and descriptive statistics;
-- a small sample used only to validate interpretation.
+Create `/tmp/openrind-excel-parse.py` and run it against the target file(s) with `python3`:
 
-Run it with `/tmp/openrind-excel-venv/bin/python` against the absolute workbook paths.
-Do not include secrets or unnecessary row-level personal data in the report.
+```bash
+cat << 'EOF' > /tmp/openrind-excel-parse.py
+import sys, os, zipfile, csv, json, re, math, statistics
+from pathlib import Path
+import xml.etree.ElementTree as ET
+from collections import Counter
 
-## Report Contract
+def col_letter_to_index(col_str):
+    idx = 0
+    for char in col_str.upper():
+        if 'A' <= char <= 'Z':
+            idx = idx * 26 + (ord(char) - ord('A') + 1)
+    return idx - 1
 
-Create `$INBOX/analysis-report.md` with:
+def parse_cell_ref(cell_ref):
+    m = re.match(r'([A-Za-z]+)([0-9]+)', cell_ref)
+    if m:
+        return col_letter_to_index(m.group(1)), int(m.group(2))
+    return None, None
 
-1. Executive Summary
-2. Data Scope
-3. Key Metrics And Statistics
-4. Detailed Findings
-5. Data-Quality Risks
-6. Next Steps
+def read_xlsx(file_path):
+    sheets_data = {}
+    with zipfile.ZipFile(file_path, 'r') as z:
+        shared_strings = []
+        if 'xl/sharedStrings.xml' in z.namelist():
+            tree = ET.fromstring(z.read('xl/sharedStrings.xml'))
+            for si in tree.findall('.//{*}si'):
+                texts = [t.text for t in si.findall('.//{*}t') if t.text is not None]
+                shared_strings.append(''.join(texts))
+
+        rel_map = {}
+        if 'xl/_rels/workbook.xml.rels' in z.namelist():
+            rels_tree = ET.fromstring(z.read('xl/_rels/workbook.xml.rels'))
+            for rel in rels_tree.findall('.//{*}Relationship'):
+                r_id = rel.get('Id')
+                target = rel.get('Target', '')
+                if target.startswith('/'):
+                    target = target[1:]
+                if not target.startswith('xl/'):
+                    target = 'xl/' + target
+                rel_map[r_id] = target
+
+        sheets = []
+        if 'xl/workbook.xml' in z.namelist():
+            wb_tree = ET.fromstring(z.read('xl/workbook.xml'))
+            for idx, sheet_el in enumerate(wb_tree.findall('.//{*}sheet')):
+                name = sheet_el.get('name') or f'Sheet{idx+1}'
+                r_id = (sheet_el.get('{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id')
+                        or sheet_el.get('r:id') or sheet_el.get('id'))
+                target = rel_map.get(r_id, f'xl/worksheets/sheet{idx+1}.xml')
+                sheets.append({'name': name, 'path': target})
+
+        if not sheets:
+            for name in z.namelist():
+                if name.startswith('xl/worksheets/sheet') and name.endswith('.xml'):
+                    sheets.append({'name': Path(name).stem, 'path': name})
+
+        for s in sheets:
+            path = s['path']
+            if path not in z.namelist():
+                alt = 'xl/' + path if not path.startswith('xl/') else path[3:]
+                if alt in z.namelist():
+                    path = alt
+                else:
+                    continue
+
+            ws_tree = ET.fromstring(z.read(path))
+            rows_data = []
+            max_col = 0
+
+            for row_el in ws_tree.findall('.//{*}row'):
+                row_dict = {}
+                for c_el in row_el.findall('.//{*}c'):
+                    ref = c_el.get('r')
+                    t = c_el.get('t', 'n')
+                    val = None
+
+                    if t == 's':
+                        v_el = c_el.find('.//{*}v')
+                        if v_el is not None and v_el.text:
+                            try:
+                                s_idx = int(v_el.text)
+                                if s_idx < len(shared_strings):
+                                    val = shared_strings[s_idx]
+                            except ValueError:
+                                val = v_el.text
+                    elif t == 'inlineStr':
+                        t_el = c_el.find('.//{*}is/{*}t')
+                        if t_el is None:
+                            t_el = c_el.find('.//{*}t')
+                        if t_el is not None and t_el.text:
+                            val = t_el.text
+                    elif t == 'b':
+                        v_el = c_el.find('.//{*}v')
+                        val = (v_el.text == '1') if v_el is not None and v_el.text else False
+                    elif t in ('str', 'e'):
+                        v_el = c_el.find('.//{*}v')
+                        val = v_el.text if v_el is not None else None
+                    else:
+                        v_el = c_el.find('.//{*}v')
+                        if v_el is not None and v_el.text:
+                            raw = v_el.text
+                            try:
+                                f_val = float(raw)
+                                val = int(f_val) if f_val.is_integer() else f_val
+                            except ValueError:
+                                val = raw
+
+                    col_idx = None
+                    if ref:
+                        col_idx, _ = parse_cell_ref(ref)
+                    if col_idx is not None:
+                        row_dict[col_idx] = val
+                        if col_idx + 1 > max_col:
+                            max_col = col_idx + 1
+                rows_data.append(row_dict)
+
+            matrix = []
+            for r in rows_data:
+                row = [r.get(c, None) for c in range(max_col)]
+                matrix.append(row)
+
+            sheets_data[s['name']] = matrix
+
+    return sheets_data
+
+def read_csv(file_path):
+    encodings = ['utf-8-sig', 'utf-8', 'latin-1', 'cp1252']
+    raw_bytes = Path(file_path).read_bytes()
+    text = None
+    for enc in encodings:
+        try:
+            text = raw_bytes.decode(enc)
+            break
+        except UnicodeDecodeError:
+            continue
+    if text is None:
+        text = raw_bytes.decode('utf-8', errors='replace')
+    try:
+        dialect = csv.Sniffer().sniff(text[:4096])
+        delimiter = dialect.delimiter
+    except Exception:
+        delimiter = ','
+    reader = csv.reader(text.splitlines(), delimiter=delimiter)
+    matrix = []
+    for row in reader:
+        converted = []
+        for cell in row:
+            val = cell.strip()
+            if val == '':
+                converted.append(None)
+            else:
+                try:
+                    f = float(val.replace(',', ''))
+                    converted.append(int(f) if f.is_integer() else f)
+                except ValueError:
+                    converted.append(val)
+        matrix.append(converted)
+    return {'CSV Data': matrix}
+
+def analyze_matrix(matrix):
+    if not matrix:
+        return {'total_rows': 0, 'total_cols': 0, 'duplicate_rows': 0, 'headers': [], 'sample': [], 'columns': {}}
+    headers = [str(c) if c is not None and str(c).strip() != '' else f'Column_{i+1}' for i, c in enumerate(matrix[0])]
+    data_rows = matrix[1:]
+    total_rows = len(data_rows)
+    total_cols = len(headers)
+    row_tuples = [tuple(r) for r in data_rows]
+    dup_count = len(row_tuples) - len(set(row_tuples)) if total_rows > 0 else 0
+    columns_info = {}
+    for col_idx, col_name in enumerate(headers):
+        values = [r[col_idx] if col_idx < len(r) else None for r in data_rows]
+        non_null_values = [v for v in values if v is not None and v != '']
+        null_count = total_rows - len(non_null_values)
+        null_pct = (null_count / total_rows * 100) if total_rows > 0 else 0.0
+        unique_count = len(set(non_null_values))
+        numeric_vals = []
+        for v in non_null_values:
+            if isinstance(v, (int, float)) and not isinstance(v, bool):
+                numeric_vals.append(float(v))
+            elif isinstance(v, str):
+                try:
+                    numeric_vals.append(float(v.strip().replace(',', '')))
+                except ValueError:
+                    pass
+        is_numeric = len(numeric_vals) == len(non_null_values) and len(non_null_values) > 0
+        col_info = {'dtype': 'numeric' if is_numeric else 'text', 'missing_count': null_count, 'missing_pct': round(null_pct, 2), 'unique_count': unique_count}
+        if is_numeric and numeric_vals:
+            numeric_vals.sort()
+            n = len(numeric_vals)
+            mean_val = statistics.mean(numeric_vals)
+            std_val = statistics.stdev(numeric_vals) if n > 1 else 0.0
+            def percentile(s, p):
+                idx = (len(s) - 1) * p
+                l, u = int(math.floor(idx)), int(math.ceil(idx))
+                return s[l] if l == u else s[l] * (u - idx) + s[u] * (idx - l)
+            q1, q3 = percentile(numeric_vals, 0.25), percentile(numeric_vals, 0.75)
+            iqr = q3 - q1
+            outliers = [v for v in numeric_vals if v < (q1 - 1.5*iqr) or v > (q3 + 1.5*iqr)]
+            col_info['stats'] = {
+                'count': n, 'sum': round(sum(numeric_vals), 2), 'mean': round(mean_val, 2), 'std': round(std_val, 2),
+                'min': round(numeric_vals[0], 2), 'q1': round(q1, 2), 'median': round(statistics.median(numeric_vals), 2),
+                'q3': round(q3, 2), 'max': round(numeric_vals[-1], 2), 'iqr': round(iqr, 2), 'outlier_count': len(outliers)
+            }
+        else:
+            counts = Counter([str(v) for v in non_null_values]).most_common(5)
+            col_info['top_values'] = [{'value': k, 'count': c, 'pct': round(c/len(non_null_values)*100, 1) if non_null_values else 0} for k, c in counts]
+        columns_info[col_name] = col_info
+    return {'total_rows': total_rows, 'total_cols': total_cols, 'duplicate_rows': dup_count, 'headers': headers, 'sample': data_rows[:5], 'columns': columns_info}
+
+def process_file(p):
+    path = Path(p)
+    if not path.exists(): return None
+    sfx = path.suffix.lower()
+    if sfx in ('.xlsx', '.xlsm', '.xltx'):
+        sheets = read_xlsx(path); fmt = 'Excel Workbook'
+    elif sfx in ('.csv', '.tsv', '.txt'):
+        sheets = read_csv(path); fmt = 'CSV'
+    else: return None
+    return {'filename': path.name, 'path': str(path.absolute()), 'size_bytes': path.stat().st_size, 'format': fmt, 'sheets': {k: {'stats': analyze_matrix(v)} for k, v in sheets.items()}}
+
+target_files = sys.argv[1:]
+results = [process_file(f) for f in target_files if process_file(f)]
+print(json.dumps(results, indent=2))
+EOF
+```
+
+Run against the target file(s):
+
+```bash
+python3 /tmp/openrind-excel-parse.py "<path_to_file1>" ["<path_to_file2>" ...] > /tmp/parsed-excel.json
+```
+
+## Step 3: Write The Report Contract
+
+Read `/tmp/parsed-excel.json` and generate `$INBOX/analysis-report.md` with:
+
+1. **Executive Summary** — concise, factual overview of the files analyzed and critical findings.
+2. **Data Scope** — table showing file names, worksheet names, dimensions (rows × columns), and duplicate rows.
+3. **Key Metrics And Statistics** — tables with counts, means, medians, std dev, min, max, IQR outliers, and missing counts.
+4. **Detailed Findings** — column diagnostics, data distributions, categorical frequencies, and data previews.
+5. **Data-Quality Risks** — explicit itemization of missing values, duplicate records, and outliers tied to specific workbooks, sheets, and columns.
+6. **Next Steps** — actionable recommendations and investigative questions for further analysis.
 
 Tie each finding to a named workbook, sheet, and column. Distinguish observed facts
-from inference. Report parsing errors and unsupported workbook features explicitly.
-After writing the file, tell the user its exact path and include the report in chat.
+from inference. After writing the file, tell the user its exact path and include the full report in chat.
