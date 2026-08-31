@@ -196,14 +196,7 @@ def read_csv(file_path):
         converted = []
         for cell in row:
             val = cell.strip()
-            if val == '':
-                converted.append(None)
-            else:
-                try:
-                    f = float(val.replace(',', ''))
-                    converted.append(int(f) if f.is_integer() else f)
-                except ValueError:
-                    converted.append(val)
+            converted.append(val if val != '' else None)
         matrix.append(converted)
     return {'CSV Data': matrix}
 
