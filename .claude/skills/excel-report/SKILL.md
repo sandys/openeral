@@ -49,7 +49,7 @@ Create `/tmp/openrind-excel-parse.py` and run it against the target file(s) with
 
 ```bash
 cat << 'EOF' > /tmp/openrind-excel-parse.py
-import sys, os, zipfile, csv, json, re, math, statistics
+import sys, os, zipfile, csv, json, re, math, statistics, datetime
 from pathlib import Path
 import xml.etree.ElementTree as ET
 from collections import Counter
@@ -67,9 +67,76 @@ def parse_cell_ref(cell_ref):
         return col_letter_to_index(m.group(1)), int(m.group(2))
     return None, None
 
+def is_date_format_code(code):
+    if not code:
+        return False
+    cleaned = re.sub(r'"[^"]*"', '', code)
+    cleaned = re.sub(r'\[(?!\s*[hmsHMS]\s*\])[^\]]*\]', '', cleaned)
+    cleaned = re.sub(r'\\.', '', cleaned)
+    cleaned = re.sub(r'[_\*].', '', cleaned)
+    cl = cleaned.lower()
+    if re.search(r'[ydhs]|am/pm|a/p', cl):
+        return True
+    if re.search(r'(^|[^a-z0-9])m+($|[^a-z0-9])', cl):
+        return True
+    return False
+
+def format_excel_date(serial, is_1904=False):
+    if is_1904:
+        base = datetime.datetime(1904, 1, 1)
+        dt = base + datetime.timedelta(days=serial)
+    else:
+        base = datetime.datetime(1899, 12, 31) if serial < 60 else datetime.datetime(1899, 12, 30)
+        dt = base + datetime.timedelta(days=serial)
+    if dt.microsecond >= 500000:
+        dt += datetime.timedelta(seconds=1)
+    if serial < 1 and not is_1904:
+        return dt.strftime('%H:%M:%S')
+    if dt.hour == 0 and dt.minute == 0 and dt.second == 0:
+        return dt.strftime('%Y-%m-%d')
+    return dt.strftime('%Y-%m-%d %H:%M:%S')
+
 def read_xlsx(file_path):
     sheets_data = {}
     with zipfile.ZipFile(file_path, 'r') as z:
+        is_1904 = False
+        if 'xl/workbook.xml' in z.namelist():
+            wb_tree = ET.fromstring(z.read('xl/workbook.xml'))
+            wb_pr = wb_tree.find('.//{*}workbookPr')
+            if wb_pr is not None and wb_pr.get('date1904') in ('1', 'true', 'True'):
+                is_1904 = True
+
+        custom_num_fmts = {}
+        cell_xfs_num_fmt_ids = []
+        if 'xl/styles.xml' in z.namelist():
+            styles_tree = ET.fromstring(z.read('xl/styles.xml'))
+            for num_fmt in styles_tree.findall('.//{*}numFmt'):
+                fmt_id_str = num_fmt.get('numFmtId')
+                fmt_code = num_fmt.get('formatCode')
+                if fmt_id_str is not None and fmt_code is not None:
+                    try:
+                        custom_num_fmts[int(fmt_id_str)] = fmt_code
+                    except ValueError:
+                        pass
+            for xf in styles_tree.findall('.//{*}cellXfs/{*}xf'):
+                num_fmt_id_str = xf.get('numFmtId', '0')
+                try:
+                    cell_xfs_num_fmt_ids.append(int(num_fmt_id_str))
+                except ValueError:
+                    cell_xfs_num_fmt_ids.append(0)
+
+        builtin_date_fmt_ids = {
+            14, 15, 16, 17, 18, 19, 20, 21, 22,
+            27, 28, 29, 30, 31, 32, 33, 34, 35, 36,
+            45, 46, 47, 50, 51, 52, 53, 54, 55, 56, 57, 58
+        }
+        date_style_indices = set()
+        for idx, fmt_id in enumerate(cell_xfs_num_fmt_ids):
+            if fmt_id in builtin_date_fmt_ids:
+                date_style_indices.add(idx)
+            elif fmt_id in custom_num_fmts and is_date_format_code(custom_num_fmts[fmt_id]):
+                date_style_indices.add(idx)
+
         shared_strings = []
         if 'xl/sharedStrings.xml' in z.namelist():
             tree = ET.fromstring(z.read('xl/sharedStrings.xml'))
@@ -122,6 +189,9 @@ def read_xlsx(file_path):
                 for c_el in row_el.findall('.//{*}c'):
                     ref = c_el.get('r')
                     t = c_el.get('t', 'n')
+                    style_attr = c_el.get('s')
+                    style_idx = int(style_attr) if style_attr and style_attr.isdigit() else 0
+                    is_date_cell = style_idx in date_style_indices
                     val = None
 
                     if t == 's':
@@ -142,6 +212,9 @@ def read_xlsx(file_path):
                     elif t == 'b':
                         v_el = c_el.find('.//{*}v')
                         val = (v_el.text == '1') if v_el is not None and v_el.text else False
+                    elif t == 'd':
+                        v_el = c_el.find('.//{*}v')
+                        val = v_el.text if v_el is not None else None
                     elif t in ('str', 'e'):
                         v_el = c_el.find('.//{*}v')
                         val = v_el.text if v_el is not None else None
@@ -151,7 +224,13 @@ def read_xlsx(file_path):
                             raw = v_el.text
                             try:
                                 f_val = float(raw)
-                                val = int(f_val) if f_val.is_integer() else f_val
+                                if is_date_cell:
+                                    try:
+                                        val = format_excel_date(f_val, is_1904)
+                                    except Exception:
+                                        val = int(f_val) if f_val.is_integer() else f_val
+                                else:
+                                    val = int(f_val) if f_val.is_integer() else f_val
                             except ValueError:
                                 val = raw
 
