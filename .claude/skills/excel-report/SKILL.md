@@ -50,7 +50,7 @@ Create `/tmp/openrind-excel-parse.py` and run it against the target file(s) with
 
 ```bash
 cat << 'EOF' > /tmp/openrind-excel-parse.py
-import sys, os, zipfile, csv, json, re, math, statistics, datetime
+import sys, os, zipfile, csv, json, re, math, statistics, datetime, io
 from pathlib import Path
 import xml.etree.ElementTree as ET
 from collections import Counter
@@ -267,7 +267,7 @@ def read_csv(file_path):
         delimiter = dialect.delimiter
     except Exception:
         delimiter = ','
-    reader = csv.reader(text.splitlines(), delimiter=delimiter)
+    reader = csv.reader(io.StringIO(text), delimiter=delimiter)
     matrix = []
     for row in reader:
         converted = []
