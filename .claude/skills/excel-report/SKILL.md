@@ -378,7 +378,11 @@ def process_file(p):
     return {'filename': path.name, 'path': str(path.absolute()), 'size_bytes': path.stat().st_size, 'format': fmt, 'sheets': {k: {'stats': analyze_matrix(v)} for k, v in sheets.items()}}
 
 target_files = sys.argv[1:]
-results = [process_file(f) for f in target_files if process_file(f)]
+results = []
+for f in target_files:
+    res = process_file(f)
+    if res is not None:
+        results.append(res)
 print(json.dumps(results, indent=2))
 EOF
 ```
