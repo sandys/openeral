@@ -379,7 +379,7 @@ export function SessionRoute() {
   const [selectedWorkspaceId, setSelectedWorkspaceId] = useState<string>(() => readActiveWorkspaceId() ?? "");
   const [selectedAgent, setSelectedAgent] = useState<string | null>(null);
   const [initialSessionDraft, setInitialSessionDraft] = useState<{ sessionId: string; text: string } | null>(null);
-  const initialPromptHandoffRef = useRef<string | null>(null);
+  const initialPromptHandoffRef = useRef(false);
   // One-way latch for "a refreshRouteState is currently running"; prevents
   // overlapping route refreshes from queueing up when the user clicks fast.
   const refreshInFlightRef = useRef(false);
@@ -1681,14 +1681,13 @@ export function SessionRoute() {
     const initialPrompt = (
       location.state as { initialPrompt?: string } | null
     )?.initialPrompt?.trim();
-    if (!initialPrompt || !selectedWorkspaceId || loading) return;
-    const handoffKey = `${selectedWorkspaceId}:${initialPrompt}`;
-    if (initialPromptHandoffRef.current === handoffKey) return;
-    initialPromptHandoffRef.current = handoffKey;
-    void handleCreateTaskInWorkspace(selectedWorkspaceId, initialPrompt).then((sessionId) => {
-      if (!sessionId) initialPromptHandoffRef.current = null;
+    if (!initialPrompt || !selectedWorkspaceId || loading || initialPromptHandoffRef.current) return;
+    initialPromptHandoffRef.current = true;
+    navigate(location.pathname, { replace: true, state: null });
+    void handleCreateTaskInWorkspace(selectedWorkspaceId, initialPrompt).finally(() => {
+      initialPromptHandoffRef.current = false;
     });
-  }, [handleCreateTaskInWorkspace, loading, location.state, selectedWorkspaceId]);
+  }, [handleCreateTaskInWorkspace, loading, location.pathname, location.state, navigate, selectedWorkspaceId]);
 
   // Global shortcuts:
   //   Cmd/Ctrl+N  -> new task in selected workspace
