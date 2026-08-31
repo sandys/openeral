@@ -57,15 +57,6 @@ if [ -f "$FAST_FIRST_LAUNCH_MARKER" ]; then
 fi
 unset FAST_FIRST_LAUNCH_MARKER
 
-# Run Openrind Gateway proxy configuration on session launch!
-node /opt/openrind-shell/configure-openrind-gateway.mjs || true
-
-# If ANTHROPIC_API_KEY is not set but OPENROUTER_API_KEY is, alias them so
-# the agent (which expects ANTHROPIC_API_KEY) can authenticate seamlessly.
-if [ -z "${ANTHROPIC_API_KEY:-}" ] && [ -n "${OPENROUTER_API_KEY:-}" ]; then
-  export ANTHROPIC_API_KEY="$OPENROUTER_API_KEY"
-fi
-
 # Validate marker profile against the canonical agent variable from session.env
 expected_profile="openrind-shell-claude"
 if [ "${OPENRIND_SHELL_AGENT:-}" = "openclaw" ]; then
@@ -76,27 +67,39 @@ if [ "$profile" != "$expected_profile" ]; then
   exit 64
 fi
 
-# Set proxy configuration for Claude, unset for OpenClaw
+# The login shell is transport plumbing only. Replace it with the selected
+# FUSE-aware agent wrapper so Desktop never falls through to an interactive
+# bash prompt and neither agent can bypass its workspace/health setup.
 if [ "${OPENRIND_SHELL_AGENT:-}" = "openclaw" ]; then
   unset ANTHROPIC_BASE_URL
+  if [ ! -x /usr/local/bin/openrind-openclaw ]; then
+    echo "Openrind Shell: FUSE-aware OpenClaw launcher is missing."
+    exit 127
+  fi
+  if [ "$session_id" = auto ]; then
+    set -- /usr/local/bin/openrind-openclaw
+  else
+    set -- /usr/local/bin/openrind-openclaw "$session_id"
+  fi
 else
+  # Claude's wrapper owns FUSE health checks and the final durability flush.
+  # Refresh Gateway configuration from the credentials injected into this PTY.
+  node /opt/openrind-shell/configure-openrind-gateway.mjs || true
   if [ -f "$RUNTIME_DIR/anthropic-base-url" ]; then
     export ANTHROPIC_BASE_URL="$(cat "$RUNTIME_DIR/anthropic-base-url" 2>/dev/null | tr -d '\r\n ')"
   fi
-fi
-
-# Select binary based solely on the canonical variable
-AGENT_BIN="/usr/local/bin/claude"
-if [ "${OPENRIND_SHELL_AGENT:-}" = "openclaw" ]; then
-  if command -v openclaw >/dev/null 2>&1; then
-    AGENT_BIN="openclaw"
-  elif [ -x /usr/local/bin/openclaw ]; then
-    AGENT_BIN="/usr/local/bin/openclaw"
-  elif [ -x /usr/bin/openclaw ]; then
-    AGENT_BIN="/usr/bin/openclaw"
+  if [ ! -x /usr/local/bin/claude ]; then
+    echo "Openrind Shell: FUSE-aware Claude launcher is missing."
+    exit 127
+  fi
+  if [ "$session_id" = auto ]; then
+    set -- /usr/local/bin/claude
+  elif find "${OPENRIND_SHELL_CLAUDE_HOME:-/sandbox/claude-home}/.claude/projects" \
+      -type f -name "${session_id}.jsonl" -print -quit 2>/dev/null | grep -q .; then
+    set -- /usr/local/bin/claude --resume "$session_id"
   else
-    AGENT_BIN="/usr/bin/opencode"
+    set -- /usr/local/bin/claude --session-id "$session_id"
   fi
 fi
 
-exec /usr/local/bin/openrind-pty-bridge.py --framed "$AGENT_BIN"
+exec /usr/local/bin/openrind-pty-bridge.py --framed "$@"

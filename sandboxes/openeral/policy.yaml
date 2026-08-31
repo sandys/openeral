@@ -76,7 +76,7 @@ network_policies:
     binaries:
       - { path: /usr/local/bin/claude }
       - { path: /usr/local/bin/claude-real }
-      - { path: /usr/bin/node }
+      - { path: /usr/local/bin/openrind-openclaw-agent }
 
   # --- Socket.dev package registry ---
   # When --provider socket is configured with SOCKET_TOKEN, npm traffic
@@ -215,22 +215,6 @@ network_policies:
         access: full
     binaries:
       - { path: /usr/local/bin/claude-real }
-
-  # --- OpenRouter ---
-  openrouter:
-    name: openrouter
-    endpoints:
-      - host: openrouter.ai
-        port: 443
-        protocol: rest
-        enforcement: enforce
-        access: full
-    binaries:
-      - { path: /usr/local/bin/claude }
-      - { path: /usr/local/bin/claude-real }
-      - { path: /usr/bin/node }
-      - { path: /usr/bin/openclaw }
-      - { path: /usr/local/bin/openclaw }
 
   # --- Legacy StringCost endpoints (one-release migration window) ---
   # setup.sh sends both provider placeholders to this endpoint. OpenShell

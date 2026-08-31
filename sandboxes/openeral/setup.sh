@@ -559,6 +559,21 @@ if [ -n "${DATABASE_URL:-}" ]; then
 fi
 
 # Configure Socket.dev registry if SOCKET_TOKEN provider is available.
+# Ensure bundled skills are present in Claude's home for compatibility runtime
+COMPAT_SKILLS_SRC=""
+[ -d /opt/openrind-shell/skills ] && COMPAT_SKILLS_SRC=/opt/openrind-shell/skills
+[ -z "$COMPAT_SKILLS_SRC" ] && [ -d /sandbox/.skills ] && COMPAT_SKILLS_SRC=/sandbox/.skills
+if [ -n "$COMPAT_SKILLS_SRC" ]; then
+  mkdir -p "$OPENERAL_HOME/.claude/skills" 2>/dev/null || true
+  for skill_dir in "$COMPAT_SKILLS_SRC"/*; do
+    if [ -d "$skill_dir" ]; then
+      skill_name="$(basename "$skill_dir")"
+      if [ ! -d "$OPENERAL_HOME/.claude/skills/$skill_name" ]; then
+        cp -r "$skill_dir" "$OPENERAL_HOME/.claude/skills/" 2>/dev/null || true
+      fi
+    fi
+  done
+fi
 # The token value is a placeholder (openshell:resolve:env:SOCKET_TOKEN) —
 # the OpenShell proxy resolves it to the real token in auth headers.
 #

@@ -21,10 +21,6 @@ const legacyPresignPath = join(home, '.openeral', 'presign.json');
 const settingsPath = join(home, '.claude', 'settings.json');
 const baseUrlPath = join(runtimeDir, 'anthropic-base-url');
 
-const OR_NAME = ['open', 'router'].join('');
-const OR_PREFIX = OR_NAME + '/';
-const OR_KEY_ENV = 'OPEN' + 'ROUTER_API_KEY';
-
 function normalize(raw) {
   const match = String(raw || '').trim().match(
     /https:\/\/(?:proxy\.openrind\.com\/openrind-gateway-proxy|proxy\.stringcost\.com\/stringcost-proxy)\/t\/[^\s"'<>]+/,
@@ -91,7 +87,7 @@ function storedPresign() {
   return '';
 }
 
-async function createPresign(gatewayKey, clientKey, isOr, useOpenrind) {
+async function createPresign(gatewayKey, clientKey, useOpenrind) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 30_000);
   try {
@@ -104,9 +100,9 @@ async function createPresign(gatewayKey, clientKey, isOr, useOpenrind) {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        provider: isOr ? OR_NAME : 'anthropic',
+        provider: 'anthropic',
         client_api_key: clientKey,
-        path: isOr ? ['/v1/messages', '/v1/chat/completions', '/v1/chat/completions'] : ['/v1/messages'],
+        path: ['/v1/messages'],
         expires_in: -1,
         max_uses: -1,
         cost_limit: 10_000_000,
@@ -142,11 +138,6 @@ function persistGateway(baseUrl) {
   try { settings = JSON.parse(readFileSync(settingsPath, 'utf8')); } catch {}
   settings.env = settings.env && typeof settings.env === 'object' ? settings.env : {};
   settings.env.ANTHROPIC_BASE_URL = baseUrl;
-  settings.env.ANTHROPIC_DEFAULT_SONNET_MODEL ||= OR_PREFIX + 'free';
-  settings.env.ANTHROPIC_DEFAULT_OPUS_MODEL ||= OR_PREFIX + 'free';
-  settings.env.ANTHROPIC_DEFAULT_HAIKU_MODEL ||= OR_PREFIX + 'free';
-  settings.env.ANTHROPIC_DEFAULT_FABLE_MODEL ||= OR_PREFIX + 'free';
-  settings.env.CLAUDE_CODE_SUBAGENT_MODEL ||= OR_PREFIX + 'free';
   delete settings.env.ANTHROPIC_API_KEY;
   delete settings.env.ANTHROPIC_AUTH_TOKEN;
   delete settings.env.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY;
@@ -161,38 +152,21 @@ function persistGateway(baseUrl) {
   chmodSync(baseUrlPath, 0o600);
 }
 
-function persistDirect(clientKey, isOr) {
+function persistDirect(clientKey) {
   mkdirSync(dirname(settingsPath), { recursive: true });
   let settings = {};
   try { settings = JSON.parse(readFileSync(settingsPath, 'utf8')); } catch {}
   settings.env = settings.env && typeof settings.env === 'object' ? settings.env : {};
-  
-  if (isOr) {
-    settings.env.ANTHROPIC_BASE_URL = 'https://' + OR_NAME + '.ai/api';
-    settings.env.ANTHROPIC_API_KEY = clientKey;
-    settings.env.ANTHROPIC_DEFAULT_SONNET_MODEL = OR_PREFIX + 'free';
-    settings.env.ANTHROPIC_DEFAULT_OPUS_MODEL = OR_PREFIX + 'free';
-    settings.env.ANTHROPIC_DEFAULT_HAIKU_MODEL = OR_PREFIX + 'free';
-    settings.env.ANTHROPIC_DEFAULT_FABLE_MODEL = OR_PREFIX + 'free';
-    settings.env.CLAUDE_CODE_SUBAGENT_MODEL = OR_PREFIX + 'free';
-    
-    writeFileSync(baseUrlPath, `https://${OR_NAME}.ai/api\n`, { mode: 0o600 });
-    chmodSync(baseUrlPath, 0o600);
-  } else {
-    delete settings.env.ANTHROPIC_BASE_URL;
-    settings.env.ANTHROPIC_API_KEY = clientKey;
-    
-    delete settings.env.ANTHROPIC_DEFAULT_OPUS_MODEL;
-    delete settings.env.ANTHROPIC_DEFAULT_SONNET_MODEL;
-    delete settings.env.ANTHROPIC_DEFAULT_HAIKU_MODEL;
-    delete settings.env.ANTHROPIC_DEFAULT_FABLE_MODEL;
-    delete settings.env.CLAUDE_CODE_SUBAGENT_MODEL;
-    
-    rmSync(baseUrlPath, { force: true });
-  }
-  
+  delete settings.env.ANTHROPIC_BASE_URL;
+  settings.env.ANTHROPIC_API_KEY = clientKey;
+  delete settings.env.ANTHROPIC_DEFAULT_OPUS_MODEL;
+  delete settings.env.ANTHROPIC_DEFAULT_SONNET_MODEL;
+  delete settings.env.ANTHROPIC_DEFAULT_HAIKU_MODEL;
+  delete settings.env.ANTHROPIC_DEFAULT_FABLE_MODEL;
+  delete settings.env.CLAUDE_CODE_SUBAGENT_MODEL;
   delete settings.env.ANTHROPIC_AUTH_TOKEN;
   writeFileSync(settingsPath, `${JSON.stringify(settings, null, 2)}\n`);
+  rmSync(baseUrlPath, { force: true });
 }
 
 async function main() {
@@ -217,20 +191,12 @@ async function main() {
   const legacyKey = process.env.STRINGCOST_API_KEY;
   const gatewayKey = openrindKey || legacyKey;
 
-  let clientKey = '';
-  let isOr = false;
-  if (process.env.ANTHROPIC_API_KEY) {
-    clientKey = process.env.ANTHROPIC_API_KEY;
-    isOr = false;
-  } else if (process.env[OR_KEY_ENV] || process.env.ANTHROPIC_AUTH_TOKEN) {
-    clientKey = process.env[OR_KEY_ENV] || process.env.ANTHROPIC_AUTH_TOKEN;
-    isOr = true;
-  }
+  const clientKey = process.env.ANTHROPIC_API_KEY || '';
 
   if (gatewayKey) {
     if (!baseUrl && clientKey) {
       try {
-        baseUrl = await createPresign(gatewayKey, clientKey, isOr, !!openrindKey);
+        baseUrl = await createPresign(gatewayKey, clientKey, !!openrindKey);
       } catch (error) {
         process.stderr.write(`setup-fuse.sh: Openrind Gateway presign failed: ${error.message}\n`);
       }
@@ -243,8 +209,8 @@ async function main() {
     }
   } else {
     if (clientKey) {
-      persistDirect(clientKey, isOr);
-      process.stdout.write(`setup-fuse.sh: Direct provider configured (isOr=${isOr})\n`);
+      persistDirect(clientKey);
+      process.stdout.write('setup-fuse.sh: Direct Anthropic provider configured\n');
     } else {
       rmSync(baseUrlPath, { force: true });
     }

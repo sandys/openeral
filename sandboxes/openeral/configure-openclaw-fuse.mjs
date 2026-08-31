@@ -72,38 +72,37 @@ config.models.providers = isObject(config.models.providers)
   ? config.models.providers
   : {};
 
-const requestedModel = String(process.env.OPENRIND_SHELL_OPENCLAW_MODEL || "").trim();
+const requestedModel = String(
+  process.env.OPENRIND_SHELL_OPENCLAW_MODEL || "",
+).trim();
 const configuredModel = String(config.agents.defaults.model.primary || "").trim();
 const providerPrefix = `${PROVIDER_ID}/`;
 const defaultModel = `${providerPrefix}${DEFAULT_MODEL_ID}`;
 
-// OpenShell injects the Anthropic credential into OpenClaw's fixed-target
-// launcher. Keep the OpenClaw model route distinct from the built-in Anthropic
-// provider so ambient Anthropic settings cannot change the gateway endpoint.
 const candidateModel = requestedModel || configuredModel;
-const primaryModel =
-  candidateModel.startsWith(providerPrefix) && candidateModel.length > providerPrefix.length
+const primaryModel = candidateModel.startsWith(providerPrefix) && candidateModel.length > providerPrefix.length
     ? candidateModel
     : defaultModel;
-const modelId = primaryModel.slice(providerPrefix.length);
 config.agents.defaults.model.primary = primaryModel;
 
+for (const model of Object.keys(config.agents.defaults.models)) {
+  if (model.startsWith("openrouter/")) delete config.agents.defaults.models[model];
+}
 config.agents.defaults.models[primaryModel] = isObject(
   config.agents.defaults.models[primaryModel],
 )
   ? config.agents.defaults.models[primaryModel]
   : {};
 
+config.env = isObject(config.env) ? config.env : {};
+delete config.env.OPENROUTER_API_KEY;
+delete config.models.providers.openrouter;
+const modelId = primaryModel.slice(providerPrefix.length);
 config.models.providers[PROVIDER_ID] = {
   baseUrl: PROVIDER_BASE_URL,
   apiKey: "${ANTHROPIC_API_KEY}",
   api: "anthropic-messages",
-  models: [
-    {
-      id: modelId,
-      name: modelId === DEFAULT_MODEL_ID ? "Claude Sonnet 4.6" : modelId,
-    },
-  ],
+  models: [{ id: modelId, name: modelId === DEFAULT_MODEL_ID ? "Claude Sonnet 4.6" : modelId }],
 };
 
 mkdirSync(dirname(configPath), { recursive: true, mode: 0o700 });

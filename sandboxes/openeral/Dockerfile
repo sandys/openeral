@@ -15,7 +15,7 @@ RUN cargo build --locked --release -p openeral-fused \
 
 FROM ghcr.io/nvidia/openshell-community/sandboxes/base:latest
 
-LABEL com.openrind.desktop.fuse-contract="fuse-openclaw-identity-v19"
+LABEL com.openrind.desktop.fuse-contract="fuse-openclaw-identity-v22"
 
 USER root
 
@@ -65,8 +65,9 @@ RUN chmod 755 /usr/local/bin/openrind-shell-fused /usr/local/bin/claude /usr/loc
         /opt/openrind-shell/configure-openrind-gateway.mjs \
         /opt/openrind-shell/configure-openclaw-fuse.mjs \
     && bash -n /usr/local/bin/openrind-openclaw \
+    && bash -n /opt/openrind-shell/setup.sh \
     && node --check /opt/openrind-shell/configure-openclaw-fuse.mjs \
-    && printf '%s' fuse-openclaw-identity-v19 > /opt/openrind-shell/desktop-contract \
+    && printf '%s' fuse-openclaw-identity-v22 > /opt/openrind-shell/desktop-contract \
     && ln -sf /usr/local/bin/openrind-shell-fused /usr/local/bin/openeral-fused \
     && ln -sf /opt/openrind-shell/setup.sh /usr/local/bin/openrind-shell \
     && ln -sf /opt/openrind-shell/setup.sh /usr/local/bin/openrind-shell-init \

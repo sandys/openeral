@@ -33,6 +33,22 @@ if command -v openrind-shell-daemon-ensure >/dev/null 2>&1; then
   openrind-shell-daemon-ensure
 fi
 
+# Ensure bundled skills are present in Claude's home
+COMPAT_SKILLS_SRC=""
+[ -d /opt/openrind-shell/skills ] && COMPAT_SKILLS_SRC=/opt/openrind-shell/skills
+[ -z "$COMPAT_SKILLS_SRC" ] && [ -d /sandbox/.skills ] && COMPAT_SKILLS_SRC=/sandbox/.skills
+if [ -n "$COMPAT_SKILLS_SRC" ]; then
+  mkdir -p "$HOME/.claude/skills" 2>/dev/null || true
+  for skill_dir in "$COMPAT_SKILLS_SRC"/*; do
+    if [ -d "$skill_dir" ]; then
+      skill_name="$(basename "$skill_dir")"
+      if [ ! -d "$HOME/.claude/skills/$skill_name" ]; then
+        cp -r "$skill_dir" "$HOME/.claude/skills/" 2>/dev/null || true
+      fi
+    fi
+  done
+fi
+
 # Keep the terminal on Claude's stdin. A non-interactive shell gives an
 # asynchronous command /dev/null as stdin (POSIX; dash ignores a plain <&0),
 # so save the wrapper's stdin on fd 3 first and hand that to the child.

@@ -217,9 +217,58 @@ echo "setup-fuse.sh: mounted durability verified"
 if [ "$OPENRIND_SHELL_AGENT" = claude ]; then
   # Claude creates settings and trust state from the user's interactive choices.
   echo "setup-fuse.sh: persistent Claude home ready"
+  if [ -d /opt/openrind-shell/skills ]; then
+    for target_skills_dir in "$OPENRIND_SHELL_CLAUDE_HOME/.claude/skills" "$OPENRIND_SHELL_HOME/.claude/skills"; do
+      mkdir -p "$target_skills_dir"
+      for skill_dir in /opt/openrind-shell/skills/*; do
+        if [ -d "$skill_dir" ]; then
+          skill_name="$(basename "$skill_dir")"
+          if [ ! -d "$target_skills_dir/$skill_name" ]; then
+            cp -r "$skill_dir" "$target_skills_dir/" 2>/dev/null || true
+          fi
+        fi
+      done
+    done
+  fi
   HOME="$OPENRIND_SHELL_HOME" node /opt/openrind-shell/configure-openrind-gateway.mjs
+  # Warm the immutable executable and its dynamic loader while provisioning is
+  # still showing progress. This does not create trust or onboarding state.
+  HOME="$OPENRIND_SHELL_CLAUDE_HOME" /usr/local/bin/claude-real --version >/dev/null 2>&1 || true
 else
   echo "setup-fuse.sh: persistent OpenClaw home ready"
+  if [ -d /opt/openrind-shell/skills ]; then
+    for target_skills_dir in "$OPENRIND_SHELL_OPENCLAW_HOME/.openclaw/skills" "$OPENRIND_SHELL_OPENCLAW_HOME/.claude/skills" "$OPENRIND_SHELL_HOME/.claude/skills"; do
+      mkdir -p "$target_skills_dir"
+      for skill_dir in /opt/openrind-shell/skills/*; do
+        if [ -d "$skill_dir" ]; then
+          skill_name="$(basename "$skill_dir")"
+          if [ ! -d "$target_skills_dir/$skill_name" ]; then
+            cp -r "$skill_dir" "$target_skills_dir/" 2>/dev/null || true
+          fi
+        fi
+      done
+    done
+  fi
+  # Configuration and bundled-skill staging belong to provisioning, not the
+  # interactive launch path.
+  HOME="$OPENRIND_SHELL_OPENCLAW_HOME" \
+    /usr/bin/node /opt/openrind-shell/configure-openclaw-fuse.mjs
+
+  # OpenClaw's first TUI import is its expensive cold-start path. Prime those
+  # immutable modules during provisioning into the exact compile cache used by
+  # the real launcher. `tui --help` loads the command without starting an agent,
+  # opening a network connection, or creating a conversation.
+  OPENRIND_OPENCLAW_COMPILE_CACHE=/tmp/openrind-openclaw-compile-cache
+  install -d -m 0700 "$OPENRIND_OPENCLAW_COMPILE_CACHE"
+  (
+    cd "$OPENRIND_SHELL_HOME"
+    HOME="$OPENRIND_SHELL_OPENCLAW_HOME" \
+      NODE_COMPILE_CACHE="$OPENRIND_OPENCLAW_COMPILE_CACHE" \
+      OPENCLAW_NO_RESPAWN=1 OPENCLAW_SKIP_CHANNELS=1 \
+      OPENCLAW_SKIP_CANVAS_HOST=1 OPENCLAW_SKIP_GMAIL_WATCHER=1 \
+      OPENCLAW_DISABLE_BONJOUR=1 OPENCLAW_EXEC_SHELL_SNAPSHOT=0 \
+      /usr/bin/node /usr/lib/node_modules/openclaw/openclaw.mjs tui --help
+  ) >/dev/null 2>&1 || true
 fi
 
 OPENRIND_SHELL_NPMRC="$OPENRIND_SHELL_RUNTIME_DIR/npmrc"

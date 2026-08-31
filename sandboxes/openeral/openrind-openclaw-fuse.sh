@@ -15,7 +15,6 @@ export OPENCLAW_LOG_LEVEL="${OPENCLAW_LOG_LEVEL:-error}"
 export DEBUG="${DEBUG:-}"
 export PI_DEBUG_REDRAW=0
 export NODE_COMPILE_CACHE="${NODE_COMPILE_CACHE:-/tmp/openrind-openclaw-compile-cache}"
-
 if ! install -d -m 0700 "$HOME/.openclaw" "$HOME/.openclaw/logs" "$NODE_COMPILE_CACHE"; then
   echo "openrind-openclaw: failed to prepare the OpenClaw home or compile cache" >&2
   exit 1
@@ -25,15 +24,17 @@ if ! cd "$OPENRIND_SHELL_HOME"; then
   exit 1
 fi
 
-# Keep the persistent user-owned config, enforcing only the sandbox plumbing:
-# local embedded mode, the FUSE workspace, and a first-run model when absent.
-if /usr/bin/node /opt/openrind-shell/configure-openclaw-fuse.mjs; then
-  :
-else
-  status=$?
-  echo "openrind-openclaw: failed to configure OpenClaw (status $status)" >&2
-  exit "$status"
+HEALTH="$(openrind-shell-fused health 2>/dev/null || true)"
+STATE="$(node -e 'try { process.stdout.write(JSON.parse(process.argv[1]).state || "") } catch {}' "$HEALTH")"
+if [ "$STATE" != writable ]; then
+  echo "openrind-openclaw: FUSE storage is not writable (state: ${STATE:-unavailable})" >&2
+  exit 1
 fi
+
+# Persistent configuration, bundled skills, and the Node TUI compile cache are
+# prepared by setup-fuse.sh while Desktop is still showing provisioning
+# activity. Keep this interactive path limited to health, cwd, and agent exec so
+# OpenClaw can paint as soon as the PTY bridge is attached.
 
 session_args=()
 case "${1:-}" in

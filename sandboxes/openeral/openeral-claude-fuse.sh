@@ -41,19 +41,21 @@ if [ ! -x /usr/local/bin/claude-real ]; then
   exit 127
 fi
 
-# Keep successful marker verification out of Claude's terminal. The command's
-# diagnostics are still surfaced verbatim when initialization is missing or
-# stale, but a healthy reconnect paints Claude as the first application output.
-ENSURE_LOG="/tmp/claude-init-ensure.log"
-set +e
-openrind-shell init --ensure >"$ENSURE_LOG" 2>&1
-ENSURE_STATUS=$?
-set -e
-if [ "$ENSURE_STATUS" -ne 0 ]; then
-  cat "$ENSURE_LOG" >&2
-  exit "$ENSURE_STATUS"
+# Desktop verifies the image contract, session marker, selected agent, and
+# writable FUSE health before opening a PTY. Keep the full marker check for
+# manual `claude` launches, but never repeat it in the visible Desktop path.
+if [ "${OPENRIND_DESKTOP_CLAUDE_LAUNCH:-0}" != "1" ]; then
+  ENSURE_LOG="/tmp/claude-init-ensure.log"
+  set +e
+  openrind-shell init --ensure >"$ENSURE_LOG" 2>&1
+  ENSURE_STATUS=$?
+  set -e
+  if [ "$ENSURE_STATUS" -ne 0 ]; then
+    cat "$ENSURE_LOG" >&2
+    exit "$ENSURE_STATUS"
+  fi
+  rm -f "$ENSURE_LOG"
 fi
-rm -f "$ENSURE_LOG"
 
 HEALTH="$(openrind-shell-fused health 2>/dev/null || true)"
 STATE="$(node -e 'try { process.stdout.write(JSON.parse(process.argv[1]).state || "") } catch {}' "$HEALTH")"
@@ -65,6 +67,9 @@ fi
 case "$PWD" in
   /|/sandbox) cd /sandbox/work ;;
 esac
+
+# Bundled skills are staged during setup, before Desktop reports the sandbox as
+# ready. Do not scan or copy them between the PTY bridge and Claude's first byte.
 
 # Keep the terminal on Claude's stdin. A non-interactive shell gives an
 # asynchronous command /dev/null as stdin (POSIX; dash ignores a plain <&0),
