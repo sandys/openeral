@@ -1,5 +1,5 @@
 /** @jsxImportSource react */
-import { useState, useCallback, useMemo } from "react";
+import { useState, useCallback, useMemo, useEffect } from "react";
 import {
   AlertCircle,
   ArrowUpRight,
@@ -10,6 +10,7 @@ import {
   LogOut,
   RefreshCw,
 } from "lucide-react";
+import { useNavigate } from "react-router-dom";
 import {
   ResponsiveContainer,
   AreaChart,
@@ -36,6 +37,14 @@ function formatNumber(num: number): string {
   return new Intl.NumberFormat().format(num);
 }
 
+function formatCost(num: number): string {
+  if (!num || isNaN(num)) return "$0.00";
+  if (num < 0.01) {
+    return `$${num.toFixed(6)}`;
+  }
+  return `$${num.toFixed(2)}`;
+}
+
 function formatCompactTokens(num: number): string {
   if (!num || isNaN(num)) return "0";
   if (num >= 1_000_000) return `${(num / 1_000_000).toFixed(2)}M`;
@@ -53,9 +62,10 @@ function formatDateTick(val: string): string {
   }
 }
 
-type ChartMetric = "tokens" | "requests";
+type ChartMetric = "tokens" | "requests" | "cost";
 
 export function GatewayBillingPanel() {
+  const navigate = useNavigate();
   const {
     billingStatus,
     stats,
@@ -70,11 +80,10 @@ export function GatewayBillingPanel() {
   } = useGatewayBilling();
 
   const [busy, setBusy] = useState(false);
-  const [pasteMode, setPasteMode] = useState(false);
-  const [pastedKey, setPastedKey] = useState("");
-  const [pasteError, setPasteError] = useState<string | null>(null);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [chartMetric, setChartMetric] = useState<ChartMetric>("tokens");
+
+  console.log("[billing-panel-debug] apiKeySet:", apiKeySet, "error:", error, "stats:", stats);
 
   const connectGateway = () => {
     if (typeof window === "undefined") return;
@@ -96,6 +105,11 @@ export function GatewayBillingPanel() {
     }
   }, [refreshStatus, refreshStats]);
 
+  // Auto-refresh on mount when the user switches to this tab
+  useEffect(() => {
+    handleRefresh();
+  }, [handleRefresh]);
+
   const payNow = async () => {
     setBusy(true);
     try {
@@ -110,34 +124,14 @@ export function GatewayBillingPanel() {
     }
   };
 
-  const saveKey = async () => {
-    if (!pastedKey.trim()) return;
-    setPasteError(null);
-    try {
-      const bridge = window.__OPENRIND_DESKTOP_ELECTRON__;
-      if (bridge?.invokeDesktop) {
-        await bridge.invokeDesktop("openrindSetCredential", {
-          key: "openrindGatewayApiKey",
-          value: pastedKey.trim(),
-        });
-        localStorage.setItem("openrind_gateway_billing_status", "unpaid");
-        localStorage.setItem("openrind_gateway_email", "Custom API Key");
-        localStorage.setItem("openrind_gateway_name", "Individual User");
-        await refreshStatus();
-        await refreshStats();
-        setPasteMode(false);
-        setPastedKey("");
-      }
-    } catch (err) {
-      setPasteError(err instanceof Error ? err.message : String(err));
-    }
-  };
+
 
   if (!isDesktopRuntime()) return null;
 
   const totalInputTokens = stats?.total_input_tokens || 0;
   const totalOutputTokens = stats?.total_output_tokens || 0;
   const totalRequests = stats?.total_requests || 0;
+  const totalCost = stats?.total_cost || 0;
   const totalTokens = totalInputTokens + totalOutputTokens;
   const inputRatio = totalTokens > 0 ? (totalInputTokens / totalTokens) * 100 : 0;
   const outputRatio = totalTokens > 0 ? (totalOutputTokens / totalTokens) * 100 : 0;
@@ -161,12 +155,14 @@ export function GatewayBillingPanel() {
           (inputTokens + outputTokens)
         );
         const requests = Number(item.requests ?? 0);
+        const cost = Number(item.cost ?? 0);
         return {
           date: String(item.date),
           inputTokens,
           outputTokens,
           totalTokens,
           requests,
+          cost,
         };
       });
     }
@@ -180,9 +176,10 @@ export function GatewayBillingPanel() {
         outputTokens: totalOutputTokens,
         totalTokens: totalTokens,
         requests: totalRequests,
+        cost: totalCost,
       },
     ];
-  }, [stats, totalInputTokens, totalOutputTokens, totalTokens, totalRequests]);
+  }, [stats, totalInputTokens, totalOutputTokens, totalTokens, totalRequests, totalCost]);
 
   return (
     <div className="space-y-6">
@@ -196,86 +193,35 @@ export function GatewayBillingPanel() {
 
       {/* Not Connected State */}
       {!apiKeySet ? (
-        !pasteMode ? (
-          <div className={`${settingsPanelClass} space-y-4`}>
-            <div className="space-y-1">
-              <h3 className="text-sm font-semibold text-dls-text">
-                Connect Openrind Gateway
-              </h3>
-              <p className="text-xs text-dls-secondary leading-relaxed">
-                Enable real-time AI telemetry, automated cost control, and unified token tracking across models.
-              </p>
-            </div>
-
-            <div className="flex flex-wrap items-center gap-2.5 pt-2">
-              <Button
-                variant="primary"
-                className="h-8 rounded-lg px-4 text-xs font-semibold"
-                onClick={connectGateway}
-              >
-                <ArrowUpRight className="h-3.5 w-3.5" />
-                <span>Connect with Browser</span>
-              </Button>
-              <Button
-                variant="outline"
-                className="h-8 rounded-lg px-3.5 text-xs text-dls-secondary hover:text-dls-text"
-                onClick={() => setPasteMode(true)}
-              >
-                <KeyRound className="h-3.5 w-3.5" />
-                <span>Enter API Key Manually</span>
-              </Button>
-            </div>
+        <div className={`${settingsPanelClass} space-y-4`}>
+          <div className="space-y-1">
+            <h3 className="text-sm font-semibold text-dls-text">
+              Connect Openrind Gateway
+            </h3>
+            <p className="text-xs text-dls-secondary leading-relaxed">
+              Enable real-time AI telemetry, automated cost control, and unified token tracking across models.
+            </p>
           </div>
-        ) : (
-          <div className={`${settingsPanelClass} space-y-4`}>
-            <div className="space-y-1">
-              <h3 className="text-sm font-semibold text-dls-text">
-                Manual Gateway API Key
-              </h3>
-              <p className="text-xs text-dls-secondary">
-                Enter your <code className="font-mono text-dls-text">sk-openrind-gateway-...</code> key to link telemetry and subscription status on this device.
-              </p>
-            </div>
 
-            <div className="space-y-1.5">
-              <TextInput
-                type="password"
-                placeholder="sk-openrind-gateway-..."
-                className="font-mono text-xs"
-                value={pastedKey}
-                onChange={(e) => setPastedKey(e.target.value)}
-                autoFocus
-              />
-              {pasteError ? (
-                <p className="text-xs text-red-400 font-mono mt-1">
-                  {pasteError}
-                </p>
-              ) : null}
-            </div>
-
-            <div className="flex items-center justify-end gap-2 pt-2">
-              <Button
-                variant="outline"
-                className="h-8 rounded-lg px-3 text-xs"
-                onClick={() => {
-                  setPasteMode(false);
-                  setPasteError(null);
-                  setPastedKey("");
-                }}
-              >
-                Cancel
-              </Button>
-              <Button
-                variant="primary"
-                className="h-8 rounded-lg px-4 text-xs font-semibold"
-                onClick={saveKey}
-                disabled={!pastedKey.trim()}
-              >
-                Save Credential
-              </Button>
-            </div>
+          <div className="flex flex-wrap items-center gap-2.5 pt-2">
+            <Button
+              variant="primary"
+              className="h-8 rounded-lg px-4 text-xs font-semibold"
+              onClick={connectGateway}
+            >
+              <ArrowUpRight className="h-3.5 w-3.5" />
+              <span>Connect with Browser</span>
+            </Button>
+            <Button
+              variant="outline"
+              className="h-8 rounded-lg px-3.5 text-xs text-dls-secondary hover:text-dls-text"
+              onClick={() => navigate("/settings/environment")}
+            >
+              <KeyRound className="h-3.5 w-3.5" />
+              <span>Enter API Key</span>
+            </Button>
           </div>
-        )
+        </div>
       ) : (
         /* Connected State */
         <div className="space-y-6">
@@ -289,9 +235,9 @@ export function GatewayBillingPanel() {
                 <p className="text-xs text-dls-secondary">
                   {billingStatus === "paid"
                     ? "Your gateway subscription is active. AI usage metering and routing are enabled."
-                    : billingStatus === "unpaid"
-                      ? "Please complete your subscription to activate full gateway routing and telemetry."
-                      : "Connected with custom Gateway credentials."}
+                    : billingStatus === "custom"
+                      ? "Connected with custom Gateway credentials."
+                      : "Please complete your subscription to activate full gateway routing and telemetry."}
                 </p>
               </div>
 
@@ -308,7 +254,18 @@ export function GatewayBillingPanel() {
                   />
                   <span>Refresh</span>
                 </Button>
-                {billingStatus === "unpaid" ? (
+                {billingStatus === "custom" ? (
+                  null
+                ) : billingStatus === "paid" ? (
+                  <Button
+                    variant="outline"
+                    className="h-8 rounded-lg px-3 text-xs text-dls-secondary hover:text-dls-text"
+                    onClick={openPortal}
+                  >
+                    <ExternalLink className="h-3.5 w-3.5" />
+                    <span>Manage Plan</span>
+                  </Button>
+                ) : (
                   <Button
                     variant="primary"
                     className="h-8 rounded-lg px-3.5 text-xs font-semibold"
@@ -321,15 +278,6 @@ export function GatewayBillingPanel() {
                       <CreditCard className="h-3.5 w-3.5" />
                     )}
                     <span>Subscribe ($10/mo)</span>
-                  </Button>
-                ) : (
-                  <Button
-                    variant="outline"
-                    className="h-8 rounded-lg px-3 text-xs text-dls-secondary hover:text-dls-text"
-                    onClick={openPortal}
-                  >
-                    <ExternalLink className="h-3.5 w-3.5" />
-                    <span>Manage Plan</span>
                   </Button>
                 )}
               </div>
@@ -371,6 +319,17 @@ export function GatewayBillingPanel() {
                 >
                   Requests
                 </button>
+                <button
+                  type="button"
+                  className={`rounded-md px-2.5 py-1 font-medium transition-colors ${
+                    chartMetric === "cost"
+                      ? "bg-dls-surface text-dls-text shadow-sm"
+                      : "text-dls-secondary hover:text-dls-text"
+                  }`}
+                  onClick={() => setChartMetric("cost")}
+                >
+                  Cost
+                </button>
               </div>
             </div>
 
@@ -393,6 +352,10 @@ export function GatewayBillingPanel() {
                       <stop offset="5%" stopColor="#60a5fa" stopOpacity={0.4} />
                       <stop offset="95%" stopColor="#60a5fa" stopOpacity={0} />
                     </linearGradient>
+                    <linearGradient id="costGrad" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="5%" stopColor="#f59e0b" stopOpacity={0.4} />
+                      <stop offset="95%" stopColor="#f59e0b" stopOpacity={0} />
+                    </linearGradient>
                   </defs>
 
                   <CartesianGrid
@@ -411,7 +374,7 @@ export function GatewayBillingPanel() {
                   />
 
                   <YAxis
-                    tickFormatter={formatCompactTokens}
+                    tickFormatter={chartMetric === "cost" ? formatCost : formatCompactTokens}
                     stroke="#71717a"
                     fontSize={11}
                     tickLine={false}
@@ -450,6 +413,13 @@ export function GatewayBillingPanel() {
                                 </span>
                               </div>
                             </div>
+                          ) : chartMetric === "cost" ? (
+                            <div className="flex items-center justify-between gap-3 text-amber-400 pt-0.5">
+                              <span>Cost:</span>
+                              <span className="font-mono font-medium tabular-nums">
+                                {formatCost(Number(payload[0]?.value || 0))}
+                              </span>
+                            </div>
                           ) : (
                             <div className="flex items-center justify-between gap-3 text-blue-400 pt-0.5">
                               <span>Requests:</span>
@@ -484,6 +454,16 @@ export function GatewayBillingPanel() {
                         name="Completion Tokens"
                       />
                     </>
+                  ) : chartMetric === "cost" ? (
+                    <Area
+                      type="monotone"
+                      dataKey="cost"
+                      stroke="#f59e0b"
+                      strokeWidth={2}
+                      fillOpacity={1}
+                      fill="url(#costGrad)"
+                      name="Cost"
+                    />
                   ) : (
                     <Area
                       type="monotone"
@@ -525,6 +505,14 @@ export function GatewayBillingPanel() {
                     </span>
                   </div>
                 </>
+              ) : chartMetric === "cost" ? (
+                <div className="flex items-center gap-1.5">
+                  <span className="h-2 w-2 rounded-full bg-amber-400 shrink-0" />
+                  <span className="text-dls-secondary">Total Cost:</span>
+                  <span className="font-semibold text-dls-text tabular-nums">
+                    {formatCost(totalCost)}
+                  </span>
+                </div>
               ) : (
                 <div className="flex items-center gap-1.5">
                   <span className="h-2 w-2 rounded-full bg-blue-400 shrink-0" />

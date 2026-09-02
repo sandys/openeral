@@ -28,7 +28,13 @@ import { parseGatewayAuthDeepLink } from "../../../app/lib/openrind-desktop-link
 import { isDesktopRuntime } from "../../../app/utils";
 import { Button } from "../../design-system/button";
 
-export type BillingStatus = "unpaid" | "paid" | "none";
+export type BillingStatus = "unpaid" | "paid" | "none" | "custom";
+
+export type GatewayStatsResponse = UsageStats & {
+  email?: string;
+  name?: string;
+  billing_status?: BillingStatus;
+};
 
 export type TimeSeriesDataPoint = {
   date: string;
@@ -36,12 +42,14 @@ export type TimeSeriesDataPoint = {
   input_tokens?: number;
   output_tokens?: number;
   total_tokens?: number;
+  cost?: number;
 };
 
 export type UsageStats = {
   total_requests: number;
   total_input_tokens: number;
   total_output_tokens: number;
+  total_cost?: number;
   daily_stats?: TimeSeriesDataPoint[];
   daily_usage?: TimeSeriesDataPoint[];
   history?: TimeSeriesDataPoint[];
@@ -147,10 +155,11 @@ export function GatewayBillingProvider({ children }: GatewayBillingProviderProps
   const [userName, setUserName] = useState<string>("");
 
   const refreshStatus = useCallback(async () => {
-    if (!isDesktopRuntime()) return;
+    if (!isDesktopRuntime()) return false;
     try {
       const statusRes = await invoke<any>("openrindCredentialStatus");
       const isSet = statusRes.openrindGatewayApiKey === "set";
+      console.log("[billing-provider-debug] refreshStatus: statusRes.openrindGatewayApiKey =", statusRes.openrindGatewayApiKey, "isSet =", isSet);
       setApiKeySet(isSet);
       if (isSet) {
         const storedStatus = localStorage.getItem("openrind_gateway_billing_status") as BillingStatus;
@@ -161,17 +170,50 @@ export function GatewayBillingProvider({ children }: GatewayBillingProviderProps
         setBillingStatus("none");
         setUserEmail("");
         setUserName("");
+        setStats(null);
+        setError(null);
       }
+      return isSet;
     } catch (err) {
       console.error("Error refreshing credential status:", err);
+      return false;
     }
   }, []);
 
   const refreshStats = useCallback(async () => {
     if (!apiKeySet) return;
     try {
-      const statsRes = await invoke<UsageStats>("openrindGatewayGetStats");
+      // Direct query check first to ensure the key is still set (prevent calling on stale closure)
+      const statusRes = await invoke<any>("openrindCredentialStatus");
+      if (statusRes.openrindGatewayApiKey !== "set") {
+        setApiKeySet(false);
+        setBillingStatus("none");
+        setUserEmail("");
+        setUserName("");
+        setStats(null);
+        setError(null);
+        return;
+      }
+
+      const statsRes = await invoke<GatewayStatsResponse>("openrindGatewayGetStats");
+      console.log("[billing-provider-debug] refreshStats statsRes:", statsRes);
       setStats(statsRes);
+
+      // Dynamically update the profile and billing state from the authorized API key details
+      if (statsRes.email) {
+        setUserEmail(statsRes.email);
+        localStorage.setItem("openrind_gateway_email", statsRes.email);
+      }
+      if (statsRes.name) {
+        setUserName(statsRes.name);
+        localStorage.setItem("openrind_gateway_name", statsRes.name);
+      }
+      if (statsRes.billing_status) {
+        setBillingStatus(statsRes.billing_status);
+        localStorage.setItem("openrind_gateway_billing_status", statsRes.billing_status);
+        localStorage.setItem("openrind_gateway_billing_status_set_at", Date.now().toString());
+      }
+
       setError(null);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -242,10 +284,10 @@ export function GatewayBillingProvider({ children }: GatewayBillingProviderProps
         key: "openrindGatewayApiKey",
         value: pastedKey.trim(),
       });
-      localStorage.setItem("openrind_gateway_billing_status", "unpaid");
+      localStorage.setItem("openrind_gateway_billing_status", "custom");
       localStorage.setItem("openrind_gateway_email", "Custom API Key");
       localStorage.setItem("openrind_gateway_name", "Individual User");
-      setBillingStatus("unpaid");
+      setBillingStatus("custom");
       setApiKeySet(true);
       setShowOnboardingModal(false);
       setPasteMode(false);
@@ -274,6 +316,19 @@ export function GatewayBillingProvider({ children }: GatewayBillingProviderProps
       return () => clearInterval(interval);
     }
   }, [apiKeySet, refreshStats]);
+
+  // Listen to manual credential changes
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const handler = async () => {
+      const isSet = await refreshStatus();
+      if (isSet) {
+        await refreshStats();
+      }
+    };
+    window.addEventListener("openrind-shell-credentials-changed", handler);
+    return () => window.removeEventListener("openrind-shell-credentials-changed", handler);
+  }, [refreshStatus, refreshStats]);
 
   // Listen to deep links - SECURITY FIX: Handle secure token exchange
   useEffect(() => {

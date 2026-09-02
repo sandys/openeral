@@ -153,13 +153,16 @@ async function ensureClaudeProvider(anthropicApiKey, onProgress) {
 }
 
 async function ensureGatewayProvider(openrindGatewayApiKey, onProgress) {
-  if (!openrindGatewayApiKey) return;
+  if (!openrindGatewayApiKey) return null;
   const env = buildFuseWslEnv({ OPENRIND_GATEWAY_API_KEY: openrindGatewayApiKey });
   const listed = await runFuseOpenShell(
     ["provider", "list", "-o", "json"],
     { ensure: false, env, timeout: 20_000 },
   );
-  if (listed.exitCode !== 0) return;
+  if (listed.exitCode !== 0) {
+    console.error(`[ensureGatewayProvider] provider list failed with exit code ${listed.exitCode}: ${listed.stderr}`);
+    return null;
+  }
 
   const current = normalizeProviderRows(listed.stdout).find(
     (row) => row.name === "openrind-gateway" || row.name === "stringcost",
@@ -184,7 +187,7 @@ async function ensureGatewayProvider(openrindGatewayApiKey, onProgress) {
       ? "Refreshing the Openrind Gateway credential..."
       : "Configuring the Openrind Gateway provider...",
   });
-  await runFuseOpenShell(command, {
+  const configured = await runFuseOpenShell(command, {
     ensure: false,
     env: buildFuseWslEnv({
       [credentialKey]: openrindGatewayApiKey,
@@ -192,6 +195,11 @@ async function ensureGatewayProvider(openrindGatewayApiKey, onProgress) {
     }),
     timeout: 20_000,
   });
+  if (configured.exitCode !== 0) {
+    console.error(`[ensureGatewayProvider] provider configuration failed with exit code ${configured.exitCode}: ${configured.stderr}`);
+    return null;
+  }
+  return providerName;
 }
 
 export async function listSandboxes(options = {}) {
@@ -432,7 +440,7 @@ async function provisionOpenrindShellSandbox(options) {
   }
   const openrindGatewayApiKey = await getCredential("openrindGatewayApiKey");
   const provider = await ensureClaudeProvider(anthropicApiKey, onProgress);
-  await ensureGatewayProvider(openrindGatewayApiKey, onProgress);
+  const gatewayProviderName = await ensureGatewayProvider(openrindGatewayApiKey, onProgress);
   const replaced = Boolean(provider?.replaced);
   await requireFuseImage(onProgress);
   const agentHomeVolume = await ensureAgentHomeVolume(name, workspaceId, agent);
@@ -471,7 +479,7 @@ async function provisionOpenrindShellSandbox(options) {
 
   const tempName = `openrind-shell-db-url-${randomUUID()}`;
   const dbPath = `/tmp/${tempName}`;
-  const createCmd = buildFuseCliCommand([
+  const sandboxArgs = [
     "sandbox",
     "create",
     "--name",
@@ -485,6 +493,11 @@ async function provisionOpenrindShellSandbox(options) {
     `${dbPath}:/sandbox/db-url`,
     "--provider",
     "claude",
+  ];
+  if (gatewayProviderName) {
+    sandboxArgs.push("--provider", gatewayProviderName);
+  }
+  sandboxArgs.push(
     "--auto-providers",
     "--env",
     `OPENRIND_SHELL_WORKSPACE_ID=${workspaceId}`,
@@ -493,7 +506,8 @@ async function provisionOpenrindShellSandbox(options) {
     "--no-tty",
     "--",
     "openrind-shell-init",
-  ]);
+  );
+  const createCmd = buildFuseCliCommand(sandboxArgs);
   const create = [
     "set -euo pipefail",
     "umask 077",

@@ -301,7 +301,19 @@ export function useOpenShellState(options: { active: boolean } = { active: false
           key,
           value,
         });
+        if (key === "openrindGatewayApiKey") {
+          if (typeof window !== "undefined") {
+            localStorage.setItem("openrind_gateway_billing_status", "custom");
+            localStorage.setItem("openrind_gateway_email", "Custom API Key");
+            localStorage.setItem("openrind_gateway_name", "Individual User");
+          }
+        }
         if (isMountedRef.current) setCredentialStatus(status);
+        if (key === "openrindGatewayApiKey") {
+          if (typeof window !== "undefined") {
+            window.dispatchEvent(new CustomEvent("openrind-shell-credentials-changed"));
+          }
+        }
       } catch (err) {
         setActionError(err instanceof Error ? err.message : String(err));
         throw err;
@@ -318,7 +330,19 @@ export function useOpenShellState(options: { active: boolean } = { active: false
       setActionError(null);
       try {
         const status = await invoke<OpenrindShellCredentialStatus>("openrindClearCredential", key);
+        if (key === "openrindGatewayApiKey") {
+          if (typeof window !== "undefined") {
+            localStorage.removeItem("openrind_gateway_billing_status");
+            localStorage.removeItem("openrind_gateway_email");
+            localStorage.removeItem("openrind_gateway_name");
+          }
+        }
         if (isMountedRef.current) setCredentialStatus(status);
+        if (key === "openrindGatewayApiKey") {
+          if (typeof window !== "undefined") {
+            window.dispatchEvent(new CustomEvent("openrind-shell-credentials-changed"));
+          }
+        }
       } catch (err) {
         setActionError(err instanceof Error ? err.message : String(err));
         throw err;

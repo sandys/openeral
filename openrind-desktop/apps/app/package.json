@@ -1,7 +1,7 @@
 {
   "name": "@openrind/app",
   "private": true,
-  "version": "0.13.3",
+  "version": "0.14.0",
   "type": "module",
   "scripts": {
     "dev": "cross-env OPENRIND_DESKTOP_DEV_MODE=1 vite",

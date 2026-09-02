@@ -1,5 +1,5 @@
 import { mkdirSync, readFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { join, resolve, relative } from "node:path";
 import solidPlugin from "../node_modules/@opentui/solid/scripts/solid-plugin";
 
 const bunRuntime = (globalThis as typeof globalThis & {
@@ -95,7 +95,8 @@ function defaultTarget(): string {
 
 async function buildOnce(entrypoint: string, outdir: string, filename: string, target?: string) {
   mkdirSync(outdir, { recursive: true });
-  const outfile = join(outdir, outputName(filename, target));
+  const absoluteOutfile = join(outdir, outputName(filename, target));
+  const outfile = relative(process.cwd(), absoluteOutfile);
   const define: Record<string, string> = {};
   const pkgPath = resolve("package.json");
   try {
