@@ -8,7 +8,8 @@ const desktopRoot = resolve(__dirname, "..");
 const repoRoot = resolve(desktopRoot, "../..");
 const electronSidecarDir = resolve(desktopRoot, "resources", "sidecars");
 
-const pnpmCmd = process.platform === "win32" ? "pnpm.cmd" : "pnpm";
+const pnpmCmd = process.platform === "win32" ? "corepack.cmd" : "pnpm";
+const pnpmArgs = process.platform === "win32" ? ["pnpm@10.27.0"] : [];
 const nodeCmd = process.execPath;
 const portValue = Number.parseInt(process.env.PORT ?? "", 10);
 const devPort = Number.isFinite(portValue) && portValue > 0 ? portValue : 5173;
@@ -23,19 +24,31 @@ const viteProbeUrls = explicitStartUrl
     ];
 
 function run(command, args, options = {}) {
-  return spawn(command, args, {
+  const useShell = process.platform === "win32" && /\.(cmd|bat)$/i.test(command);
+  const spawnOptions = {
     stdio: "inherit",
-    shell: process.platform === "win32",
     ...options,
-  });
+  };
+  return useShell
+    ? spawn([command, ...args.map((arg) => (arg.includes(" ") ? `"${arg}"` : arg))].join(" "), {
+        ...spawnOptions,
+        shell: true,
+      })
+    : spawn(command, args, spawnOptions);
 }
 
 function runSync(command, args, options = {}) {
-  const result = spawnSync(command, args, {
+  const useShell = process.platform === "win32" && /\.(cmd|bat)$/i.test(command);
+  const spawnOptions = {
     stdio: "inherit",
-    shell: process.platform === "win32",
     ...options,
-  });
+  };
+  const result = useShell
+    ? spawnSync([command, ...args.map((arg) => (arg.includes(" ") ? `"${arg}"` : arg))].join(" "), {
+        ...spawnOptions,
+        shell: true,
+      })
+    : spawnSync(command, args, spawnOptions);
   if (result.status !== 0) {
     process.exit(result.status ?? 1);
   }
@@ -207,13 +220,13 @@ if (!viteReady) {
 }
 
 if (!viteReady) {
-  uiChild = run(pnpmCmd, ["-w", "dev:ui"], {
+  uiChild = run(pnpmCmd, [...pnpmArgs, "--filter", "@openrind/app", "dev:windows"], {
     cwd: repoRoot,
     detached: process.platform !== "win32",
     env: {
       ...process.env,
       PORT: String(devPort),
-      // OPENRIND_DESKTOP_DEV_MODE: process.env.OPENRIND_DESKTOP_DEV_MODE ?? "1",
+      OPENRIND_DESKTOP_DEV_MODE: process.env.OPENRIND_DESKTOP_DEV_MODE ?? "1",
     },
   });
 }
@@ -227,7 +240,7 @@ const defaultCdpPort = "9823";
 const cdpPortRaw = process.env.OPENRIND_DESKTOP_ELECTRON_REMOTE_DEBUG_PORT?.trim() ?? defaultCdpPort;
 const cdpPort = cdpPortRaw === "" || cdpPortRaw === "0" ? "" : cdpPortRaw;
 
-electronChild = run(pnpmCmd, ["exec", "electron", "./electron/main.mjs"], {
+electronChild = run(pnpmCmd, [...pnpmArgs, "exec", "electron", "./electron/main.mjs"], {
   cwd: desktopRoot,
   detached: process.platform !== "win32",
   env: {

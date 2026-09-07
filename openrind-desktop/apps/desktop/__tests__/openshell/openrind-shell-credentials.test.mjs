@@ -150,3 +150,214 @@ test("getCredentialStatus: encryptionAvailable is true in test mode", async () =
   const status = await creds.getCredentialStatus();
   assert.equal(status.encryptionAvailable, true);
 });
+
+test("Haloop profiles use stable, distinct scoped client tokens", async () => {
+  const first = await creds.registerHaloopClientProfile({
+    sandboxName: "workspace-a",
+    workspaceId: "workspace-1",
+    agentId: "claude",
+  });
+  const repeated = await creds.registerHaloopClientProfile({
+    sandboxName: "workspace-a",
+    workspaceId: "workspace-1",
+    agentId: "claude",
+  });
+  const second = await creds.registerHaloopClientProfile({
+    sandboxName: "workspace-a",
+    workspaceId: "workspace-1",
+    agentId: "openclaw",
+  });
+
+  assert.match(first.current.clientToken, /^orh_v1_[A-Za-z0-9_-]+$/);
+  assert.equal(repeated.current.clientToken, first.current.clientToken);
+  assert.notEqual(second.current.clientToken, first.current.clientToken);
+  assert.equal(second.profiles.length, 2);
+  assert.notEqual(second.current.providerName, first.current.providerName);
+
+  const stored = readFileSync(join(testDir, "haloop-client-profiles.json"), "utf8");
+  assert.doesNotMatch(stored, /sk-ant-/);
+});
+
+test("Haloop token rotation replaces only the exact existing scoped token", async () => {
+  const claudeInput = {
+    sandboxName: "workspace-rotate",
+    workspaceId: "workspace-rotate-id",
+    agentId: "claude",
+  };
+  const openclawInput = { ...claudeInput, agentId: "openclaw" };
+  const claude = await creds.registerHaloopClientProfile(claudeInput);
+  const openclaw = await creds.registerHaloopClientProfile(openclawInput);
+
+  const rotated = await creds.rotateHaloopClientProfile(claudeInput);
+  const retainedOpenClaw = rotated.profiles.find(
+    (profile) => profile.scopeId === openclaw.current.scopeId,
+  );
+
+  assert.equal(rotated.current.id, claude.current.id);
+  assert.equal(rotated.current.providerName, claude.current.providerName);
+  assert.notEqual(rotated.current.clientToken, claude.current.clientToken);
+  assert.equal(retainedOpenClaw.clientToken, openclaw.current.clientToken);
+  const stored = JSON.parse(
+    readFileSync(join(testDir, "haloop-client-profiles.json"), "utf8"),
+  );
+  assert.equal(stored.profiles[claude.current.scopeId].clientToken, rotated.current.clientToken);
+  assert.doesNotMatch(JSON.stringify(stored), new RegExp(claude.current.clientToken));
+});
+
+test("Haloop token rotation refuses to create a missing scope", async () => {
+  await assert.rejects(
+    () => creds.rotateHaloopClientProfile({
+      sandboxName: "workspace-missing",
+      workspaceId: "workspace-missing-id",
+      agentId: "claude",
+    }),
+    /does not exist.*launch the sandbox/i,
+  );
+  assert.equal(existsSync(join(testDir, "haloop-client-profiles.json")), false);
+});
+
+test("Haloop sandbox revocation removes every matching scope after the teardown callback", async () => {
+  const claude = await creds.registerHaloopClientProfile({
+    sandboxName: "workspace-revoke",
+    workspaceId: "workspace-revoke-id",
+    agentId: "claude",
+  });
+  const openclaw = await creds.registerHaloopClientProfile({
+    sandboxName: "workspace-revoke",
+    workspaceId: "workspace-revoke-id",
+    agentId: "openclaw",
+  });
+  const survivor = await creds.registerHaloopClientProfile({
+    sandboxName: "workspace-survives",
+    workspaceId: "workspace-survives-id",
+    agentId: "claude",
+  });
+  const profilePath = join(testDir, "haloop-client-profiles.json");
+  let callbackObservedStoredCredentials = false;
+
+  const revoked = await creds.revokeHaloopClientProfilesForSandbox({
+    sandboxName: "workspace-revoke",
+    beforePersist: async ({ revoked: pending }) => {
+      assert.deepEqual(
+        pending.map((profile) => profile.providerName).sort(),
+        [claude.current.providerName, openclaw.current.providerName].sort(),
+      );
+      assert.ok(pending.every((profile) => !("clientToken" in profile)));
+      const before = readFileSync(profilePath, "utf8");
+      assert.match(before, new RegExp(claude.current.clientToken));
+      assert.match(before, new RegExp(openclaw.current.clientToken));
+      callbackObservedStoredCredentials = true;
+    },
+  });
+
+  assert.equal(callbackObservedStoredCredentials, true);
+  assert.equal(revoked.revoked.length, 2);
+  assert.equal(revoked.profiles.length, 1);
+  assert.equal(revoked.profiles[0].scopeId, survivor.current.scopeId);
+  assert.equal(revoked.profiles[0].clientToken, survivor.current.clientToken);
+  const after = readFileSync(profilePath, "utf8");
+  assert.doesNotMatch(after, new RegExp(claude.current.clientToken));
+  assert.doesNotMatch(after, new RegExp(openclaw.current.clientToken));
+  assert.match(after, new RegExp(survivor.current.clientToken));
+
+  const repeated = await creds.revokeHaloopClientProfilesForSandbox({
+    sandboxName: "workspace-revoke",
+  });
+  assert.equal(repeated.revoked.length, 0);
+  assert.equal(repeated.profiles[0].clientToken, survivor.current.clientToken);
+});
+
+test("Haloop sandbox revocation preserves stored credentials when teardown fails", async () => {
+  const registered = await creds.registerHaloopClientProfile({
+    sandboxName: "workspace-retry",
+    workspaceId: "workspace-retry-id",
+    agentId: "claude",
+  });
+  const profilePath = join(testDir, "haloop-client-profiles.json");
+
+  await assert.rejects(
+    creds.revokeHaloopClientProfilesForSandbox({
+      sandboxName: "workspace-retry",
+      beforePersist: async () => {
+        throw new Error("provider cleanup failed");
+      },
+    }),
+    /provider cleanup failed/,
+  );
+
+  const stored = readFileSync(profilePath, "utf8");
+  assert.match(stored, new RegExp(registered.current.clientToken));
+});
+
+test("Haloop integration revocation removes every scoped profile only after teardown", async () => {
+  const claude = await creds.registerHaloopClientProfile({
+    sandboxName: "workspace-all-a",
+    workspaceId: "workspace-all-a-id",
+    agentId: "claude",
+  });
+  const openclaw = await creds.registerHaloopClientProfile({
+    sandboxName: "workspace-all-b",
+    workspaceId: "workspace-all-b-id",
+    agentId: "openclaw",
+  });
+  const profilePath = join(testDir, "haloop-client-profiles.json");
+  let callbackObservedStoredCredentials = false;
+
+  const revoked = await creds.revokeAllHaloopClientProfiles({
+    beforePersist: async ({ revoked: pending }) => {
+      assert.deepEqual(
+        pending.map((profile) => profile.providerName).sort(),
+        [claude.current.providerName, openclaw.current.providerName].sort(),
+      );
+      assert.ok(pending.every((profile) => !("clientToken" in profile)));
+      const before = readFileSync(profilePath, "utf8");
+      assert.match(before, new RegExp(claude.current.clientToken));
+      assert.match(before, new RegExp(openclaw.current.clientToken));
+      callbackObservedStoredCredentials = true;
+    },
+  });
+
+  assert.equal(callbackObservedStoredCredentials, true);
+  assert.equal(revoked.revoked.length, 2);
+  assert.deepEqual(revoked.profiles, []);
+  assert.equal(existsSync(profilePath), false);
+  const repeated = await creds.revokeAllHaloopClientProfiles();
+  assert.deepEqual(repeated.revoked, []);
+});
+
+test("Haloop integration revocation preserves every profile when teardown fails", async () => {
+  const registered = await creds.registerHaloopClientProfile({
+    sandboxName: "workspace-all-retry",
+    workspaceId: "workspace-all-retry-id",
+    agentId: "claude",
+  });
+  const profilePath = join(testDir, "haloop-client-profiles.json");
+
+  await assert.rejects(
+    creds.revokeAllHaloopClientProfiles({
+      beforePersist: async () => {
+        throw new Error("integration provider cleanup failed");
+      },
+    }),
+    /integration provider cleanup failed/,
+  );
+  assert.match(readFileSync(profilePath, "utf8"), new RegExp(registered.current.clientToken));
+});
+
+test("Haloop sandbox revocation rejects an invalid sandbox identity", () => {
+  assert.throws(
+    () => creds.revokeHaloopClientProfilesForSandbox({ sandboxName: "../escape" }),
+    /valid sandbox name is required/i,
+  );
+});
+
+test("Haloop profile registration rejects unsupported agents", async () => {
+  assert.throws(
+    () => creds.registerHaloopClientProfile({
+      sandboxName: "workspace-a",
+      workspaceId: "workspace-1",
+      agentId: "generic",
+    }),
+    /Claude and OpenClaw only/,
+  );
+});

@@ -342,7 +342,6 @@ if (shouldBuildOpenrindDesktopServer) {
   const buildResult = spawnSync("bun", openrindDesktopServerArgs, {
     cwd: openrindDesktopServerDir,
     stdio: "inherit",
-    shell: process.platform === "win32",
   });
 
   if (buildResult.status !== 0) {
@@ -521,7 +520,6 @@ if (shouldBuildOrchestrator) {
   const result = spawnSync("bun", orchestratorArgs, {
     cwd: orchestratorDir,
     stdio: "inherit",
-    shell: process.platform === "win32",
     env: {
       ...process.env,
       NODE_ENV: "production",
@@ -585,7 +583,6 @@ if (shouldBuildChromeDevtools) {
   const result = spawnSync("bun", chromeDevtoolsArgs, {
     cwd: __dirname,
     stdio: "inherit",
-    shell: process.platform === "win32",
     env: {
       ...process.env,
       NODE_ENV: "production",

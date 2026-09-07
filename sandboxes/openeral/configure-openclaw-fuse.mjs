@@ -14,7 +14,7 @@ import JSON5 from "json5";
 const OPENCLAW_HOME = "/sandbox/openclaw-home";
 const WORKSPACE = "/sandbox/work";
 const PROVIDER_ID = "openrind-gateway";
-const PROVIDER_BASE_URL = "https://api.anthropic.com";
+const PROVIDER_BASE_URL = "http://host.openshell.internal:8787";
 const DEFAULT_MODEL_ID = "claude-sonnet-4-6";
 const home = resolve(process.env.HOME || OPENCLAW_HOME);
 
@@ -86,7 +86,15 @@ const primaryModel = candidateModel.startsWith(providerPrefix) && candidateModel
 config.agents.defaults.model.primary = primaryModel;
 
 for (const model of Object.keys(config.agents.defaults.models)) {
-  if (model.startsWith("openrouter/")) delete config.agents.defaults.models[model];
+  if (
+    model.startsWith("openrouter/") ||
+    model.startsWith("openrind-haloop/") ||
+    model.startsWith("openrind-gateway/") ||
+    model.startsWith("stringcost/") ||
+    model.startsWith("anthropic/")
+  ) {
+    delete config.agents.defaults.models[model];
+  }
 }
 config.agents.defaults.models[primaryModel] = isObject(
   config.agents.defaults.models[primaryModel],
@@ -96,12 +104,23 @@ config.agents.defaults.models[primaryModel] = isObject(
 
 config.env = isObject(config.env) ? config.env : {};
 delete config.env.OPENROUTER_API_KEY;
+delete config.env.ANTHROPIC_API_KEY;
+delete config.env.ANTHROPIC_AUTH_TOKEN;
+delete config.env.ANTHROPIC_BASE_URL;
+delete config.env.ANTHROPIC_CUSTOM_HEADERS;
+delete config.env.OPENRIND_HALOOP_SESSION_CONTEXT;
 delete config.models.providers.openrouter;
+delete config.models.providers["openrind-haloop"];
+delete config.models.providers.stringcost;
+delete config.models.providers.anthropic;
 const modelId = primaryModel.slice(providerPrefix.length);
 config.models.providers[PROVIDER_ID] = {
   baseUrl: PROVIDER_BASE_URL,
   apiKey: "${ANTHROPIC_API_KEY}",
   api: "anthropic-messages",
+  headers: {
+    "x-openrind-haloop-session": "${OPENRIND_HALOOP_SESSION_CONTEXT}",
+  },
   models: [{ id: modelId, name: modelId === DEFAULT_MODEL_ID ? "Claude Sonnet 4.6" : modelId }],
 };
 

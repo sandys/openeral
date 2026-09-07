@@ -21,6 +21,7 @@ AGENTS.md
 
 # Node
 node_modules/
+.pnpm-store/
 dist/
 *.tgz
 

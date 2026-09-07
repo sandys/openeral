@@ -78,6 +78,10 @@ function appendToBuffer(session, data) {
 
 /** @typedef {(data: string | Uint8Array) => void} DataHandler */
 /** @typedef {(exitCode: number | null, signal?: string | null) => void} ExitHandler */
+/** @typedef {(event: { id: string, sandboxName: string, agentSessionId: string | null,
+ *   openedAt: number, endedAt: number, exitCode: number | null,
+ *   signal: string | null, terminationCause: string,
+ *   closeRequestedAt: number | null }) => void | Promise<void>} LifecycleExitHandler */
 
 /**
  * @typedef {Object} IPtyLike
@@ -100,9 +104,12 @@ function appendToBuffer(session, data) {
  *   the agent conversation for. null when no specific session was requested
  *   (legacy / "main" behavior). Used to key the registry so switching
  *   sessions in one sandbox tears down the previous PTY (one agent at a time).
+ * @property {string | null} haloopContextId Host-issued opaque conversation
+ *   context used to keep re-attaches on the same trusted Haloop trace.
  * @property {IPtyLike} pty
  * @property {DataHandler | null} onData
  * @property {ExitHandler | null} onExit
+ * @property {LifecycleExitHandler | null} onLifecycleExit
  * @property {{ cols: number; rows: number }} size
  * @property {number} openedAt
  * @property {Uint8Array[]} buffer        Replayable output chunks (raw bytes)
@@ -495,6 +502,7 @@ async function defaultSpawnImpl(opts) {
 }
 
 let spawnImpl = defaultSpawnImpl;
+let ensureGatewayImpl = ensureManagedFuseGateway;
 
 const DEFAULT_COLS = 120;
 const DEFAULT_ROWS = 32;
@@ -514,9 +522,8 @@ function clampDimension(value, fallback) {
  * @param {number} [opts.cols]
  * @param {number} [opts.rows]
  * @param {Record<string, string>} [opts.extraEnv]  Extra env vars forwarded
- *   into WSL via WSLENV (e.g. ANTHROPIC_API_KEY, OPENRIND_GATEWAY_API_KEY). These
- *   are needed so Claude Code can auto-configure its provider on first run
- *   inside the sandbox without prompting the user interactively.
+ *   into WSL via WSLENV. The required Haloop route is provisioned separately;
+ *   this channel must not carry upstream inference credentials.
  * @param {string | null} [opts.agentSessionId]  Openrind Desktop session id whose
  *   agent conversation this PTY runs. Agent sessions are CONCURRENT by
  *   design: each (sandbox, agentSessionId) pair owns at most one PTY, and a
@@ -525,19 +532,23 @@ function clampDimension(value, fallback) {
  *   in-flight work. Passing an id whose PTY is still live adopts it
  *   (lossless re-attach after navigation); other sessions' PTYs are never
  *   touched.
+ * @param {string | null} [opts.haloopContextId] Opaque host-issued Haloop context.
  * @param {DataHandler} [opts.onData]   Receives PTY stdout/stderr bytes
  * @param {ExitHandler} [opts.onExit]   Called when the wsl child exits
+ * @param {LifecycleExitHandler} [opts.onLifecycleExit] Host-only lifecycle
+ *   capture callback. Unlike the renderer handler, detach/attach never replaces it.
  * @returns {Promise<{ id: string, sandboxName: string, reused: boolean }>}
  */
 export async function openSession(opts) {
   if (!opts?.sandboxName) {
     throw new Error("openSession: sandboxName is required");
   }
-  await ensureManagedFuseGateway();
+  await ensureGatewayImpl();
   const cols = clampDimension(opts.cols, DEFAULT_COLS);
   const rows = clampDimension(opts.rows, DEFAULT_ROWS);
   const extraEnv = opts.extraEnv ?? null;
   const agentSessionId = opts.agentSessionId ?? null;
+  const haloopContextId = opts.haloopContextId ?? null;
 
   // Adoption / idempotency: if a still-live PTY already runs THIS agent
   // session, re-attach to it instead of spawning a second wsl child. This
@@ -551,6 +562,13 @@ export async function openSession(opts) {
   );
   if (existing) {
     if (!existing.exitInfo) {
+      if (
+        existing.haloopContextId &&
+        haloopContextId &&
+        existing.haloopContextId !== haloopContextId
+      ) {
+        throw new Error("openSession: Haloop conversation context mismatch");
+      }
       // Still live → adopt it; never spawn a second wsl child for one session.
       attachHandlers(existing.id, { onData: opts.onData, onExit: opts.onExit });
       resizeSession(existing.id, cols, rows);
@@ -585,9 +603,11 @@ export async function openSession(opts) {
     id,
     sandboxName: opts.sandboxName,
     agentSessionId,
+    haloopContextId,
     pty,
     onData: opts.onData ?? null,
     onExit: opts.onExit ?? null,
+    onLifecycleExit: opts.onLifecycleExit ?? null,
     size: { cols, rows },
     openedAt: Date.now(),
     buffer: [],
@@ -596,6 +616,7 @@ export async function openSession(opts) {
     detached: false,
     paused: false,
     exitInfo: null,
+    closeRequest: null,
   };
 
   // Wire data → buffer (always, even while detached) → caller (only when a
@@ -618,11 +639,31 @@ export async function openSession(opts) {
     // output plus this notice and offer "Reconnect". The map entry is
     // removed only by an explicit closeSession()/closeAllSessions().
     session.exitInfo = { exitCode: code, signal };
+    const endedAt = Date.now();
+    const terminationCause =
+      session.closeRequest?.cause || (code === 0 ? "completed" : "process-exit");
     appendToBuffer(
       session,
       `\r\n\x1b[33m[Session ended (exit ${code ?? "?"}).]\x1b[0m\r\n`,
     );
     session.onExit?.(code, signal);
+    try {
+      Promise.resolve(
+        session.onLifecycleExit?.({
+          id: session.id,
+          sandboxName: session.sandboxName,
+          agentSessionId: session.agentSessionId,
+          openedAt: session.openedAt,
+          endedAt,
+          exitCode: code,
+          signal,
+          terminationCause,
+          closeRequestedAt: session.closeRequest?.requestedAt ?? null,
+        }),
+      ).catch(() => {});
+    } catch {
+      // Observability must not change an already-running agent's exit path.
+    }
   });
 
   sessions.set(id, session);
@@ -707,7 +748,7 @@ export function resizeSession(id, cols, rows) {
  * Openrind Shell sandbox itself persists — that's the whole point of Openrind Shell's
  * PostgreSQL-backed /home/agent.
  */
-export function closeSession(id, signal = "SIGTERM") {
+export function closeSession(id, signal = "SIGTERM", cause = "desktop-close") {
   const session = sessions.get(id);
   if (!session) return false;
   if (session.exitInfo) {
@@ -715,9 +756,14 @@ export function closeSession(id, signal = "SIGTERM") {
     sessions.delete(id);
     return true;
   }
+  session.closeRequest = {
+    cause: String(cause || "desktop-close"),
+    requestedAt: Date.now(),
+  };
   try {
     session.pty.kill(signal);
   } catch {
+    session.closeRequest = null;
     // kill() threw unexpectedly — PTY may still be running; don't delete so
     // the caller can retry (e.g. with SIGKILL) or the session stays trackable.
     return false;
@@ -773,14 +819,15 @@ export function findSessionBySandboxAndAgent(sandboxName, agentSessionId) {
  * be several, and each would otherwise die slowly on a broken tunnel.
  *
  * @param {string} sandboxName
+ * @param {string} [cause]
  * @returns {number} how many sessions were closed
  */
-export function closeSessionsForSandbox(sandboxName) {
+export function closeSessionsForSandbox(sandboxName, cause = "sandbox-delete") {
   if (!sandboxName) return 0;
   let closed = 0;
   for (const session of Array.from(sessions.values())) {
     if (session.sandboxName === sandboxName) {
-      if (closeSession(session.id)) closed++;
+      if (closeSession(session.id, "SIGTERM", cause)) closed++;
     }
   }
   return closed;
@@ -946,11 +993,13 @@ export function attachHandlers(id, handlers = {}, options = {}) {
   return true;
 }
 
-/** Tear down every session. Called on app quit / runtime shutdown. */
-export function closeAllSessions() {
+/** Tear down every session. Called on app quit / integration shutdown. */
+export function closeAllSessions(cause = "app-shutdown") {
+  let closed = 0;
   for (const id of Array.from(sessions.keys())) {
-    closeSession(id);
+    if (closeSession(id, "SIGTERM", cause)) closed += 1;
   }
+  return closed;
 }
 
 export const __testing = {
@@ -964,6 +1013,12 @@ export const __testing = {
   },
   clearSpawnImpl() {
     spawnImpl = defaultSpawnImpl;
+  },
+  installEnsureGatewayImpl(fn) {
+    ensureGatewayImpl = fn;
+  },
+  clearEnsureGatewayImpl() {
+    ensureGatewayImpl = ensureManagedFuseGateway;
   },
   /** Encode a keystroke DATA frame (exposed for the frame-protocol tests). */
   encodeDataFrame,
@@ -988,5 +1043,6 @@ export const __testing = {
   resetAll() {
     closeAllSessions();
     sessions.clear();
+    ensureGatewayImpl = ensureManagedFuseGateway;
   },
 };

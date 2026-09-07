@@ -20,7 +20,12 @@ export {
   createOpenrindShellSandbox,
   deleteWorkspaceFile,
   downloadWorkspaceFile,
+  ensureOpenrindShellHaloop,
   listWorkspaceFiles,
+  restoreOpenrindShellHaloopIncumbent,
+  revokeOpenrindShellHaloopIntegration,
+  revokeOpenrindShellHaloopForSandbox,
+  rotateOpenrindShellHaloop,
   uploadWorkspaceFile,
 } from "./fuse-sandbox.mjs";
 export {
@@ -28,12 +33,26 @@ export {
   listPrimaryFuseSandboxes as listSandboxes,
   probePrimaryFuseDatabase as probeDatabaseUrl,
 } from "./fuse-management.mjs";
+export {
+  buildHaloopAgentLifecycleEvent,
+  getHaloopRuntimeActiveRoute,
+  getHaloopRuntimeStatus,
+  recordHaloopApplicationSpans,
+  restartHaloopRuntime,
+  restoreHaloopIncumbentRoute,
+  revokeHaloopIntegration,
+  revokeHaloopSandboxProfiles,
+  rotateHaloopRuntime,
+  stopHaloopRuntime,
+} from "./haloop-runtime.mjs";
 export { shellQuote };
 
 const FUSE_IMAGE = "openrind-shell-fuse:local";
 const SESSION_MARKER_PATH = "/var/lib/openrind-shell/runtime/desktop-claude-launch";
 const SESSION_HOOK_SENTINEL = "Openrind Desktop Claude interactive hook.";
 const CLAUDE_SESSION_NAMESPACE = "6f9b1e2a-0c3d-4b7a-9e21-8a4c1d5f7b30";
+const HALOOP_SESSION_ASSERTION_PATTERN =
+  /^v1\.[0-9a-f]{32}\.[1-9][0-9]{9,15}\.[1-9][0-9]{9,15}\.[0-9a-f]{64}$/;
 
 export function imageForProfile(profile) {
   if (profile !== "openrind-shell-claude" && profile !== "openrind-shell-openclaw") {
@@ -68,13 +87,17 @@ function deriveClaudeSessionUuid(sessionId) {
  * a normal fresh Claude session; a UUID creates or resumes the matching Claude
  * transcript for a selected desktop session.
  */
-export function resolveAgentSessionValue(profile, agentSessionId) {
+export function resolveAgentSessionValue(profile, agentSessionId, haloopSessionAssertion) {
   if (profile !== "openrind-shell-claude" && profile !== "openrind-shell-openclaw") {
     throw new Error("The primary FUSE runtime supports the Claude and OpenClaw profiles only.");
   }
   const sessionId = String(agentSessionId ?? "").trim();
   const value = sessionId ? deriveClaudeSessionUuid(sessionId) : "auto";
-  return `${profile}:${value}`;
+  const assertion = String(haloopSessionAssertion ?? "").trim();
+  if (!HALOOP_SESSION_ASSERTION_PATTERN.test(assertion)) {
+    throw new Error("A signed Haloop conversation context is required for agent launch.");
+  }
+  return `${profile}:${value}:${assertion}`;
 }
 
 function markerCommand(name, script) {
@@ -117,7 +140,12 @@ function markerError(action, result) {
 /** Write the one-shot marker immediately before a new desktop connect. */
 export async function writeCurrentSessionMarker(name, value) {
   const marker = String(value ?? "").trim();
-  if (marker && !/^(?:openrind-shell-claude|openrind-shell-openclaw):(?:auto|[0-9a-f]{8}-[0-9a-f-]{27})$/i.test(marker)) {
+  if (
+    marker &&
+    !new RegExp(
+      `^(?:openrind-shell-claude|openrind-shell-openclaw):(?:auto|[0-9a-f]{8}-[0-9a-f-]{27}):${HALOOP_SESSION_ASSERTION_PATTERN.source.slice(1, -1)}$`,
+    ).test(marker)
+  ) {
     throw new Error("Invalid desktop Claude session marker.");
   }
   // Repair the interactive hook in the same exec that writes the marker. This

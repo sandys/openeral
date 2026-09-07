@@ -22,6 +22,8 @@ export function getSettingsTabLabel(tab: SettingsTab) {
       return t("settings.tab_appearance");
     case "sandbox":
       return t("settings.tab_sandbox");
+    case "haloop":
+      return t("settings.tab_haloop");
     case "billing":
       return t("settings.tab_billing");
     case "debug":
@@ -45,6 +47,8 @@ export function getSettingsTabDescription(tab: SettingsTab) {
       return t("settings.tab_description_appearance");
     case "sandbox":
       return t("settings.tab_description_sandbox");
+    case "haloop":
+      return t("settings.tab_description_haloop");
     case "billing":
       return t("settings.tab_description_billing");
     case "debug":
@@ -59,11 +63,9 @@ export function getWorkspaceSettingsTabs(): SettingsTab[] {
 }
 
 export function getGlobalSettingsTabs(developerMode: boolean): SettingsTab[] {
-  const tabs: SettingsTab[] = ["sandbox", "appearance", "environment"];
-  
-  if (isDesktopRuntime()) {
-    tabs.unshift("billing");
-  }
+  const tabs: SettingsTab[] = isDesktopRuntime()
+    ? ["billing", "sandbox", "haloop", "appearance", "environment"]
+    : ["sandbox", "appearance", "environment"];
 
   if (developerMode) tabs.push("debug");
   return tabs;

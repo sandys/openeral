@@ -34,6 +34,7 @@ const BUILT_IN_PROFILE_YAMLS: &[&str] = &[
     include_str!("../../../providers/github.yaml"),
     include_str!("../../../providers/google-cloud.yaml"),
     include_str!("../../../providers/google-vertex-ai.yaml"),
+    include_str!("../../../providers/haloop-anthropic.yaml"),
     include_str!("../../../providers/nvidia.yaml"),
     include_str!("../../../providers/pypi.yaml"),
 ];
@@ -2685,6 +2686,38 @@ mod tests {
             profile.credential_env_vars(),
             vec!["ANTHROPIC_API_KEY", "CLAUDE_API_KEY"]
         );
+    }
+
+    #[test]
+    fn haloop_profile_binds_scoped_token_to_exact_host_port_and_binaries() {
+        let profile = builtin_profile("haloop-anthropic");
+        assert!(profile.inference_capable);
+        assert_eq!(profile.credentials.len(), 1);
+        let credential = &profile.credentials[0];
+        assert_eq!(credential.name, "client_token");
+        assert_eq!(credential.auth_style, "header");
+        assert_eq!(credential.header_name, "x-api-key");
+        assert_eq!(
+            credential.env_vars,
+            vec!["HALOOP_CLIENT_TOKEN", "ANTHROPIC_API_KEY"]
+        );
+
+        assert_eq!(profile.endpoints.len(), 1);
+        let endpoint = &profile.endpoints[0];
+        assert_eq!(endpoint.host, "host.openshell.internal");
+        assert_eq!(endpoint.port, 8787);
+        assert_eq!(endpoint.path, "/v1/**");
+        assert_eq!(endpoint.protocol, "rest");
+        assert_eq!(endpoint.enforcement, "enforce");
+
+        let binaries = profile
+            .binaries
+            .iter()
+            .map(|binary| binary.path.as_str())
+            .collect::<Vec<_>>();
+        assert!(binaries.contains(&"/usr/local/bin/claude-real"));
+        assert!(binaries.contains(&"/usr/local/bin/openrind-openclaw-agent"));
+        assert!(!binaries.contains(&"/usr/bin/node"));
     }
 
     #[test]

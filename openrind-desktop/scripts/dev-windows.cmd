@@ -24,7 +24,7 @@ call "%VSDEVCMD%" -arch=%VS_ARCH% -host_arch=%HOST_ARCH% >nul
 if errorlevel 1 exit /b %errorlevel%
 
 if /I "%TARGET_ARCH%"=="x64" (
-  call corepack pnpm --filter @openrind/desktop dev:windows:x64
+  call corepack pnpm@10.27.0 --filter @openrind/desktop dev:windows:x64
 ) else (
-  call corepack pnpm --filter @openrind/desktop dev:windows
+  call corepack pnpm@10.27.0 --filter @openrind/desktop dev:windows
 )

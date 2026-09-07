@@ -1,14 +1,14 @@
 /** @jsxImportSource react */
 
 /**
- * Openrind Shell sandbox credentials — DATABASE_URL, ANTHROPIC_API_KEY and the
- * optional OPENRIND_GATEWAY_API_KEY — surfaced on the Environment settings page so
- * every key the app needs lives in one place.
+ * Openrind Shell host credentials — DATABASE_URL, ANTHROPIC_API_KEY and the
+ * optional OPENRIND_GATEWAY_API_KEY — surfaced on the Environment settings page
+ * so every key the app needs lives in one place.
  *
  * Storage is deliberately NOT the workspace environment store: these values
  * are encrypted at rest via the OS keyring (Electron safeStorage), decrypted
- * only in the main process when a sandbox is provisioned, and never sent to
- * the renderer once saved. The workspace environment variables above them,
+ * only for trusted Desktop/OpenShell host services, and never sent to the
+ * renderer once saved. The workspace environment variables above them,
  * by contrast, live in the Openrind Desktop server and are injected into chat
  * engine runs — moving secrets there would both weaken their protection and
  * break sandboxes when no workspace server is running.
@@ -160,10 +160,11 @@ export function OpenrindShellCredentialsPanel(props: OpenrindShellCredentialsPan
       <div>
         <div className="text-sm font-medium text-gray-12">Sandbox credentials</div>
         <div className="text-xs text-gray-10">
-          Keys used to provision and run Openrind Shell sandboxes. Unlike the workspace
-          environment variables above, these are encrypted at rest by your OS
-          keyring (Keychain / DPAPI / libsecret), decrypted only when a sandbox
-          launches, and never sent to the UI once saved.
+          Secrets used by Desktop to provision Openrind Shell and its required Haloop
+          edge. Unlike the workspace environment variables above, these are encrypted
+          at rest by your OS keyring (Keychain / DPAPI / libsecret), used only by
+          trusted Desktop/OpenShell host-side services, and never returned to the UI
+          once saved.
         </div>
       </div>
       {props.credentialStatus && props.credentialStatus.encryptionAvailable === false ? (
@@ -185,7 +186,7 @@ export function OpenrindShellCredentialsPanel(props: OpenrindShellCredentialsPan
       />
       <CredentialRow
         label="ANTHROPIC_API_KEY"
-        description="Anthropic API key (sk-ant-...). Required for Claude Code and stored in OpenShell's gateway-managed provider, not in the sandbox filesystem."
+        description="Upstream Anthropic API key required by the host-managed Haloop edge. Desktop retains it outside the sandbox; Claude and OpenClaw receive neither this key nor a direct-provider route."
         placeholder="sk-ant-..."
         statusKey="anthropicApiKey"
         status={props.credentialStatus}
@@ -195,7 +196,7 @@ export function OpenrindShellCredentialsPanel(props: OpenrindShellCredentialsPan
       />
       <CredentialRow
         label="OPENRIND_GATEWAY_API_KEY"
-        description="Routes Claude Code API calls through a Openrind Gateway proxy for token + cost metering. Leave unset to talk to Anthropic directly."
+        description="Openrind account and billing credential. It is not an inference route; Claude and OpenClaw always use the required Haloop edge."
         placeholder="sk-st-..."
         statusKey="openrindGatewayApiKey"
         status={props.credentialStatus}

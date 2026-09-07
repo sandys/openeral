@@ -85,7 +85,7 @@ channel. The compatibility image does not use this path.
 - The vendored OpenShell CLI, gateway, and supervisor built from this repository.
 - Docker driver configuration with `enable_fuse = true`.
 - An external PostgreSQL URL. PGlite is intentionally unsupported in this image.
-- A configured Claude provider, such as `claude` or `aws`.
+- The required host-managed Haloop edge and a Desktop-created scoped provider.
 
 Build instructions for the patched OpenShell components are in [BUILD.md](./BUILD.md).
 
@@ -98,6 +98,15 @@ docker build --pull=false -f Dockerfile.openrind-shell -t openrind-shell-fuse:lo
 
 This builds only the Openrind Shell child image and its Rust daemon. It reuses the published
 NVIDIA base.
+
+For the Windows Desktop source workflow, this image plus
+`haloop-gateway:local` and `haloop-collector:local` must be built in the
+dedicated OpenShell WSL Docker daemon. Run the validated builder from the
+repository root:
+
+```powershell
+node openrind-desktop/apps/desktop/scripts/build-openshell-runtime-images.mjs
+```
 
 ### Create And Initialize
 
@@ -112,9 +121,14 @@ export DATABASE_URL="${DATABASE_URL:-${POSTGRES_URL:-}}"
 
 Create a temporary database upload and initialize the sandbox:
 
+The supported Desktop flow creates `OPENRIND_HALOOP_PROVIDER` after registering
+the matching server-owned Haloop route. A raw Anthropic key is never a sandbox
+provider credential, and the FUSE runtime has no direct-provider fallback.
+
 ```bash
 db_file="$(mktemp /tmp/openrind-shell-db-url-XXXXXX)"
 trap 'rm -f "$db_file"' EXIT
+: "${OPENRIND_HALOOP_PROVIDER:?Openrind Desktop must register the scoped Haloop provider first}"
 printf '%s' "$DATABASE_URL" > "$db_file"
 chmod 600 "$db_file"
 
@@ -125,8 +139,7 @@ chmod 600 "$db_file"
   --from openrind-shell-fuse:local \
   --fuse \
   --upload "$db_file:/sandbox/db-url" \
-  --provider claude \
-  --auto-providers \
+  --provider "$OPENRIND_HALOOP_PROVIDER" \
   --env "OPENRIND_SHELL_WORKSPACE_ID=$OPENRIND_SHELL_WORKSPACE_ID" \
   --no-tty \
   -- openrind-shell-init
@@ -215,20 +228,13 @@ Connect from the host:
   sandbox connect "$OPENRIND_SHELL_WORKSPACE_ID"
 ```
 
-Inside the sandbox, start Claude:
+This manual connection is a diagnostic shell. Required-phase agent inference is
+launched from Openrind Desktop, which supplies the signed conversation context;
+running Claude directly from the diagnostic shell is intentionally rejected by
+the Haloop edge.
 
-```bash
-claude
-```
-
-Use `/exit` or `Ctrl+D` to stop Claude and return to the sandbox shell. The wrapper
-flushes dirty FUSE data before it returns. Then:
-
-```bash
-claude       # start another session
-claude -c    # continue the latest conversation
-exit         # disconnect without deleting the sandbox
-```
+Use `exit` to disconnect without deleting the sandbox. Openrind Desktop owns new
+and resumed Claude/OpenClaw launches and runs the final FUSE durability flush.
 
 Reconnect later with the same `sandbox connect` command. The OpenShell supervisor and
 FUSE daemon remain sandbox services; they are not tied to the SSH session. Interactive
@@ -266,8 +272,14 @@ cwd but sets `HOME=/sandbox/claude-home` for Claude only.
   shell and Claude session; open file descriptors do not survive it.
 
 Use the same `OPENRIND_SHELL_WORKSPACE_ID` in a replacement sandbox to mount the same
-volume. Before
-deleting a sandbox, exit Claude cleanly:
+volume. Delete Desktop-managed sandboxes from Openrind Desktop. It ends tracked
+agents, revokes every matching scoped Haloop token and endpoint-bound OpenShell
+provider, rebuilds routes for surviving profiles, and only then removes the
+sandbox container. A cleanup failure blocks deletion; do not bypass it with a
+raw OpenShell command.
+
+For a standalone manual sandbox that is not owned by Desktop, exit Claude
+cleanly before deleting it:
 
 ```bash
 "$OPENSHELL_BIN" \
@@ -275,16 +287,49 @@ deleting a sandbox, exit Claude cleanly:
   sandbox delete "$OPENRIND_SHELL_WORKSPACE_ID"
 ```
 
-### Openrind Gateway
+### Required Haloop Runtime
 
-Create or update a generic `openrind-gateway` provider with
-`OPENRIND_GATEWAY_API_KEY`, then add `--provider openrind-gateway` to `sandbox create`.
-Initialization calls the presign endpoint inside the sandbox. OpenShell resolves the
-provider placeholder only in that constrained HTTPS request; raw Anthropic and gateway
-keys are not written to the upload or session environment. The old `stringcost`
-provider and `STRINGCOST_API_KEY` remain migration aliases. The gateway does not rewrite
-Claude's model selection; native Anthropic model defaults and explicit user settings are
-preserved.
+Openrind Desktop starts the Haloop gateway and private trace collector outside
+the sandbox, registers a server-owned route profile with mandatory synchronous
+capture hooks, and creates one endpoint-bound OpenShell provider per
+workspace/sandbox/agent scope. OpenShell materializes the scoped token only as
+`x-api-key` for the exact Haloop endpoint and trusted native launcher. The
+Desktop also issues a signed, opaque conversation assertion per agent process.
+The edge verifies it against the selected server-owned profile, derives the
+trace/root/session identity, and strips it before the core. Missing or invalid
+assertions fail closed, so a sandbox cannot supply raw trace metadata. The
+upstream Anthropic key remains in the protected host-side Haloop registry. The
+gateway publishes `8787` only on the OpenShell sandbox bridge address mapped to
+`host.openshell.internal`; collector port `8788` is confined to the
+Desktop-managed Docker network. Packaged Desktop selects the matched,
+version-pinned Haloop gateway and collector images rather than the source-only
+`:local` tags. The FUSE sandbox is not given a direct
+Anthropic, legacy Openrind Gateway, or `stringcost` inference path.
+Desktop sandbox deletion withdraws the live edge before removing the matching
+provider and encrypted profile records. Surviving profiles are restored through
+Haloop with unchanged credentials; deleting the last profile stops the managed
+gateway and collector without deleting persisted traces or the PostgreSQL FUSE
+workspace.
+
+The confirmed Desktop distro reset is the complete integration-removal path. It
+blocks new route preparation, closes tracked agents, withdraws the edge, deletes
+all endpoint-bound providers and encrypted scoped profiles, and removes the
+collector, plaintext registry, and private network before unregistering WSL.
+If corruption blocks managed cleanup, Desktop stops the dedicated distro before
+erasing every encrypted host token; unregister then destroys its provider store.
+Failure to stop the distro or erase host tokens blocks unregister. Unlike an
+ordinary sandbox deletion or Haloop restart, this destructive reset deletes
+distro-local traces and packages; the external PostgreSQL FUSE workspace
+remains untouched.
+
+The current Desktop policy is `incumbent-only`: each server-owned profile has
+one direct Anthropic configuration and no candidate target, weight, or model
+override. **Settings -> Environment -> Restore incumbent** atomically rebuilds
+that approved registry and replaces only the gateway. Existing tokens, signed
+sessions, agent processes, collector data, and FUSE workspace data remain in
+place; only a request already in flight may need to be retried. The restore
+action requires a healthy version-matched collector; use the full Haloop restart
+first when the collector itself needs repair.
 
 ## Compatibility Runtime
 

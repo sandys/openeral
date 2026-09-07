@@ -15,11 +15,12 @@ RUN cargo build --locked --release -p openeral-fused \
 
 FROM ghcr.io/nvidia/openshell-community/sandboxes/base:latest
 
-LABEL com.openrind.desktop.fuse-contract="fuse-openclaw-identity-v22"
+LABEL com.openrind.desktop.fuse-contract="fuse-haloop-required-v26"
 
 USER root
 
 ARG OPENCLAW_VERSION=2026.7.1-2
+ARG CLAUDE_CODE_VERSION=latest
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl gnupg python3 \
@@ -36,7 +37,12 @@ RUN cd /opt/openrind-shell && npm install && npm run build && npm prune --omit=d
     && chown -R sandbox:sandbox /opt/openrind-shell \
     && ln -s /opt/openrind-shell /opt/openeral
 
-RUN test -x /usr/local/bin/claude \
+RUN rm -f /usr/local/bin/claude \
+    && npm install -g --prefix /usr/local --loglevel=error "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
+    && test -x /usr/local/bin/claude \
+    && claude_version="$(/usr/local/bin/claude --version | grep -Eo '[0-9]+\.[0-9]+\.[0-9]+' | head -n1)" \
+    && test -n "$claude_version" \
+    && test "$(printf '%s\n' 2.1.227 "$claude_version" | sort -V | head -n1)" = 2.1.227 \
     && mv /usr/local/bin/claude /usr/local/bin/claude-real
 
 COPY --from=fused-builder /source/target/release/openeral-fused /usr/local/bin/openrind-shell-fused
@@ -47,14 +53,14 @@ COPY sandboxes/openeral/pg-client-fuse.mjs /usr/local/bin/pg
 COPY sandboxes/openeral/setup-fuse.sh /opt/openrind-shell/setup.sh
 COPY sandboxes/openeral/openrind-pty-bridge.py /opt/openrind-shell/openrind-pty-bridge.py
 COPY sandboxes/openeral/openrind-desktop-claude-launch.sh /usr/local/bin/openrind-desktop-claude-launch
-COPY sandboxes/openeral/configure-stringcost.mjs /opt/openrind-shell/configure-openrind-gateway.mjs
+COPY sandboxes/openeral/configure-haloop.mjs /opt/openrind-shell/configure-haloop.mjs
 COPY sandboxes/openeral/configure-openclaw-fuse.mjs /opt/openrind-shell/configure-openclaw-fuse.mjs
 COPY sandboxes/openeral/openrind-openclaw-fuse.sh /usr/local/bin/openrind-openclaw
 COPY sandboxes/openeral/supabase-root-2021-ca.pem /opt/openrind-shell/certs/supabase-root-2021-ca.pem
 RUN chmod 755 /usr/local/bin/openrind-shell-fused /usr/local/bin/claude /usr/local/bin/pg /usr/local/bin/openrind-desktop-claude-launch \
         /usr/local/bin/openrind-openclaw /usr/local/bin/openrind-openclaw-agent \
         /opt/openrind-shell/setup.sh /opt/openrind-shell/openrind-pty-bridge.py \
-        /opt/openrind-shell/configure-openrind-gateway.mjs \
+        /opt/openrind-shell/configure-haloop.mjs \
         /opt/openrind-shell/configure-openclaw-fuse.mjs \
     && chmod 644 /opt/openrind-shell/certs/supabase-root-2021-ca.pem \
     && install -m 0644 /opt/openrind-shell/certs/supabase-root-2021-ca.pem /usr/local/share/ca-certificates/supabase-root-2021-ca.crt \
@@ -62,12 +68,13 @@ RUN chmod 755 /usr/local/bin/openrind-shell-fused /usr/local/bin/claude /usr/loc
     && sed -i 's/\r$//' /usr/local/bin/claude /usr/local/bin/pg /usr/local/bin/openrind-desktop-claude-launch \
         /usr/local/bin/openrind-openclaw \
         /opt/openrind-shell/setup.sh /opt/openrind-shell/openrind-pty-bridge.py \
-        /opt/openrind-shell/configure-openrind-gateway.mjs \
+        /opt/openrind-shell/configure-haloop.mjs \
         /opt/openrind-shell/configure-openclaw-fuse.mjs \
     && bash -n /usr/local/bin/openrind-openclaw \
     && bash -n /opt/openrind-shell/setup.sh \
+    && node --check /opt/openrind-shell/configure-haloop.mjs \
     && node --check /opt/openrind-shell/configure-openclaw-fuse.mjs \
-    && printf '%s' fuse-openclaw-identity-v22 > /opt/openrind-shell/desktop-contract \
+    && printf '%s' fuse-haloop-required-v26 > /opt/openrind-shell/desktop-contract \
     && ln -sf /usr/local/bin/openrind-shell-fused /usr/local/bin/openeral-fused \
     && ln -sf /opt/openrind-shell/setup.sh /usr/local/bin/openrind-shell \
     && ln -sf /opt/openrind-shell/setup.sh /usr/local/bin/openrind-shell-init \
@@ -77,7 +84,8 @@ RUN chmod 755 /usr/local/bin/openrind-shell-fused /usr/local/bin/claude /usr/loc
     && ln -sf /usr/local/bin/openrind-shell-start /usr/local/bin/openeral-start \
     && ln -sf /opt/openrind-shell/openrind-pty-bridge.py /usr/local/bin/openrind-pty-bridge.py \
     && install -d -o sandbox -g sandbox -m 0700 \
-        /var/lib/openrind-shell/runtime /sandbox/claude-home /sandbox/openclaw-home
+        /var/lib/openrind-shell/runtime /sandbox/claude-home /sandbox/openclaw-home \
+        /home/agent /home/agent/.openrind-shell
 
 COPY sandboxes/openeral/policy.yaml /etc/openshell/policy.yaml
 COPY --chown=root:root .claude/skills/ /opt/openrind-shell/skills/

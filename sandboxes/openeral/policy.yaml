@@ -60,15 +60,30 @@ fuse_mounts:
 
 network_policies:
 
-  # --- Claude Code (Anthropic API) ---
-  claude_code:
-    name: claude-code
+  # --- Required Haloop inference edge ---
+  # The attached haloop-anthropic provider owns credential injection. Keep the
+  # base sandbox policy aligned so composing policies cannot restore a direct
+  # Anthropic or legacy metered-proxy bypass.
+  haloop_anthropic:
+    name: haloop-anthropic
     endpoints:
-      - host: api.anthropic.com
-        port: 443
+      - host: host.openshell.internal
+        port: 8787
         protocol: rest
         enforcement: enforce
-        access: full
+        rules:
+          - allow: { method: POST, path: "/v1/messages" }
+          - allow: { method: POST, path: "/v1/messages/count_tokens" }
+    binaries:
+      - { path: /usr/bin/claude }
+      - { path: /usr/local/bin/claude }
+      - { path: /usr/local/bin/claude-real }
+      - { path: /usr/local/bin/openrind-openclaw-agent }
+
+  # --- Claude telemetry and static resources (no inference credential) ---
+  claude_support:
+    name: claude-support
+    endpoints:
       - { host: statsig.anthropic.com, port: 443 }
       - { host: sentry.io, port: 443 }
       - { host: raw.githubusercontent.com, port: 443 }
@@ -187,67 +202,6 @@ network_policies:
       - { path: /usr/bin/curl }
       - { path: /usr/bin/wget }
       - { path: "/sandbox/work/.cursor-server/**" }
-
-  # --- Openrind Gateway presign creation ---
-  openrind_gateway_presign:
-    name: openrind-gateway-presign
-    endpoints:
-      - host: app.openrind.com
-        port: 443
-        protocol: rest
-        enforcement: enforce
-        request_body_credential_rewrite: true
-        rules:
-          - allow:
-              method: POST
-              path: /v1/presign
-    binaries:
-      - { path: /usr/bin/node }
-
-  # --- Openrind Gateway metered Anthropic proxy ---
-  openrind_gateway_proxy:
-    name: openrind-gateway-proxy
-    endpoints:
-      - host: proxy.openrind.com
-        port: 443
-        protocol: rest
-        enforcement: enforce
-        access: full
-    binaries:
-      - { path: /usr/local/bin/claude-real }
-
-  # --- Legacy StringCost endpoints (one-release migration window) ---
-  # setup.sh sends both provider placeholders to this endpoint. OpenShell
-  # resolves STRINGCOST_API_KEY in the Authorization header and
-  # ANTHROPIC_API_KEY in the JSON body without exposing either raw key.
-  stringcost_presign:
-    name: stringcost-presign
-    endpoints:
-      - host: app.stringcost.com
-        port: 443
-        protocol: rest
-        enforcement: enforce
-        request_body_credential_rewrite: true
-        rules:
-          - allow:
-              method: POST
-              path: /v1/presign
-    binaries:
-      - { path: /usr/bin/node }
-
-  # --- StringCost metered Anthropic proxy ---
-  # setup.sh writes the presigned URL to Claude's settings. Only the native
-  # Claude binary may call the proxy; the management API is isolated above.
-  stringcost_proxy:
-    name: stringcost-proxy
-    endpoints:
-      - host: proxy.stringcost.com
-        port: 443
-        protocol: rest
-        enforcement: enforce
-        access: full
-    binaries:
-      - { path: /usr/local/bin/claude-real }
 
   # --- External PostgreSQL (Supabase) via HTTP CONNECT tunnel ---
   # pg traffic cannot bypass OpenShell's HTTP proxy — the sandbox netns REJECTs
