@@ -12,7 +12,7 @@ Dockerfile
 setup-fuse.sh
 openeral-claude-fuse.sh
 pg-client-fuse.mjs
-configure-stringcost.mjs  # legacy source filename, installed as configure-openrind-gateway.mjs
+configure-stringcost.mjs  # retired direct-gateway configurator; not packaged by the required Haloop FUSE image
 policy.yaml
 ```
 
@@ -51,8 +51,10 @@ launch or detach it.
 Claude runs through the installed Openrind Shell wrapper (source file
 `openeral-claude-fuse.sh`) with `HOME=/sandbox/claude-home` and cwd `/sandbox/work`.
 The home path is a per-workspace Docker named volume; project files remain on FUSE.
-`/exit` or `Ctrl+D` returns to the shell after `flush-all`; `claude -c` resumes the
-latest session from the local home volume.
+Openrind Desktop launches new and resumed Claude/OpenClaw processes with a
+consume-once, profile-bound signed Haloop context. A manual diagnostic shell
+does not have that assertion, so direct agent inference from it fails closed.
+`/exit` or `Ctrl+D` triggers the wrapper's final `flush-all`.
 
 No watcher or PGlite process participates in primary persistence.
 

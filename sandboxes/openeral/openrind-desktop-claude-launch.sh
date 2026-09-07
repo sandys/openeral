@@ -28,12 +28,20 @@ marker="$(tr -d '\r\n ' < "$MARKER_PATH" 2>/dev/null || true)"
 rm -f "$MARKER_PATH" 2>/dev/null || true
 
 profile="${marker%%:*}"
-session_id="${marker#*:}"
+marker_remainder="${marker#*:}"
+session_id="${marker_remainder%%:*}"
+session_context="${marker_remainder#*:}"
 
-if [ "$profile" = "$marker" ]; then
-  profile="openrind-shell-claude"
-  session_id="$marker"
+if [ "$profile" = "$marker" ] || [ "$session_id" = "$marker_remainder" ]; then
+  echo "Openrind Shell: signed Haloop launch context was not found. Reconnect the session."
+  exit 64
 fi
+if ! printf '%s' "$session_context" | grep -Eq '^v1\.[0-9a-f]{32}\.[1-9][0-9]{9,15}\.[1-9][0-9]{9,15}\.[0-9a-f]{64}$'; then
+  echo "Openrind Shell: signed Haloop launch context is invalid. Reconnect the session."
+  exit 64
+fi
+export OPENRIND_HALOOP_SESSION_CONTEXT="$session_context"
+unset session_context marker_remainder
 
 case "$session_id" in
   auto)
@@ -49,6 +57,10 @@ case "$session_id" in
 esac
 
 export OPENRIND_DESKTOP_CLAUDE_LAUNCH=1
+# Claude Code sends this per-process header to the fixed Haloop edge. The edge
+# verifies it against the authenticated server-owned profile, derives the trace
+# identity, and removes the assertion before the request reaches the core.
+export ANTHROPIC_CUSTOM_HEADERS="x-openrind-haloop-session: ${OPENRIND_HALOOP_SESSION_CONTEXT}"
 
 FAST_FIRST_LAUNCH_MARKER="$RUNTIME_DIR/desktop-fast-first-launch"
 if [ -f "$FAST_FIRST_LAUNCH_MARKER" ]; then
@@ -83,8 +95,10 @@ if [ "${OPENRIND_SHELL_AGENT:-}" = "openclaw" ]; then
   fi
 else
   # Claude's wrapper owns FUSE health checks and the final durability flush.
-  # Refresh Gateway configuration from the credentials injected into this PTY.
-  node /opt/openrind-shell/configure-openrind-gateway.mjs || true
+  # Reassert the fixed Haloop endpoint and remove persisted bypass state before
+  # every new or resumed Claude process. Failure is fatal: direct inference is
+  # not a supported recovery path in this image contract.
+  node /opt/openrind-shell/configure-haloop.mjs
   if [ -f "$RUNTIME_DIR/anthropic-base-url" ]; then
     export ANTHROPIC_BASE_URL="$(cat "$RUNTIME_DIR/anthropic-base-url" 2>/dev/null | tr -d '\r\n ')"
   fi

@@ -15,6 +15,10 @@ export OPENCLAW_LOG_LEVEL="${OPENCLAW_LOG_LEVEL:-error}"
 export DEBUG="${DEBUG:-}"
 export PI_DEBUG_REDRAW=0
 export NODE_COMPILE_CACHE="${NODE_COMPILE_CACHE:-/tmp/openrind-openclaw-compile-cache}"
+if ! printf '%s' "${OPENRIND_HALOOP_SESSION_CONTEXT:-}" | grep -Eq '^v1\.[0-9a-f]{32}\.[1-9][0-9]{9,15}\.[1-9][0-9]{9,15}\.[0-9a-f]{64}$'; then
+  echo "openrind-openclaw: a signed Desktop Haloop conversation context is required" >&2
+  exit 64
+fi
 if ! install -d -m 0700 "$HOME/.openclaw" "$HOME/.openclaw/logs" "$NODE_COMPILE_CACHE"; then
   echo "openrind-openclaw: failed to prepare the OpenClaw home or compile cache" >&2
   exit 1

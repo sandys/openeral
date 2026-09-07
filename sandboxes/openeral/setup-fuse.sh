@@ -307,7 +307,7 @@ if [ "$OPENRIND_SHELL_AGENT" = claude ]; then
       sync_bundled_skills /opt/openrind-shell/skills "$target_skills_dir"
     done
   fi
-  HOME="$OPENRIND_SHELL_HOME" node /opt/openrind-shell/configure-openrind-gateway.mjs
+  HOME="$OPENRIND_SHELL_HOME" node /opt/openrind-shell/configure-haloop.mjs
   # Warm the immutable executable and its dynamic loader while provisioning is
   # still showing progress. This does not create trust or onboarding state.
   HOME="$OPENRIND_SHELL_CLAUDE_HOME" /usr/local/bin/claude-real --version >/dev/null 2>&1 || true
@@ -320,6 +320,8 @@ else
   fi
   # Configuration and bundled-skill staging belong to provisioning, not the
   # interactive launch path.
+  HOME="$OPENRIND_SHELL_OPENCLAW_HOME" \
+    /usr/bin/node /opt/openrind-shell/configure-haloop.mjs
   HOME="$OPENRIND_SHELL_OPENCLAW_HOME" \
     /usr/bin/node /opt/openrind-shell/configure-openclaw-fuse.mjs
 
@@ -460,8 +462,8 @@ SESSION_ENV="$OPENRIND_SHELL_RUNTIME_DIR/session.env"
     # replay its observed banner only within the shared clear-rewrite budget.
     printf 'export OPENRIND_SHELL_PTY_KEEP_SCROLLBACK=0\n'
     printf 'export OPENRIND_SHELL_PTY_SHOW_OPENCLAW_BANNER=1\n'
-    # Its explicit openrind-gateway provider owns the endpoint; never let the
-    # built-in Anthropic provider inherit Claude's optional proxy override.
+    # Its explicit openrind-haloop provider owns the endpoint; never let it
+    # inherit a stale Claude base URL from a previous image contract.
     printf 'unset ANTHROPIC_BASE_URL\n'
   elif [ -f "$OPENRIND_SHELL_RUNTIME_DIR/anthropic-base-url" ]; then
     printf 'export ANTHROPIC_BASE_URL='; shell_quote "$(cat "$OPENRIND_SHELL_RUNTIME_DIR/anthropic-base-url")"; printf '\n'
