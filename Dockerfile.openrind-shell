@@ -15,7 +15,7 @@ RUN cargo build --locked --release -p openeral-fused \
 
 FROM ghcr.io/nvidia/openshell-community/sandboxes/base:latest
 
-LABEL com.openrind.desktop.fuse-contract="fuse-haloop-required-v24"
+LABEL com.openrind.desktop.fuse-contract="fuse-haloop-required-v26"
 
 USER root
 
@@ -74,7 +74,7 @@ RUN chmod 755 /usr/local/bin/openrind-shell-fused /usr/local/bin/claude /usr/loc
     && bash -n /opt/openrind-shell/setup.sh \
     && node --check /opt/openrind-shell/configure-haloop.mjs \
     && node --check /opt/openrind-shell/configure-openclaw-fuse.mjs \
-    && printf '%s' fuse-haloop-required-v24 > /opt/openrind-shell/desktop-contract \
+    && printf '%s' fuse-haloop-required-v26 > /opt/openrind-shell/desktop-contract \
     && ln -sf /usr/local/bin/openrind-shell-fused /usr/local/bin/openeral-fused \
     && ln -sf /opt/openrind-shell/setup.sh /usr/local/bin/openrind-shell \
     && ln -sf /opt/openrind-shell/setup.sh /usr/local/bin/openrind-shell-init \
@@ -84,7 +84,8 @@ RUN chmod 755 /usr/local/bin/openrind-shell-fused /usr/local/bin/claude /usr/loc
     && ln -sf /usr/local/bin/openrind-shell-start /usr/local/bin/openeral-start \
     && ln -sf /opt/openrind-shell/openrind-pty-bridge.py /usr/local/bin/openrind-pty-bridge.py \
     && install -d -o sandbox -g sandbox -m 0700 \
-        /var/lib/openrind-shell/runtime /sandbox/claude-home /sandbox/openclaw-home
+        /var/lib/openrind-shell/runtime /sandbox/claude-home /sandbox/openclaw-home \
+        /home/agent /home/agent/.openrind-shell
 
 COPY sandboxes/openeral/policy.yaml /etc/openshell/policy.yaml
 COPY --chown=root:root .claude/skills/ /opt/openrind-shell/skills/

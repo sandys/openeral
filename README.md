@@ -298,9 +298,12 @@ Desktop also issues a signed, opaque conversation assertion per agent process.
 The edge verifies it against the selected server-owned profile, derives the
 trace/root/session identity, and strips it before the core. Missing or invalid
 assertions fail closed, so a sandbox cannot supply raw trace metadata. The
-upstream Anthropic key remains in the protected host-side Haloop registry. Only
-gateway port `8787` is published; collector port `8788` is confined to the
-Desktop-managed Docker network. The FUSE sandbox is not given a direct
+upstream Anthropic key remains in the protected host-side Haloop registry. The
+gateway publishes `8787` only on the OpenShell sandbox bridge address mapped to
+`host.openshell.internal`; collector port `8788` is confined to the
+Desktop-managed Docker network. Packaged Desktop selects the matched,
+version-pinned Haloop gateway and collector images rather than the source-only
+`:local` tags. The FUSE sandbox is not given a direct
 Anthropic, legacy Openrind Gateway, or `stringcost` inference path.
 Desktop sandbox deletion withdraws the live edge before removing the matching
 provider and encrypted profile records. Surviving profiles are restored through

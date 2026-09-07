@@ -23,21 +23,27 @@ describe('proxy policy (PROXY-PLAN compliance)', () => {
     expect(policy).not.toMatch(/egress_profile:/);
   });
 
-  it('keeps the Anthropic endpoint inspectable instead of bypassing TLS', () => {
-    const anthropicSection = policy.slice(
-      policy.indexOf('api.anthropic.com'),
-      policy.indexOf('binaries:', policy.indexOf('api.anthropic.com')),
+  it('routes inference through the inspectable mandatory Haloop edge', () => {
+    const haloopSection = policy.slice(
+      policy.indexOf('haloop_anthropic:'),
+      policy.indexOf('\n  #', policy.indexOf('haloop_anthropic:') + 1),
     );
-    expect(anthropicSection).toContain('protocol: rest');
-    expect(anthropicSection).not.toContain('tls: skip');
+    expect(haloopSection).toContain('host: host.openshell.internal');
+    expect(haloopSection).toContain('port: 8787');
+    expect(haloopSection).toContain('protocol: rest');
+    expect(haloopSection).toContain('enforcement: enforce');
+    expect(haloopSection).not.toContain('tls: skip');
+    expect(policy).not.toContain('api.anthropic.com');
   });
 
-  it('Claude policy allows the wrapper and the real native Claude binary', () => {
-    const claudeStart = policy.indexOf('claude_code:');
-    const nextPolicy = policy.indexOf('\n  #', claudeStart + 1);
-    const claudeBlock = policy.slice(claudeStart, nextPolicy > 0 ? nextPolicy : undefined);
-    expect(claudeBlock).toContain('/usr/local/bin/claude');
-    expect(claudeBlock).toContain('/usr/local/bin/claude-real');
+  it('Haloop policy allows fixed native agents but not generic Node', () => {
+    const haloopStart = policy.indexOf('haloop_anthropic:');
+    const nextPolicy = policy.indexOf('\n  #', haloopStart + 1);
+    const haloopBlock = policy.slice(haloopStart, nextPolicy > 0 ? nextPolicy : undefined);
+    expect(haloopBlock).toContain('/usr/local/bin/claude');
+    expect(haloopBlock).toContain('/usr/local/bin/claude-real');
+    expect(haloopBlock).toContain('/usr/local/bin/openrind-openclaw-agent');
+    expect(haloopBlock).not.toContain('/usr/bin/node');
   });
 
   it('keeps the writable filesystem rooted at current OpenShell paths', () => {
@@ -47,25 +53,19 @@ describe('proxy policy (PROXY-PLAN compliance)', () => {
     expect(policy).not.toMatch(/- \/mnt(?:\/|\*|$)/m);
   });
 
-  it('restricts StringCost presigning and enables JSON credential rewrite', () => {
-    const start = policy.indexOf('stringcost_presign:');
-    const end = policy.indexOf('\n  #', start + 1);
-    const block = policy.slice(start, end > 0 ? end : undefined);
-    expect(block).toContain('host: app.stringcost.com');
-    expect(block).toContain('request_body_credential_rewrite: true');
-    expect(block).toContain('method: POST');
-    expect(block).toContain('path: /v1/presign');
-    expect(block).toContain('/usr/bin/node');
-    expect(block).not.toContain('access: full');
+  it('keeps retired presign policy and JSON credential rewrite removed', () => {
+    expect(policy).not.toContain('openrind_gateway_presign:');
+    expect(policy).not.toContain('stringcost_presign:');
+    expect(policy).not.toContain('host: app.openrind.com');
+    expect(policy).not.toContain('host: app.stringcost.com');
+    expect(policy).not.toContain('request_body_credential_rewrite: true');
+    expect(policy).not.toContain('path: /v1/presign');
   });
 
-  it('limits StringCost proxy traffic to native Claude', () => {
-    const start = policy.indexOf('stringcost_proxy:');
-    const end = policy.indexOf('\n  #', start + 1);
-    const block = policy.slice(start, end > 0 ? end : undefined);
-    expect(block).toContain('host: proxy.stringcost.com');
-    expect(block).toContain('/usr/local/bin/claude-real');
-    expect(block).not.toContain('/usr/bin/node');
+  it('keeps retired direct proxy hosts out of the primary policy', () => {
+    expect(policy).not.toContain('stringcost_proxy:');
+    expect(policy).not.toContain('host: proxy.openrind.com');
+    expect(policy).not.toContain('host: proxy.stringcost.com');
   });
 
   it('uses the constrained Supabase pooler wildcard', () => {

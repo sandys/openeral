@@ -22,6 +22,26 @@
 
 ## Implementation log
 
+### 2026-09-07 — PR security and packaging review
+
+- Added version-pinned packaged gateway and collector image references. Source
+  checkouts keep the two `:local` images, while packaged Desktop pulls the
+  fixed production pair only when absent and still rejects contract or version
+  mismatches before an agent can launch.
+- Extended the WSL image builder with explicit production build, verification,
+  matching-version, and publish modes, plus package scripts for release use.
+- Restricted gateway port `8787` to the IPv4 gateway of the OpenShell sandbox
+  bridge used by `host.openshell.internal`; collector `8788` remains private.
+- Restored OpenClaw's required `openrind-gateway` provider ID while retaining
+  `anthropic-messages`, the explicit model array, and the Haloop origin.
+- Persisted `ANTHROPIC_BASE_URL` as an export in
+  `/home/agent/.openrind-shell/env.sh` without replacing unrelated exports, and
+  made login shells source it before the agent-specific session environment.
+- Bumped the FUSE desktop image contract to `fuse-haloop-required-v26` so
+  existing sandboxes cannot reuse an image missing these configuration fixes.
+- Lifecycle capture now receives the validated `OPENRIND_SHELL_AGENT` value
+  instead of inferring the agent from Desktop profile names.
+
 ### 2026-09-04 — secure edge and provider foundation
 
 - Added an Openrind profile resolver to the Haloop edge. It authenticates a
@@ -74,7 +94,7 @@
   route; the edge suite passes 39 tests. The labeled Haloop runtime image and
   `openrind-shell-fuse:local` both build, and the Haloop provider schema passes
   its focused Linux test. Streaming agent calls and production image packaging
-  remain outstanding.
+  were outstanding at this checkpoint.
 - Inspected both built image labels and filesystem contracts. A temporary
   loopback-only Haloop container reached healthy state, returned `200` from
   `/healthz`, rejected an unauthenticated `/v1/messages` request with `401`,
@@ -90,7 +110,7 @@
   `haloop-gateway:local` image was present only in the host Docker daemon, not
   the dedicated OpenShell WSL Docker daemon. Source documentation and the
   runtime error now identify the required daemon explicitly. Publishing and
-  pinning the production Haloop image remains an open packaging task.
+  pinning the production Haloop images was completed in the 2026-09-07 review pass.
 - Added a source-checkout image builder that runs inside the dedicated
   OpenShell WSL Docker daemon and validates the FUSE contract plus Haloop
   contract/version labels after building. It supports focused and verify-only
@@ -374,6 +394,23 @@
   stopped-distro quarantine, and revocation-before-unregister. Electron syntax
   checks also pass.
 
+### 2026-09-07 — Claude host-provisioned onboarding
+
+- Diagnosed Claude Code `2.1.263` exiting before its first session with a 403.
+  The scoped credential and `ANTHROPIC_BASE_URL` were both present, but Claude's
+  first-run UI independently probed Anthropic account and OAuth endpoints that
+  the inference-only OpenShell policy correctly rejects.
+- The Haloop configurator now pins the route in Claude's persistent named-volume
+  home and records host-managed onboarding completion while preserving unrelated
+  Claude state. Project trust remains user-owned, no upstream credential is
+  persisted, and the sandbox still has no supported direct-provider route.
+- Bumped the FUSE image contract to `fuse-haloop-required-v25`, rebuilt the image
+  with the latest available Claude Code (`2.1.263`), and applied the same repair
+  to the existing test sandbox without deleting its workspace or session data.
+- Focused configurator and Desktop contract tests pass 23/23. A final interactive
+  reconnect and real Anthropic Messages request remain required for live routing
+  and trace acceptance.
+
 ## Summary
 
 Integrate `w8-haloop-main` as the required Anthropic-compatible inference gateway for Claude and OpenClaw sessions launched inside Openrind Shell's OpenShell FUSE sandbox.
@@ -491,7 +528,7 @@ These are the proposed defaults. Any change should be documented in this issue b
 | Local endpoint | Use `http://host.openshell.internal:8787` only for a local, authenticated development/Desktop path. |
 | Production endpoint | Use a stable HTTPS hostname with the same endpoint-bound OpenShell provider contract. |
 | OpenShell provider | Add a dedicated `haloop-anthropic` provider/profile instead of repurposing `claude`. |
-| OpenClaw provider ID | Use a distinct ID such as `openrind-haloop`; keep `api: "anthropic-messages"`. |
+| OpenClaw provider ID | Keep the product contract ID `openrind-gateway`; route it to Haloop with `api: "anthropic-messages"`. |
 | Credential | Store a revocable Haloop client token separately from the upstream Anthropic credential. |
 | Routing | Resolve a server-owned route profile from the authenticated client/workspace; reject arbitrary sandbox route graphs. |
 | Correlation | Generate a unique request ID at the trusted edge and bind project/trace/session identity to trusted Desktop state. |
@@ -550,7 +587,7 @@ These are the proposed defaults. Any change should be documented in this issue b
 - [x] Use one Desktop-managed Haloop gateway image/container for routing-only; do not run the full Compose stack in this phase.
 - [x] Add bounded startup, health checking, restart, and graceful shutdown behavior.
 - [x] Ensure port conflicts produce a clear error rather than silently selecting an untracked endpoint.
-- [ ] Restrict the edge bind appropriately for the selected runtime and require authentication even on the local path.
+- [x] Restrict the edge bind to the OpenShell sandbox bridge address and require authentication even on the local path.
 - [x] Do not start or publish collector `8788` in the routing-only Desktop runtime.
 - [x] Keep runtime state under the managed WSL user state directory rather than either Git worktree.
 - [x] Add Desktop-visible health details without printing tokens, route secrets, or provider keys.
@@ -576,7 +613,7 @@ These are the proposed defaults. Any change should be documented in this issue b
 
 ### 1E. OpenClaw configuration
 
-- [x] Register a distinct `openrind-haloop` OpenClaw provider.
+- [x] Register the required `openrind-gateway` OpenClaw provider and point it at Haloop.
 - [x] Keep `api: "anthropic-messages"` and an explicit provider-prefixed model allowlist.
 - [x] Set its base URL to the Haloop origin without a trailing `/v1`.
 - [x] Do not let the provider inherit Claude's unrelated `ANTHROPIC_BASE_URL`.
@@ -750,7 +787,7 @@ These are the proposed defaults. Any change should be documented in this issue b
 
 ### Lifecycle and packaging
 
-- [ ] Package a pinned Haloop version/image rather than running an arbitrary checkout.
+- [x] Select version-pinned Haloop gateway and collector images in packaged Desktop rather than running an arbitrary checkout.
 - [x] Record the contract-validated Haloop image version in diagnostics.
 - [x] Start and verify Haloop before creating or connecting any Claude/OpenClaw FUSE sandbox.
 - [x] Use bounded readiness and shutdown timeouts.
@@ -889,7 +926,7 @@ These are the proposed defaults. Any change should be documented in this issue b
 
 ## Open questions
 
-- [ ] How will the contract-labeled Haloop image be pinned and shipped in production installers?
+- [x] Packaged Desktop selects the fixed GHCR gateway/collector tags for `w8-haloop-openrind-v3-managed-collector`; release scripts build, verify, and publish both together.
 - [x] The initial routing-only deployment is a Desktop-managed local container.
 - [x] Rotation is an explicit confirmed action on the active route; it ends
   tracked in-app sessions and requires all affected agents to relaunch.

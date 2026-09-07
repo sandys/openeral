@@ -639,11 +639,19 @@ async function dumpOpenrindShellPtyBuffer(sessionId) {
  * @returns {Promise<Record<string, string> | undefined>}
  */
 async function buildOpenrindShellPtyEnv(cols, rows, profile) {
+  const agent =
+    profile === "openrind-shell-claude"
+      ? "claude"
+      : profile === "openrind-shell-openclaw"
+        ? "openclaw"
+        : null;
+  if (!agent) {
+    throw new Error("The primary FUSE runtime supports the Claude and OpenClaw profiles only.");
+  }
   /** @type {Record<string, string>} */
   const extraEnv = {};
-  if (profile) {
-    extraEnv.OPENRIND_DESKTOP_PROFILE = profile;
-  }
+  extraEnv.OPENRIND_DESKTOP_PROFILE = profile;
+  extraEnv.OPENRIND_SHELL_AGENT = agent;
   const effectiveCols = Number.isFinite(cols) && cols > 0 ? cols : 120;
   const effectiveRows = Number.isFinite(rows) && rows > 0 ? rows : 32;
   extraEnv.COLUMNS = String(effectiveCols);
@@ -743,6 +751,11 @@ function openOpenrindShellPtySession(opts) {
   if (profile !== "openrind-shell-claude" && profile !== "openrind-shell-openclaw") {
     throw new Error("The primary FUSE runtime supports the Claude and OpenClaw profiles only.");
   }
+  const expectedAgent = profile === "openrind-shell-claude" ? "claude" : "openclaw";
+  const agent = String(extraEnv?.OPENRIND_SHELL_AGENT ?? "").trim();
+  if (agent !== expectedAgent) {
+    throw new Error("A validated OPENRIND_SHELL_AGENT value is required for agent launch.");
+  }
   assertHaloopCredentialNotChanging(sandboxName);
   // Follow the README contract: Desktop writes one consume-on-read marker and
   // then opens `openshell sandbox connect`. The login hook installed by
@@ -794,7 +807,7 @@ function openOpenrindShellPtySession(opts) {
         haloopContextId,
         onLifecycleExit: (event) =>
           openrindShell.recordHaloopApplicationSpans(haloopCapture, [
-            openrindShell.buildHaloopAgentLifecycleEvent(profile, event),
+            openrindShell.buildHaloopAgentLifecycleEvent(agent, event),
           ]),
       });
     });

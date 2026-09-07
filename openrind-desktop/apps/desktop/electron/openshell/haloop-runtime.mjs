@@ -6,7 +6,10 @@
 // endpoint-bound provider; they never receive the upstream credential.
 
 import { createHash, createHmac, randomBytes } from "node:crypto";
+import { existsSync } from "node:fs";
+import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
+import { fileURLToPath } from "node:url";
 
 import {
   registerHaloopClientProfile,
@@ -16,10 +19,8 @@ import {
 } from "./openrind-shell-credentials.mjs";
 import { DISTRO_NAME, ensureDistroRunning, wslRun } from "./wsl.mjs";
 
-export const HALOOP_IMAGE = "haloop-gateway:local";
 export const HALOOP_IMAGE_CONTRACT = "openrind-haloop-v2";
 export const HALOOP_CONTAINER_NAME = "openrind-desktop-haloop";
-export const HALOOP_COLLECTOR_IMAGE = "haloop-collector:local";
 export const HALOOP_COLLECTOR_IMAGE_CONTRACT = "openrind-haloop-collector-v1";
 export const HALOOP_COLLECTOR_CONTAINER_NAME = "openrind-desktop-haloop-collector";
 export const HALOOP_NETWORK_NAME = "openrind-desktop-haloop";
@@ -27,12 +28,43 @@ export const HALOOP_EDGE_PORT = 8787;
 export const HALOOP_SANDBOX_ENDPOINT = `http://host.openshell.internal:${HALOOP_EDGE_PORT}`;
 export const HALOOP_ROUTE_POLICY = "incumbent-only";
 
+const MODULE_DIR = path.dirname(fileURLToPath(import.meta.url));
+const REPOSITORY_ROOT = path.resolve(MODULE_DIR, "../../../../../");
+const SOURCE_CHECKOUT = existsSync(path.join(REPOSITORY_ROOT, "Dockerfile.openrind-shell"));
+export const HALOOP_IMAGE_VERSION = "w8-haloop-openrind-v3-managed-collector";
+export const HALOOP_PACKAGED_IMAGE =
+  `ghcr.io/openrind/openrind-shell/haloop-gateway:${HALOOP_IMAGE_VERSION}`;
+export const HALOOP_PACKAGED_COLLECTOR_IMAGE =
+  `ghcr.io/openrind/openrind-shell/haloop-collector:${HALOOP_IMAGE_VERSION}`;
+
+export function resolveHaloopImageConfig({
+  sourceCheckout = SOURCE_CHECKOUT,
+  env = process.env,
+} = {}) {
+  const image = env.OPENRIND_DESKTOP_HALOOP_IMAGE?.trim() ||
+    (sourceCheckout ? "haloop-gateway:local" : HALOOP_PACKAGED_IMAGE);
+  const collectorImage = env.OPENRIND_DESKTOP_HALOOP_COLLECTOR_IMAGE?.trim() ||
+    (sourceCheckout ? "haloop-collector:local" : HALOOP_PACKAGED_COLLECTOR_IMAGE);
+  const pullPolicy = env.OPENRIND_DESKTOP_HALOOP_PULL_POLICY?.trim() ||
+    (image.endsWith(":local") && collectorImage.endsWith(":local") ? "never" : "missing");
+  if (!new Set(["never", "missing", "always"]).has(pullPolicy)) {
+    throw new Error("OPENRIND_DESKTOP_HALOOP_PULL_POLICY must be never, missing, or always.");
+  }
+  return { image, collectorImage, pullPolicy };
+}
+
+const HALOOP_IMAGE_CONFIG = resolveHaloopImageConfig();
+export const HALOOP_IMAGE = HALOOP_IMAGE_CONFIG.image;
+export const HALOOP_COLLECTOR_IMAGE = HALOOP_IMAGE_CONFIG.collectorImage;
+export const HALOOP_IMAGE_PULL_POLICY = HALOOP_IMAGE_CONFIG.pullPolicy;
+
 const HALOOP_STATE_DIR = "/var/lib/openrind-desktop/haloop";
 const HALOOP_COLLECTOR_DATA_DIR = `${HALOOP_STATE_DIR}/collector-data`;
 const HALOOP_COLLECTOR_CONTAINER_DATA_DIR = "/app/halo-loop/data";
 const HALOOP_COLLECTOR_URL = `http://${HALOOP_COLLECTOR_CONTAINER_NAME}:8788`;
 const HALOOP_PROFILES_FILE = `${HALOOP_STATE_DIR}/openrind-profiles.json`;
 const HALOOP_CONTAINER_PROFILES_FILE = "/run/openrind/openrind-profiles.json";
+const OPENSHELL_SANDBOX_NETWORK_NAME = "openshell-docker";
 const PROFILE_HASH_LABEL = "com.openrind.desktop.haloop-profile-sha256";
 const MANAGED_LABEL = "com.openrind.desktop.managed-haloop";
 const MANAGED_NETWORK_LABEL = "com.openrind.desktop.managed-haloop-network";
@@ -269,15 +301,10 @@ export function buildTrustedHaloopAppSpan(capture, event) {
   return payload;
 }
 
-export function buildHaloopAgentLifecycleEvent(profile, event) {
-  const agentId =
-    profile === "openrind-shell-openclaw"
-      ? "openclaw"
-      : profile === "openrind-shell-claude"
-        ? "claude"
-        : null;
-  if (!agentId) {
-    throw new Error("Haloop lifecycle capture supports Claude and OpenClaw only.");
+export function buildHaloopAgentLifecycleEvent(agent, event) {
+  const agentId = String(agent ?? "").trim();
+  if (agentId !== "claude" && agentId !== "openclaw") {
+    throw new Error("OPENRIND_SHELL_AGENT must be claude or openclaw for Haloop lifecycle capture.");
   }
   const cause = String(event?.terminationCause || "process-exit");
   const lifecycle =
@@ -381,10 +408,25 @@ async function inspectImage(run, image, contractLabel) {
 }
 
 async function requireImage(run, { image, contract, contractLabel, service }) {
-  const result = await inspectImage(run, image, contractLabel);
+  let result = await inspectImage(run, image, contractLabel);
+  if (
+    HALOOP_IMAGE_PULL_POLICY === "always" ||
+    (result.exitCode !== 0 && HALOOP_IMAGE_PULL_POLICY === "missing")
+  ) {
+    const pulled = await run(
+      dockerArgs("image", "pull", image),
+      { timeout: 5 * 60_000 },
+    );
+    if (pulled.exitCode !== 0) {
+      throw new Error(
+        `Could not pull the pinned Haloop ${service} image ${image}: ${(pulled.stderr || pulled.stdout).trim() || `exit ${pulled.exitCode}`}`,
+      );
+    }
+    result = await inspectImage(run, image, contractLabel);
+  }
   if (result.exitCode !== 0) {
     throw new Error(
-      `The required Haloop ${service} image ${image} is not present in the dedicated OpenShell WSL Docker daemon. Build or import the pinned w8-haloop-main images into that daemon, then retry.`,
+      `The required Haloop ${service} image ${image} is not present in the dedicated OpenShell WSL Docker daemon. Build the source-checkout images or make the pinned production image available, then retry.`,
     );
   }
   const [actualContract, version, imageId] = result.stdout.trim().split("|");
@@ -417,6 +459,15 @@ async function requireHaloopImages(run) {
   if (gateway.version !== collector.version) {
     throw new Error(
       `The Haloop gateway and collector image versions do not match (${gateway.version} versus ${collector.version}). Rebuild both pinned images together, then retry.`,
+    );
+  }
+  if (
+    HALOOP_IMAGE === HALOOP_PACKAGED_IMAGE &&
+    HALOOP_COLLECTOR_IMAGE === HALOOP_PACKAGED_COLLECTOR_IMAGE &&
+    gateway.version !== HALOOP_IMAGE_VERSION
+  ) {
+    throw new Error(
+      `The packaged Haloop images report ${gateway.version}; expected the pinned version ${HALOOP_IMAGE_VERSION}.`,
     );
   }
   return { gateway, collector };
@@ -516,6 +567,44 @@ async function ensureManagedNetwork(run) {
   }
 }
 
+async function resolveOpenShellBridgeAddress(run) {
+  const result = await run(
+    dockerArgs(
+      "network",
+      "inspect",
+      OPENSHELL_SANDBOX_NETWORK_NAME,
+      "--format",
+      "{{json .IPAM.Config}}",
+    ),
+    { timeout: 15_000 },
+  );
+  if (result.exitCode !== 0) {
+    throw new Error(
+      `Could not inspect the OpenShell sandbox network used by host.openshell.internal: ${(result.stderr || result.stdout).trim() || `exit ${result.exitCode}`}`,
+    );
+  }
+  let configs;
+  try {
+    configs = JSON.parse(result.stdout.trim());
+  } catch {
+    configs = null;
+  }
+  const address = Array.isArray(configs)
+    ? configs
+        .map((config) => String(config?.Gateway ?? "").trim())
+        .find((gateway) => {
+          const octets = gateway.split(".");
+          return octets.length === 4 && octets.every((octet) => /^\d{1,3}$/.test(octet) && Number(octet) <= 255);
+        })
+    : "";
+  if (!address) {
+    throw new Error(
+      `The OpenShell sandbox network ${OPENSHELL_SANDBOX_NETWORK_NAME} does not expose the IPv4 bridge address required by host.openshell.internal.`,
+    );
+  }
+  return address;
+}
+
 async function removeManagedNetwork(run) {
   const result = await run(
     dockerArgs("network", "rm", HALOOP_NETWORK_NAME),
@@ -536,7 +625,7 @@ async function createCollectorContainer(run) {
       "--name",
       HALOOP_COLLECTOR_CONTAINER_NAME,
       "--pull",
-      "never",
+      HALOOP_IMAGE_PULL_POLICY,
       "--restart",
       "unless-stopped",
       "--init",
@@ -568,6 +657,7 @@ async function createCollectorContainer(run) {
 }
 
 async function createGatewayContainer(run, profileHash) {
+  const publishAddress = await resolveOpenShellBridgeAddress(run);
   const result = await run(
     dockerArgs(
       "run",
@@ -575,7 +665,7 @@ async function createGatewayContainer(run, profileHash) {
       "--name",
       HALOOP_CONTAINER_NAME,
       "--pull",
-      "never",
+      HALOOP_IMAGE_PULL_POLICY,
       "--restart",
       "unless-stopped",
       "--init",
@@ -590,7 +680,7 @@ async function createGatewayContainer(run, profileHash) {
       "--label",
       `${PROFILE_HASH_LABEL}=${profileHash}`,
       "--publish",
-      `${HALOOP_EDGE_PORT}:${HALOOP_EDGE_PORT}`,
+      `${publishAddress}:${HALOOP_EDGE_PORT}:${HALOOP_EDGE_PORT}`,
       "--mount",
       `type=bind,source=${HALOOP_PROFILES_FILE},target=${HALOOP_CONTAINER_PROFILES_FILE},readonly`,
       "--env",
@@ -1477,7 +1567,9 @@ export const __testing = {
   HALOOP_COLLECTOR_URL,
   HALOOP_PROFILES_FILE,
   MANAGED_NETWORK_LABEL,
+  OPENSHELL_SANDBOX_NETWORK_NAME,
   PROFILE_HASH_LABEL,
   STARTUP_TIMEOUT_MS,
   inspectContainer,
+  resolveOpenShellBridgeAddress,
 };

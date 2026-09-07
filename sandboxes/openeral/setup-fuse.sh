@@ -300,16 +300,18 @@ EOF
 }
 
 if [ "$OPENRIND_SHELL_AGENT" = claude ]; then
-  # Claude creates settings and trust state from the user's interactive choices.
+  # Desktop owns the mandatory API route. Seed Claude's persistent home as
+  # host-provisioned so its first-run account/OAuth connectivity probes cannot
+  # bypass the inference-only Haloop policy; project trust remains user-owned.
   echo "setup-fuse.sh: persistent Claude home ready"
   if [ -d /opt/openrind-shell/skills ]; then
     for target_skills_dir in "$OPENRIND_SHELL_CLAUDE_HOME/.claude/skills" "$OPENRIND_SHELL_HOME/.claude/skills"; do
       sync_bundled_skills /opt/openrind-shell/skills "$target_skills_dir"
     done
   fi
-  HOME="$OPENRIND_SHELL_HOME" node /opt/openrind-shell/configure-haloop.mjs
+  HOME="$OPENRIND_SHELL_CLAUDE_HOME" node /opt/openrind-shell/configure-haloop.mjs
   # Warm the immutable executable and its dynamic loader while provisioning is
-  # still showing progress. This does not create trust or onboarding state.
+  # still showing progress. This does not create project trust state.
   HOME="$OPENRIND_SHELL_CLAUDE_HOME" /usr/local/bin/claude-real --version >/dev/null 2>&1 || true
 else
   echo "setup-fuse.sh: persistent OpenClaw home ready"
@@ -363,6 +365,7 @@ if ! grep -q 'Openrind Shell FUSE session environment' "$SHELL_BASHRC" 2>/dev/nu
   cat >> "$SHELL_BASHRC" <<'BASHRC'
 
 # Openrind Shell FUSE session environment.
+[ -f /home/agent/.openrind-shell/env.sh ] && . /home/agent/.openrind-shell/env.sh
 [ -f /var/lib/openrind-shell/runtime/session.env ] && . /var/lib/openrind-shell/runtime/session.env
 case "$-" in
   *i*)
@@ -462,7 +465,7 @@ SESSION_ENV="$OPENRIND_SHELL_RUNTIME_DIR/session.env"
     # replay its observed banner only within the shared clear-rewrite budget.
     printf 'export OPENRIND_SHELL_PTY_KEEP_SCROLLBACK=0\n'
     printf 'export OPENRIND_SHELL_PTY_SHOW_OPENCLAW_BANNER=1\n'
-    # Its explicit openrind-haloop provider owns the endpoint; never let it
+    # Its explicit openrind-gateway provider owns the endpoint; never let it
     # inherit a stale Claude base URL from a previous image contract.
     printf 'unset ANTHROPIC_BASE_URL\n'
   elif [ -f "$OPENRIND_SHELL_RUNTIME_DIR/anthropic-base-url" ]; then

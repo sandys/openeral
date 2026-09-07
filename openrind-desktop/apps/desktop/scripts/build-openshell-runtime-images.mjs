@@ -11,13 +11,18 @@ import { fileURLToPath } from "node:url";
 
 const DISTRO_NAME = "openrind-desktop-openshell";
 const FUSE_IMAGE = "openrind-shell-fuse:local";
-const FUSE_CONTRACT = "fuse-haloop-required-v24";
+const FUSE_CONTRACT = "fuse-haloop-required-v26";
 const OPENSHELL_BASE_IMAGE = "ghcr.io/nvidia/openshell-community/sandboxes/base:latest";
 const CLAUDE_CODE_PACKAGE = "@anthropic-ai/claude-code";
-const HALOOP_IMAGE = "haloop-gateway:local";
+const HALOOP_LOCAL_IMAGE = "haloop-gateway:local";
 const HALOOP_CONTRACT = "openrind-haloop-v2";
-const HALOOP_COLLECTOR_IMAGE = "haloop-collector:local";
+const HALOOP_LOCAL_COLLECTOR_IMAGE = "haloop-collector:local";
 const HALOOP_COLLECTOR_CONTRACT = "openrind-haloop-collector-v1";
+const HALOOP_VERSION = "w8-haloop-openrind-v3-managed-collector";
+const HALOOP_PRODUCTION_IMAGE =
+  `ghcr.io/openrind/openrind-shell/haloop-gateway:${HALOOP_VERSION}`;
+const HALOOP_PRODUCTION_COLLECTOR_IMAGE =
+  `ghcr.io/openrind/openrind-shell/haloop-collector:${HALOOP_VERSION}`;
 
 const scriptDirectory = path.dirname(fileURLToPath(import.meta.url));
 const desktopRoot = path.resolve(scriptDirectory, "..");
@@ -93,6 +98,7 @@ async function verifyImage(image, labelName, expectedContract, includeVersion = 
   console.log(
     `[runtime-images] verified ${image} ${imageId}${version ? ` (${version})` : ""}`,
   );
+  return { imageId, version };
 }
 
 async function resolveLatestClaudeCodeVersion() {
@@ -120,8 +126,8 @@ async function resolveLatestClaudeCodeVersion() {
 
 const flags = new Set(process.argv.slice(2));
 for (const flag of flags) {
-  if (!["--fuse-only", "--haloop-only", "--verify-only"].includes(flag)) {
-    fail(`Unknown option ${flag}. Use --fuse-only, --haloop-only, or --verify-only.`);
+  if (!["--fuse-only", "--haloop-only", "--verify-only", "--production-haloop", "--push"].includes(flag)) {
+    fail(`Unknown option ${flag}. Use --fuse-only, --haloop-only, --verify-only, --production-haloop, or --push.`);
   }
 }
 if (flags.has("--fuse-only") && flags.has("--haloop-only")) {
@@ -131,6 +137,15 @@ if (flags.has("--fuse-only") && flags.has("--haloop-only")) {
 const includeFuse = !flags.has("--haloop-only");
 const includeHaloop = !flags.has("--fuse-only");
 const verifyOnly = flags.has("--verify-only");
+const productionHaloop = flags.has("--production-haloop");
+const push = flags.has("--push");
+if (push && (!productionHaloop || verifyOnly || !includeHaloop)) {
+  fail("--push requires a Haloop build with --production-haloop and cannot be combined with --verify-only or --fuse-only.");
+}
+const haloopImage = productionHaloop ? HALOOP_PRODUCTION_IMAGE : HALOOP_LOCAL_IMAGE;
+const haloopCollectorImage = productionHaloop
+  ? HALOOP_PRODUCTION_COLLECTOR_IMAGE
+  : HALOOP_LOCAL_COLLECTOR_IMAGE;
 
 await requireSuccess(
   ["docker", "info", "--format", "{{.ServerVersion}}"],
@@ -168,7 +183,7 @@ if (!verifyOnly && includeHaloop) {
       `Haloop Dockerfile not found at ${dockerfile}. Set OPENRIND_DESKTOP_HALOOP_SOURCE to the w8-haloop-main checkout.`,
     );
   }
-  console.log(`[runtime-images] building ${HALOOP_IMAGE} in ${DISTRO_NAME}...`);
+  console.log(`[runtime-images] building ${haloopImage} in ${DISTRO_NAME}...`);
   await requireSuccess(
     [
       "docker",
@@ -177,17 +192,17 @@ if (!verifyOnly && includeHaloop) {
       "-f",
       toWslPath(dockerfile),
       "-t",
-      HALOOP_IMAGE,
+      haloopImage,
       toWslPath(haloopRoot),
     ],
-    `Building ${HALOOP_IMAGE}`,
+    `Building ${haloopImage}`,
   );
 
   const collectorDockerfile = path.join(haloopRoot, "halo-loop", "Dockerfile");
   if (!existsSync(collectorDockerfile)) {
     fail(`Haloop collector Dockerfile not found at ${collectorDockerfile}.`);
   }
-  console.log(`[runtime-images] building ${HALOOP_COLLECTOR_IMAGE} in ${DISTRO_NAME}...`);
+  console.log(`[runtime-images] building ${haloopCollectorImage} in ${DISTRO_NAME}...`);
   await requireSuccess(
     [
       "docker",
@@ -198,10 +213,21 @@ if (!verifyOnly && includeHaloop) {
       "-f",
       toWslPath(collectorDockerfile),
       "-t",
-      HALOOP_COLLECTOR_IMAGE,
+      haloopCollectorImage,
       toWslPath(haloopRoot),
     ],
-    `Building ${HALOOP_COLLECTOR_IMAGE}`,
+    `Building ${haloopCollectorImage}`,
+  );
+}
+
+if (verifyOnly && includeHaloop && productionHaloop) {
+  await requireSuccess(
+    ["docker", "image", "pull", haloopImage],
+    `Pulling ${haloopImage}`,
+  );
+  await requireSuccess(
+    ["docker", "image", "pull", haloopCollectorImage],
+    `Pulling ${haloopCollectorImage}`,
   );
 }
 
@@ -213,18 +239,43 @@ if (includeFuse) {
   );
 }
 if (includeHaloop) {
-  await verifyImage(
-    HALOOP_IMAGE,
+  const gateway = await verifyImage(
+    haloopImage,
     "com.openrind.desktop.haloop-contract",
     HALOOP_CONTRACT,
     true,
   );
-  await verifyImage(
-    HALOOP_COLLECTOR_IMAGE,
+  const collector = await verifyImage(
+    haloopCollectorImage,
     "com.openrind.desktop.haloop-collector-contract",
     HALOOP_COLLECTOR_CONTRACT,
     true,
   );
+  if (gateway.version !== collector.version) {
+    fail(
+      `Haloop gateway and collector versions do not match (${gateway.version} versus ${collector.version}).`,
+    );
+  }
+  if (productionHaloop && gateway.version !== HALOOP_VERSION) {
+    fail(
+      `Pinned production tags require Haloop version ${HALOOP_VERSION}; found ${gateway.version}.`,
+    );
+  }
 }
 
-console.log("[runtime-images] required source-checkout images are ready in the OpenShell WSL daemon.");
+if (push) {
+  await requireSuccess(
+    ["docker", "image", "push", haloopImage],
+    `Publishing ${haloopImage}`,
+  );
+  await requireSuccess(
+    ["docker", "image", "push", haloopCollectorImage],
+    `Publishing ${haloopCollectorImage}`,
+  );
+}
+
+console.log(
+  productionHaloop
+    ? `[runtime-images] pinned Haloop ${HALOOP_VERSION} production images are verified${push ? " and published" : ""}.`
+    : "[runtime-images] required source-checkout images are ready in the OpenShell WSL daemon.",
+);

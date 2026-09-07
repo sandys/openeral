@@ -27,8 +27,8 @@ export NODE_NO_WARNINGS="${NODE_NO_WARNINGS:-1}"
 # telemetry, feedback, and crash-report traffic that is unrelated to an
 # interactive agent session; in particular this avoids first-launch cache work
 # on the PostgreSQL-backed HOME. This is an Anthropic-supported environment
-# control and does not create settings, accept trust, or skip onboarding. Claude
-# writes that state to its local named-volume HOME, not the PostgreSQL FUSE mount.
+# control. Host provisioning records onboarding completion in the local named-
+# volume HOME; project trust remains user-owned and is never accepted here.
 export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC="${CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC:-1}"
 export DISABLE_AUTOUPDATER="${DISABLE_AUTOUPDATER:-1}"
 

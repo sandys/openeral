@@ -10,6 +10,9 @@ import {
   HALOOP_IMAGE,
   HALOOP_IMAGE_CONTRACT,
   HALOOP_NETWORK_NAME,
+  HALOOP_PACKAGED_COLLECTOR_IMAGE,
+  HALOOP_PACKAGED_IMAGE,
+  HALOOP_IMAGE_VERSION,
   __testing,
   buildHaloopAgentLifecycleEvent,
   buildHaloopCaptureIdentity,
@@ -17,9 +20,12 @@ import {
   buildTrustedHaloopAppSpan,
   createHaloopRuntimeManager,
   issueHaloopConversationContext,
+  resolveHaloopImageConfig,
 } from "../../electron/openshell/haloop-runtime.mjs";
 
 const CONTEXT_ID = "12".repeat(16);
+const OPENSHELL_BRIDGE_IP = "172.30.0.1";
+const OPENSHELL_BRIDGE_IPAM = `${JSON.stringify([{ Gateway: OPENSHELL_BRIDGE_IP }])}\n`;
 
 const scopedProfile = {
   scopeId: "a".repeat(64),
@@ -88,6 +94,22 @@ test("profile document hashes the client token and keeps routing server-owned", 
   assert.doesNotMatch(JSON.stringify(document), /orh_v1_scoped-token/);
 });
 
+test("packaged Haloop images are version-pinned as a matched pair", () => {
+  assert.match(HALOOP_PACKAGED_IMAGE, new RegExp(`:${HALOOP_IMAGE_VERSION}$`));
+  assert.match(HALOOP_PACKAGED_COLLECTOR_IMAGE, new RegExp(`:${HALOOP_IMAGE_VERSION}$`));
+  assert.notEqual(HALOOP_PACKAGED_IMAGE, HALOOP_PACKAGED_COLLECTOR_IMAGE);
+  assert.deepEqual(resolveHaloopImageConfig({ sourceCheckout: false, env: {} }), {
+    image: HALOOP_PACKAGED_IMAGE,
+    collectorImage: HALOOP_PACKAGED_COLLECTOR_IMAGE,
+    pullPolicy: "missing",
+  });
+  assert.deepEqual(resolveHaloopImageConfig({ sourceCheckout: true, env: {} }), {
+    image: "haloop-gateway:local",
+    collectorImage: "haloop-collector:local",
+    pullPolicy: "never",
+  });
+});
+
 test("signed conversation contexts isolate sessions and preserve resumed trace identity", () => {
   const first = issueHaloopConversationContext(scopedProfile, {
     agentSessionId: "desktop-session-a",
@@ -149,6 +171,9 @@ test("managed lifecycle stages profiles through stdin and requires authenticated
       return { exitCode: 0, stdout: "", stderr: "" };
     }
     if (command.includes("docker network inspect")) {
+      if (args.includes(__testing.OPENSHELL_SANDBOX_NETWORK_NAME)) {
+        return { exitCode: 0, stdout: OPENSHELL_BRIDGE_IPAM, stderr: "" };
+      }
       return network
         ? { exitCode: 0, stdout: "true\n", stderr: "" }
         : { exitCode: 1, stdout: "", stderr: "not found" };
@@ -283,7 +308,8 @@ test("managed lifecycle stages profiles through stdin and requires authenticated
   assert.ok(calls.some(({ args }) => args.includes(HALOOP_COLLECTOR_IMAGE)));
   const commandText = calls.map(({ args }) => args.join(" ")).join("\n");
   assert.doesNotMatch(commandText, /sk-ant-upstream|orh_v1_scoped-token/);
-  assert.match(commandText, /8787:8787/);
+  assert.match(commandText, new RegExp(`${OPENSHELL_BRIDGE_IP}:8787:8787`));
+  assert.doesNotMatch(commandText, /--publish 8787:8787/);
   assert.doesNotMatch(commandText, /8788:8788/);
   assert.match(commandText, new RegExp(`--network ${HALOOP_NETWORK_NAME}`));
   assert.match(commandText, /W8_KEEP_RAW=0/);
@@ -598,32 +624,32 @@ test("agent lifecycle distinguishes completion, crash, cancellation, deletion, a
     signal: null,
     closeRequestedAt: null,
   };
-  const completed = buildHaloopAgentLifecycleEvent("openrind-shell-claude", {
+  const completed = buildHaloopAgentLifecycleEvent("claude", {
     ...base,
     exitCode: 0,
     terminationCause: "completed",
   });
-  const crashed = buildHaloopAgentLifecycleEvent("openrind-shell-openclaw", {
+  const crashed = buildHaloopAgentLifecycleEvent("openclaw", {
     ...base,
     exitCode: 9,
     signal: "SIGKILL",
     terminationCause: "process-exit",
   });
-  const cancelled = buildHaloopAgentLifecycleEvent("openrind-shell-claude", {
+  const cancelled = buildHaloopAgentLifecycleEvent("claude", {
     ...base,
     exitCode: null,
     signal: "SIGTERM",
     terminationCause: "desktop-close",
     closeRequestedAt: 1_900,
   });
-  const sandboxDeleted = buildHaloopAgentLifecycleEvent("openrind-shell-claude", {
+  const sandboxDeleted = buildHaloopAgentLifecycleEvent("claude", {
     ...base,
     exitCode: null,
     signal: "SIGTERM",
     terminationCause: "sandbox-delete",
     closeRequestedAt: 1_900,
   });
-  const shutdown = buildHaloopAgentLifecycleEvent("openrind-shell-openclaw", {
+  const shutdown = buildHaloopAgentLifecycleEvent("openclaw", {
     ...base,
     exitCode: null,
     signal: "SIGTERM",
@@ -644,6 +670,10 @@ test("agent lifecycle distinguishes completion, crash, cancellation, deletion, a
   assert.equal(sandboxDeleted.attributes["openrind.lifecycle"], "sandbox-deleted");
   assert.equal(shutdown.ok, false);
   assert.equal(shutdown.attributes["openrind.lifecycle"], "app-shutdown");
+  assert.throws(
+    () => buildHaloopAgentLifecycleEvent("openrind-shell-claude", { ...base, exitCode: 0 }),
+    /OPENRIND_SHELL_AGENT must be claude or openclaw/,
+  );
 });
 
 test("post-route Desktop capture is fail-open and reports dropped spans", async () => {
@@ -746,6 +776,9 @@ test("managed lifecycle does not stop or replace a foreign reserved-name contain
       };
     }
     if (command.includes("docker network inspect")) {
+      if (args.includes(__testing.OPENSHELL_SANDBOX_NETWORK_NAME)) {
+        return { exitCode: 0, stdout: OPENSHELL_BRIDGE_IPAM, stderr: "" };
+      }
       return { exitCode: 1, stdout: "", stderr: "not found" };
     }
     if (command.includes("docker container inspect")) {
@@ -820,6 +853,9 @@ test("managed lifecycle reports a fixed-port conflict without choosing another e
       };
     }
     if (command.includes("docker network inspect")) {
+      if (args.includes(__testing.OPENSHELL_SANDBOX_NETWORK_NAME)) {
+        return { exitCode: 0, stdout: OPENSHELL_BRIDGE_IPAM, stderr: "" };
+      }
       return { exitCode: 1, stdout: "", stderr: "not found" };
     }
     if (command.includes("docker container inspect")) {
@@ -894,6 +930,9 @@ test("managed lifecycle blocks launch when the gateway cannot reach the collecto
       return { exitCode: 0, stdout: "", stderr: "" };
     }
     if (command.includes("docker network inspect")) {
+      if (args.includes(__testing.OPENSHELL_SANDBOX_NETWORK_NAME)) {
+        return { exitCode: 0, stdout: OPENSHELL_BRIDGE_IPAM, stderr: "" };
+      }
       return { exitCode: 0, stdout: "true\n", stderr: "" };
     }
     if (command.includes("docker container inspect")) {

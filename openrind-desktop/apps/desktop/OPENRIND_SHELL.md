@@ -24,14 +24,20 @@ CLI, gateway, and supervisor from `/opt/openrind-desktop/fuse-runtime` on
 
 Source checkouts use `openrind-shell-fuse:local`, `haloop-gateway:local`, and
 `haloop-collector:local` with pull policy `Never`; all three must exist in the
-dedicated OpenShell WSL Docker daemon, not only in the host Docker Desktop daemon. Packaged builds use
-`ghcr.io/openrind/openrind-shell/sandbox:fuse` with pull policy `IfNotPresent`.
+dedicated OpenShell WSL Docker daemon, not only in the host Docker Desktop daemon.
+Packaged builds use `ghcr.io/openrind/openrind-shell/sandbox:fuse` plus the
+version-pinned
+`ghcr.io/openrind/openrind-shell/haloop-gateway:w8-haloop-openrind-v3-managed-collector`
+and
+`ghcr.io/openrind/openrind-shell/haloop-collector:w8-haloop-openrind-v3-managed-collector`
+images. They are pulled into the dedicated daemon only when absent; mutable
+`latest` tags are never selected.
 The FUSE image must expose the desktop contract recorded in
 `/opt/openrind-shell/desktop-contract`; the Haloop images must expose the
 `openrind-haloop-v2` gateway and `openrind-haloop-collector-v1` collector
 labels with matching version labels. Incompatible containers are recreated without
-deleting their PostgreSQL-backed workspaces. A pinned published Haloop image is
-still required before release packaging is complete.
+deleting their PostgreSQL-backed workspaces. A mismatched or unavailable image
+fails closed before sandbox launch.
 
 From the `openeral` source root, build and validate all three development images in
 the correct daemon with:
@@ -44,6 +50,18 @@ Use `--haloop-only`, `--fuse-only`, or `--verify-only` for a focused run. The
 script validates all three contract labels and the matching Haloop diagnostic versions after
 the build. If the Haloop checkout is not the default sibling directory, set
 `OPENRIND_DESKTOP_HALOOP_SOURCE` to its absolute path.
+
+Release owners build, verify, and publish the fixed production pair from the
+pinned Haloop checkout with:
+
+```powershell
+node openrind-desktop/apps/desktop/scripts/build-openshell-runtime-images.mjs --haloop-only --production-haloop --push
+```
+
+The production tags are accepted only when both images report
+`w8-haloop-openrind-v3-managed-collector`. A pull-only release verification is
+available through the desktop package's
+`verify:openshell-haloop-images:production` script.
 
 The first sandbox creation follows the root README command shape exactly:
 
@@ -78,6 +96,10 @@ second initializer or a parallel upload/poll loop.
   `halo.export` hooks. Desktop starts the collector as an unprivileged private
   service with no published port, disables raw hook retention, and persists
   JSONL traces under `/var/lib/openrind-desktop/haloop/collector-data`.
+- Gateway port `8787` is published only on the IPv4 gateway address of the
+  OpenShell `openshell-docker` bridge—the address mapped to
+  `host.openshell.internal` inside sandboxes. It is not published on every WSL
+  host interface.
 - Every Desktop agent launch receives a profile-bound signed conversation
   assertion. The edge validates and removes it, then derives the canonical
   trace, route-root parent, and session IDs from its opaque context. Raw Desktop
@@ -100,6 +122,12 @@ second initializer or a parallel upload/poll loop.
 - The native Claude executable is `/usr/local/bin/claude-real`; the
   `/usr/local/bin/claude` wrapper enforces initialized, writable FUSE storage
   and performs the final `flush-all`.
+- The Haloop configurator updates only the `ANTHROPIC_BASE_URL` assignment in
+  `/home/agent/.openrind-shell/env.sh`, preserving unrelated shell exports. The
+  sandbox login hook sources this file before its agent-specific session file.
+- OpenClaw keeps the required `openrind-gateway` provider ID, an explicit model
+  array, and the `anthropic-messages` API shape while its base URL points at the
+  local Haloop edge.
 
 ## Interactive terminal
 
@@ -173,6 +201,9 @@ traffic that is already in flight.
   the FUSE sandbox and its workspace are not recreated. Resolve any reported
   private-network, fixed-port, image, or authentication error before retrying;
   Desktop does not bypass Haloop.
+- **Packaged Haloop image unavailable:** confirm GHCR access to both pinned
+  `haloop-gateway` and `haloop-collector` packages. Desktop does not substitute
+  a local, `latest`, or direct-provider image.
 - **Candidate routing must be rolled back:** use **Restore incumbent** and
   confirm the bounded gateway replacement. Existing agents stay connected and
   keep their conversation identity, but a model request already in flight may
@@ -200,7 +231,7 @@ traffic that is already in flight.
   during the failed attempt. Resolve the reported WSL termination or encrypted
   credential-storage error and use **Reset distro** again; do not unregister the
   distro manually while scoped credentials remain stored.
-- **Published image unavailable:** confirm GHCR access to the `:fuse` package.
+- **Published FUSE image unavailable:** confirm GHCR access to the `:fuse` package.
 - **Database initialization fails:** use a TLS PostgreSQL URL and Supabase
   session pooling on port 5432, not transaction pooling on 6543.
 - **Terminal is blank:** inspect the private bridge diagnostic and confirm the

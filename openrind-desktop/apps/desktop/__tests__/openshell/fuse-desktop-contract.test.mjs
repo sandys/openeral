@@ -16,9 +16,9 @@ test("desktop image and runtime share the current PTY bridge contract", async ()
     source("Dockerfile.openrind-shell"),
     source("openrind-desktop/apps/desktop/electron/openshell/fuse-sandbox.mjs"),
   ]);
-  assert.match(dockerfile, /fuse-haloop-required-v24/);
+  assert.match(dockerfile, /fuse-haloop-required-v26/);
   assert.match(dockerfile, /openrind-pty-bridge\.py/);
-  assert.match(sandbox, /IMAGE_CONTRACT = "fuse-haloop-required-v24"/);
+  assert.match(sandbox, /IMAGE_CONTRACT = "fuse-haloop-required-v26"/);
 });
 
 test("developer image builder targets the dedicated WSL daemon and validates all runtime contracts", async () => {
@@ -30,7 +30,12 @@ test("developer image builder targets the dedicated WSL daemon and validates all
   assert.match(builder, /openrind-shell-fuse:local/);
   assert.match(builder, /haloop-gateway:local/);
   assert.match(builder, /haloop-collector:local/);
-  assert.match(builder, /fuse-haloop-required-v24/);
+  assert.match(builder, /ghcr\.io\/openrind\/openrind-shell\/haloop-gateway/);
+  assert.match(builder, /ghcr\.io\/openrind\/openrind-shell\/haloop-collector/);
+  assert.match(builder, /w8-haloop-openrind-v3-managed-collector/);
+  assert.match(builder, /--production-haloop/);
+  assert.match(builder, /"docker",\s*"image",\s*"push"/);
+  assert.match(builder, /fuse-haloop-required-v26/);
   assert.match(builder, /openrind-haloop-v2/);
   assert.match(builder, /openrind-haloop-collector-v1/);
   assert.match(builder, /openrind-desktop-collector/);
@@ -41,6 +46,8 @@ test("developer image builder targets the dedicated WSL daemon and validates all
     desktopPackage,
     /"build:openshell-runtime-images": "node \.\/scripts\/build-openshell-runtime-images\.mjs"/,
   );
+  assert.match(desktopPackage, /"verify:openshell-haloop-images:production"/);
+  assert.match(desktopPackage, /"publish:openshell-haloop-images:production"/);
 });
 
 test("Windows Electron launchers keep nested processes on the workspace pnpm version", async () => {
@@ -418,13 +425,15 @@ test("OpenClaw uses the same FUSE workspace with a separate persistent agent hom
   );
   assert.match(setup, /shared clear-rewrite budget/);
   assert.match(config, /config\.agents\.defaults\.models\[primaryModel\]/);
-  assert.match(config, /const PROVIDER_ID = "openrind-haloop"/);
+  assert.match(config, /const PROVIDER_ID = "openrind-gateway"/);
   assert.match(config, /http:\/\/host\.openshell\.internal:8787/);
   assert.match(config, /const DEFAULT_MODEL_ID = "claude-sonnet-4-6"/);
   assert.doesNotMatch(config, /OPENRIND_SHELL_USE_OPENROUTER_TEST|openrouter\/openrouter\/free/);
   assert.match(config, /delete config\.env\.OPENROUTER_API_KEY/);
   assert.match(config, /delete config\.models\.providers\.openrouter/);
+  assert.match(config, /delete config\.models\.providers\["openrind-haloop"\]/);
   assert.match(config, /api: "anthropic-messages"/);
+  assert.match(config, /models: \[\{ id: modelId/);
   assert.match(
     config,
     /"x-openrind-haloop-session": "\$\{OPENRIND_HALOOP_SESSION_CONTEXT\}"/,
@@ -457,6 +466,12 @@ test("agent launches require a host-signed conversation context", async () => {
   assert.match(runtime, /openrind-haloop-trace-v2/);
   assert.match(main, /issueConversation: true/);
   assert.match(main, /haloopSessionAssertion: haloop\.sessionAssertion/);
+  assert.match(main, /extraEnv\.OPENRIND_SHELL_AGENT = agent/);
+  assert.match(main, /buildHaloopAgentLifecycleEvent\(agent, event\)/);
+  assert.doesNotMatch(
+    runtime,
+    /buildHaloopAgentLifecycleEvent\(profile[\s\S]*?profile === "openrind-shell-/,
+  );
   assert.match(facade, /A signed Haloop conversation context is required/);
   assert.match(launcher, /OPENRIND_HALOOP_SESSION_CONTEXT/);
   assert.match(launcher, /ANTHROPIC_CUSTOM_HEADERS=/);
@@ -589,6 +604,11 @@ test("FUSE images package the fixed Haloop configurator", async () => {
   );
   assert.doesNotMatch(configurator, /api\.anthropic\.com/);
   assert.doesNotMatch(configurator, /process\.env\.OPENRIND_HALOOP/);
+  assert.match(configurator, /\/home\/agent\/\.openrind-shell\/env\.sh/);
+  assert.match(configurator, /export \$\{name\}=/);
+  assert.match(configurator, /retained\.push/);
+  assert.match(rootDockerfile, /\/home\/agent\/\.openrind-shell/);
+  assert.match(sandboxDockerfile, /\/home\/agent\/\.openrind-shell/);
 });
 
 test("desktop connections replace the login shell and keep first paint free of setup work", async () => {
@@ -615,6 +635,10 @@ test("desktop connections replace the login shell and keep first paint free of s
   assert.doesNotMatch(desktopLauncher, /configure-openrind-gateway/);
   assert.match(setup, /"\$OPENRIND_SHELL_HOME\/\.claude\/skills"/);
   assert.match(setup, /claude-real --version/);
+  assert.match(
+    setup,
+    /\[ -f \/home\/agent\/\.openrind-shell\/env\.sh \] && \. \/home\/agent\/\.openrind-shell\/env\.sh/,
+  );
 
   assert.match(claudeLauncher, /OPENRIND_SHELL_HOME=\/sandbox\/work/);
   assert.match(claudeLauncher, /if \[ "\$STATE" != writable \]/);

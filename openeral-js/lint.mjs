@@ -636,22 +636,35 @@ try {
 }
 
 // ---------------------------------------------------------------------------
-// Lint 30: Claude policy must include the native claude-real binary
-// Catches: wrapper execs /usr/local/bin/claude-real, but policy only allows
-// /usr/local/bin/claude or /usr/bin/node.
+// Lint 30: required Haloop policy must use only fixed native agent binaries
+// Catches: removing the real Claude/OpenClaw executable or granting the scoped
+// inference credential to the generic Node interpreter.
 // ---------------------------------------------------------------------------
-console.log('\n--- Lint: Claude policy allows claude-real ---');
+console.log('\n--- Lint: Haloop policy allows fixed native agents ---');
 
 try {
   const policy = readFileSync('../sandboxes/openeral/policy.yaml', 'utf8');
-  const claudeStart = policy.indexOf('claude_code:');
-  const nextPol = policy.indexOf('\n  #', claudeStart + 1);
-  const claudeBlock = policy.slice(claudeStart, nextPol > 0 ? nextPol : undefined);
-  if (!claudeBlock.includes('/usr/local/bin/claude-real')) {
-    fail('sandboxes/openeral/policy.yaml', 'claude_code policy must allow /usr/local/bin/claude-real (Claude Code native binary)');
-  } else {
-    pass('Claude policy allows claude-real');
+  const haloopStart = policy.indexOf('haloop_anthropic:');
+  const nextPol = policy.indexOf('\n  #', haloopStart + 1);
+  const haloopBlock = haloopStart >= 0
+    ? policy.slice(haloopStart, nextPol > 0 ? nextPol : undefined)
+    : '';
+  for (const required of [
+    'host: host.openshell.internal',
+    'port: 8787',
+    'protocol: rest',
+    'enforcement: enforce',
+    '/usr/local/bin/claude-real',
+    '/usr/local/bin/openrind-openclaw-agent',
+  ]) {
+    if (!haloopBlock.includes(required)) {
+      fail('sandboxes/openeral/policy.yaml', `haloop_anthropic policy missing ${required}`);
+    }
   }
+  if (haloopBlock.includes('/usr/bin/node')) {
+    fail('sandboxes/openeral/policy.yaml', 'haloop_anthropic must not authorize generic /usr/bin/node');
+  }
+  pass('Haloop policy allows only fixed native agent paths');
 } catch {
   pass('policy.yaml not found (skipped)');
 }
@@ -685,36 +698,30 @@ if (!hasSandboxExec || !hasCreateEnv || !hasFuseRequest) {
 }
 
 // ---------------------------------------------------------------------------
-// Lint 32: Openrind Gateway management endpoints must be least privilege
-// Catches: exposing raw body placeholders or allowing broad management access
+// Lint 32: retired direct-gateway and presign routes must stay absent
+// Catches: reintroducing a legacy direct-provider bypass alongside required
+// Haloop routing.
 // ---------------------------------------------------------------------------
-console.log('\n--- Lint: Openrind Gateway presign policy is scoped ---');
+console.log('\n--- Lint: retired presign policies stay removed ---');
 
 try {
   const policy = readFileSync('../sandboxes/openeral/policy.yaml', 'utf8');
-  for (const [name, host] of [
-    ['openrind_gateway_presign:', 'host: app.openrind.com'],
-    ['stringcost_presign:', 'host: app.stringcost.com'],
+  for (const forbidden of [
+    'openrind_gateway_presign:',
+    'stringcost_presign:',
+    'stringcost_proxy:',
+    'host: app.openrind.com',
+    'host: app.stringcost.com',
+    'host: proxy.openrind.com',
+    'host: proxy.stringcost.com',
+    'request_body_credential_rewrite: true',
+    'path: /v1/presign',
   ]) {
-    const start = policy.indexOf(name);
-    const end = policy.indexOf('\n  #', start + 1);
-    const block = policy.slice(start, end > 0 ? end : undefined);
-    for (const required of [
-      host,
-      'request_body_credential_rewrite: true',
-      'method: POST',
-      'path: /v1/presign',
-      '/usr/bin/node',
-    ]) {
-      if (!block.includes(required)) {
-        fail('sandboxes/openeral/policy.yaml', `${name} policy missing ${required}`);
-      }
-    }
-    if (block.includes('access: full')) {
-      fail('sandboxes/openeral/policy.yaml', `${name} must not use access: full`);
+    if (policy.includes(forbidden)) {
+      fail('sandboxes/openeral/policy.yaml', `retired direct route is forbidden: ${forbidden}`);
     }
   }
-  pass('current and legacy gateway presign policies are constrained');
+  pass('retired direct-gateway and presign policies are absent');
 } catch {
   pass('policy.yaml not found (skipped)');
 }
@@ -793,9 +800,10 @@ for (const [root, nested] of [
 pass('canonical and nested Dockerfile instructions match');
 
 // ---------------------------------------------------------------------------
-// Lint 36: Gateway metadata preserves direct Claude model selection
+// Lint 36: compatibility metadata stays valid without weakening the primary
+// mandatory Haloop route.
 // ---------------------------------------------------------------------------
-console.log('\n--- Lint: Openrind Gateway labels and Anthropic model routing are current ---');
+console.log('\n--- Lint: compatibility metadata and Haloop routing are current ---');
 
 try {
   const configure = readFileSync('../sandboxes/openeral/configure-stringcost.mjs', 'utf8');
@@ -812,20 +820,25 @@ try {
       fail(file, 'top-level presign tags are ignored; use metadata.labels');
     }
   }
-  const claudeStart = policy.indexOf('  claude_code:');
-  const claudeEnd = policy.indexOf('\n  #', claudeStart + 1);
-  const claudeBlock = policy.slice(claudeStart, claudeEnd > 0 ? claudeEnd : undefined);
+  const haloopStart = policy.indexOf('  haloop_anthropic:');
+  const haloopEnd = policy.indexOf('\n  #', haloopStart + 1);
+  const haloopBlock = haloopStart >= 0
+    ? policy.slice(haloopStart, haloopEnd > 0 ? haloopEnd : undefined)
+    : '';
   const forbiddenRouter = new RegExp(['open', 'router'].join(''), 'i');
   for (const [file, content] of [
     ['sandboxes/openeral/configure-stringcost.mjs', configure],
     ['sandboxes/openeral/setup.sh', compatibilitySetup],
-    ['sandboxes/openeral/policy.yaml', claudeBlock],
+    ['sandboxes/openeral/policy.yaml', haloopBlock],
   ]) {
     if (forbiddenRouter.test(content)) {
-      fail(file, 'product Claude paths must use the configured Anthropic provider directly');
+      fail(file, 'product Claude paths must use the configured Anthropic provider');
     }
   }
-  pass('Gateway labels are present and Claude keeps native Anthropic model routing');
+  if (!haloopBlock.includes('name: haloop-anthropic') || policy.includes('api.anthropic.com')) {
+    fail('sandboxes/openeral/policy.yaml', 'primary inference must use only the mandatory Haloop edge');
+  }
+  pass('compatibility labels are present and primary inference remains Haloop-only');
 } catch {
   fail('sandboxes/openeral/configure-stringcost.mjs', 'gateway runtime files must exist');
 }
