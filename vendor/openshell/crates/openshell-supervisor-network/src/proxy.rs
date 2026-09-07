@@ -9220,6 +9220,46 @@ network_policies:
     }
 
     #[test]
+    fn test_rewrite_haloop_request_resolves_token_and_preserves_signed_session_header() {
+        let (_, resolver) = SecretResolver::from_provider_env(
+            [(
+                "ANTHROPIC_API_KEY".to_string(),
+                "scoped-haloop-token".to_string(),
+            )]
+            .into_iter()
+            .collect(),
+        );
+        let assertion = concat!(
+            "v1.0123456789abcdef0123456789abcdef.1770000000000.1770003600000.",
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        );
+        let raw = format!(
+            "POST http://host.openshell.internal:8787/v1/messages HTTP/1.1\r\n\
+             Host: host.openshell.internal:8787\r\n\
+             Content-Type: application/json\r\n\
+             Content-Length: 2\r\n\
+             x-api-key: openshell:resolve:env:ANTHROPIC_API_KEY\r\n\
+             x-openrind-haloop-session: {assertion}\r\n\r\n{{}}"
+        );
+
+        let result = rewrite_forward_request(
+            raw.as_bytes(),
+            raw.len(),
+            "/v1/messages",
+            "host.openshell.internal:8787",
+            resolver.as_ref(),
+            false,
+        )
+        .expect("Haloop request should rewrite");
+        let result = String::from_utf8(result).expect("rewritten request should be UTF-8");
+
+        assert!(result.starts_with("POST /v1/messages HTTP/1.1\r\n"));
+        assert!(result.contains("x-api-key: scoped-haloop-token\r\n"));
+        assert!(result.contains(&format!("x-openrind-haloop-session: {assertion}\r\n")));
+        assert!(!result.contains("openshell:resolve:env:ANTHROPIC_API_KEY"));
+    }
+
+    #[test]
     fn canonical_forward_authority_formats_ports_and_ipv6() {
         for (uri, expected) in [
             ("http://API.EXAMPLE.TEST/path", "api.example.test"),

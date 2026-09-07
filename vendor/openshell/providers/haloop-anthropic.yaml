@@ -1,0 +1,29 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+id: haloop-anthropic
+display_name: Haloop Anthropic
+description: Required Openrind Shell inference through the host-managed Haloop edge
+category: agent
+inference_capable: true
+credentials:
+  - name: client_token
+    description: Scoped Haloop client token; this is not an upstream provider key
+    env_vars: [HALOOP_CLIENT_TOKEN, ANTHROPIC_API_KEY]
+    required: true
+    auth_style: header
+    header_name: x-api-key
+discovery:
+  credentials: [client_token]
+endpoints:
+  - host: host.openshell.internal
+    port: 8787
+    path: /v1/**
+    protocol: rest
+    enforcement: enforce
+    rules:
+      - allow: { method: POST, path: "/v1/messages" }
+      - allow: { method: POST, path: "/v1/messages/count_tokens" }
+# Openrind Shell launches both agents through fixed native entrypoints. The
+# generic Node interpreter used by OpenClaw is intentionally excluded.
+binaries: [/usr/bin/claude, /usr/local/bin/claude, /usr/local/bin/claude-real, /usr/local/bin/openrind-openclaw-agent]
