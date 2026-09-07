@@ -27,6 +27,7 @@ import { AdvancedView } from "../domains/settings/pages/advanced-view";
 import { AppearanceView } from "../domains/settings/pages/appearance-view";
 import { DebugView } from "../domains/settings/pages/debug-view";
 import { EnvironmentView } from "../domains/settings/pages/environment-view";
+import { HaloopView } from "../domains/settings/pages/haloop-view";
 import { SandboxPanel } from "../domains/session/sidebar/sandbox-panel";
 import { useSandboxRows } from "../domains/session/sidebar/use-sandbox-rows";
 import type { SidebarTab } from "../domains/session/sidebar/sidebar-tabs";
@@ -245,6 +246,7 @@ function parseSettingsPath(pathname: string): {
     case "appearance":
     case "environment":
     case "sandbox":
+    case "haloop":
     case "billing":
     case "debug":
       return { tab: head, redirectPath: null };
@@ -282,7 +284,10 @@ export function SettingsRoute() {
   const checkDesktopRestriction = useCheckDesktopRestriction();
   const reloadCoordinator = useReloadCoordinator();
   const route = parseSettingsPath(location.pathname);
-  const openshellState = useOpenShellState({ active: route.tab === "sandbox" });
+  const openshellState = useOpenShellState({
+    active: route.tab === "sandbox",
+    haloopActive: route.tab === "haloop",
+  });
 
   const [loading, setLoading] = useState(true);
   const [workspaces, setWorkspaces] = useState<RouteWorkspace[]>([]);
@@ -1187,6 +1192,18 @@ export function SettingsRoute() {
             credentialBusy={openshellState.actionBusy}
             onSetCredential={(key, value) => openshellState.setCredential(key, value)}
             onClearCredential={(key) => openshellState.clearCredential(key)}
+          />
+        );
+      case "haloop":
+        return (
+          <HaloopView
+            status={openshellState.haloopStatus}
+            busy={openshellState.actionBusy}
+            onStatusMessage={setConfigActionStatus}
+            onRefresh={() => openshellState.refreshHaloopStatus()}
+            onRestart={() => openshellState.restartHaloop()}
+            onRestoreIncumbent={() => openshellState.restoreHaloopIncumbent()}
+            onRotateToken={() => openshellState.rotateHaloopToken()}
           />
         );
       case "billing":

@@ -308,7 +308,7 @@ export function SandboxView(props: SandboxViewProps) {
               className="border-red-7/50 text-red-12 hover:bg-red-2/30"
               onClick={props.onResetDistro}
               disabled={props.actionBusy || props.os !== "windows"}
-              title="Wipes the distro and reruns setup. Use if OpenShell is corrupted."
+              title="Revokes all Haloop access, wipes the distro and local traces, then reruns setup."
             >
               Reset distro
             </Button>

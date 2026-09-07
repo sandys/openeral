@@ -63,7 +63,7 @@ const PREDEFINED_CREDENTIALS: PredefinedCredentialDef[] = [
     envVarName: "ANTHROPIC_API_KEY",
     label: "ANTHROPIC_API_KEY",
     description:
-      "Anthropic API key (sk-ant-...). Required for the OpenClaw agent; Claude Code can use it directly or via the OpenShell provider system.",
+      "Upstream Anthropic API key required by the host-managed Haloop edge. Desktop retains it outside the sandbox; Claude and OpenClaw receive neither this key nor a direct-provider route.",
     placeholder: "sk-ant-...",
   },
   {
@@ -71,7 +71,7 @@ const PREDEFINED_CREDENTIALS: PredefinedCredentialDef[] = [
     envVarName: "OPENRIND_GATEWAY_API_KEY",
     label: "OPENRIND_GATEWAY_API_KEY",
     description:
-      "Routes Claude Code API calls through a Openrind Gateway proxy for token + cost metering. Leave unset to talk to Anthropic directly.",
+      "Openrind account and billing credential. It is not an inference route; Claude and OpenClaw always use the required Haloop edge.",
     placeholder: "sk-st-...",
   },
   {

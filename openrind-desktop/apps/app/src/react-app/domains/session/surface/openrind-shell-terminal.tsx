@@ -1264,6 +1264,7 @@ export function OpenrindShellTerminal(props: OpenrindShellTerminalProps) {
             reused?: boolean;
           }>("openrindPtyAttachOrOpen", {
             sandboxName: authoritativeName,
+            workspaceId: props.workspaceId,
             cols: term.cols,
             rows: term.rows,
             sessionId: agentSessionId,
@@ -1363,6 +1364,7 @@ export function OpenrindShellTerminal(props: OpenrindShellTerminalProps) {
         setPhase("connecting-pty");
         const pty = await invoke<{ id: string }>("openrindPtyOpen", {
           sandboxName: sandbox.sandboxName,
+          workspaceId: props.workspaceId,
           cols: term.cols,
           rows: term.rows,
           sessionId: agentSessionId,
@@ -1420,6 +1422,7 @@ export function OpenrindShellTerminal(props: OpenrindShellTerminalProps) {
     try {
       await invoke("openrindPopOutTerminal", {
         sandboxName: name,
+        workspaceId: props.workspaceId,
         profile: props.profile,
       });
     } catch (err) {
@@ -1427,7 +1430,7 @@ export function OpenrindShellTerminal(props: OpenrindShellTerminalProps) {
     } finally {
       setPopoutBusy(false);
     }
-  }, [props.profile, sandboxName]);
+  }, [props.profile, props.workspaceId, sandboxName]);
 
   const deleteSandbox = useCallback(async () => {
     const nameToDelete = sandboxName ?? lastKnownSandboxNameRef.current;
@@ -2032,11 +2035,11 @@ function BootstrapErrorCard(props: BootstrapErrorCardProps) {
   // setup.sh crashed, etc.). The sandbox must be deleted and recreated.
   const sandboxErrorState = /is in error state/i.test(props.message);
   const missingDatabase = /DATABASE_URL is not configured/i.test(props.message);
-  // Backend throws "ANTHROPIC_API_KEY is not configured" (not "is required")
-  const missingApiKey = /ANTHROPIC_API_KEY is not configured/i.test(
+  const missingApiKey = /ANTHROPIC_API_KEY (?:is not configured|is required by Haloop)/i.test(
     props.message,
   );
   const openshellUnready = /OpenShell is not ready/i.test(props.message);
+  const haloopUnavailable = /Haloop/i.test(props.message) && !missingApiKey;
   const gatewayUnresponsive =
     /gateway is not responding|sandbox list timed out/i.test(props.message);
   const credentialIssue = missingDatabase || missingApiKey;
@@ -2063,8 +2066,11 @@ function BootstrapErrorCard(props: BootstrapErrorCardProps) {
   } else if (missingApiKey) {
     title = "ANTHROPIC_API_KEY is not configured.";
     detail =
-      "Openrind Shell needs an Anthropic API key to provision the selected agent provider. " +
+      "The required Haloop edge needs an upstream Anthropic API key; it is retained by Desktop and is not copied into the sandbox. " +
       "Open Settings → Environment → Sandbox credentials and paste your Anthropic API key.";
+  } else if (haloopUnavailable) {
+    title = "Haloop inference edge is unavailable.";
+    detail = `${props.message} Openrind Shell will not bypass Haloop; resolve the reported edge or port problem, then retry.`;
   } else if (gatewayUnresponsive) {
     title = "OpenShell gateway is not responding.";
     detail =

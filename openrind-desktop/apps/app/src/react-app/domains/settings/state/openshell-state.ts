@@ -68,6 +68,54 @@ export type OpenrindShellCredentialStatus = {
   elevenLabsApiKey_updatedAt?: number;
 };
 
+export type HaloopRuntimeState =
+  | "ready"
+  | "starting"
+  | "stopped"
+  | "degraded"
+  | "blocked"
+  | "unavailable";
+
+export type HaloopRuntimeStatus = {
+  required: true;
+  routePolicy: "incumbent-only";
+  state: HaloopRuntimeState;
+  endpoint: string;
+  version: string | null;
+  health: string | null;
+  collectorHealth: string | null;
+  activeRoute: {
+    profileId: string;
+    providerName: string;
+    sandboxName: string;
+    agentId: "claude" | "openclaw";
+  } | null;
+  detail: string;
+  lastConnectionError: string | null;
+  spanCapture: {
+    written: number;
+    duplicates: number;
+    dropped: number;
+    redacted: number;
+    incomplete: number;
+    lastError: string | null;
+    lastAttemptAt: number | null;
+  };
+  checkedAt: number;
+};
+
+export type HaloopTokenRotationResult = {
+  status: HaloopRuntimeStatus;
+  affectedSessions: number;
+  relaunchRequired: true;
+};
+
+export type HaloopIncumbentRollbackResult = {
+  status: HaloopRuntimeStatus;
+  routePolicy: "incumbent-only";
+  sessionsPreserved: true;
+};
+
 export type OpenrindShellSessionProgress = {
   sandboxName?: string;
   phase: string;
@@ -100,8 +148,10 @@ async function invoke<T>(command: string, ...args: unknown[]): Promise<T> {
 const DOCTOR_POLL_INTERVAL_MS = 5_000;
 const PROGRESS_LOG_MAX = 200;
 
-export function useOpenShellState(options: { active: boolean } = { active: false }) {
-  const { active } = options;
+export function useOpenShellState(
+  options: { active: boolean; haloopActive?: boolean } = { active: false },
+) {
+  const { active, haloopActive = false } = options;
   const [doctor, setDoctor] = useState<OpenShellDoctorResult | null>(null);
   const [doctorLoading, setDoctorLoading] = useState(false);
   const [doctorError, setDoctorError] = useState<string | null>(null);
@@ -109,6 +159,7 @@ export function useOpenShellState(options: { active: boolean } = { active: false
   const [progressLog, setProgressLog] = useState<OpenShellInstallProgress[]>([]);
   const [policies, setPolicies] = useState<string[]>([]);
   const [credentialStatus, setCredentialStatus] = useState<OpenrindShellCredentialStatus | null>(null);
+  const [haloopStatus, setHaloopStatus] = useState<HaloopRuntimeStatus | null>(null);
   const [sessionProgress, setSessionProgress] = useState<OpenrindShellSessionProgress[]>([]);
   const [actionError, setActionError] = useState<string | null>(null);
   const [actionBusy, setActionBusy] = useState(false);
@@ -167,6 +218,17 @@ export function useOpenShellState(options: { active: boolean } = { active: false
       if (isMountedRef.current) setCredentialStatus(status);
     } catch (err) {
       // Failed to refresh credential status, ignored silently in UI
+    }
+  }, []);
+
+  const refreshHaloopStatus = useCallback(async () => {
+    if (!isElectronRuntime()) return;
+    try {
+      const status = await invoke<HaloopRuntimeStatus>("openrindHaloopStatus");
+      if (isMountedRef.current) setHaloopStatus(status);
+    } catch {
+      // Keep the last known snapshot; launch failures surface through the
+      // session flow and the runtime status itself carries sanitized details.
     }
   }, []);
 
@@ -231,6 +293,13 @@ export function useOpenShellState(options: { active: boolean } = { active: false
     void refreshCredentialStatus();
   }, [refreshCredentialStatus]);
 
+  useEffect(() => {
+    if (!haloopActive || !isElectronRuntime()) return;
+    void refreshHaloopStatus();
+    const id = setInterval(() => void refreshHaloopStatus(), DOCTOR_POLL_INTERVAL_MS);
+    return () => clearInterval(id);
+  }, [haloopActive, refreshHaloopStatus]);
+
   // Poll doctor + install status on a steady cadence while the user is
   // looking at the sandbox tab. Outside the tab we don't waste cycles.
   useEffect(() => {
@@ -283,6 +352,73 @@ export function useOpenShellState(options: { active: boolean } = { active: false
     }
   }, [refreshDoctor]);
 
+  const restartHaloop = useCallback(async () => {
+    setActionBusy(true);
+    setActionError(null);
+    try {
+      const status = await invoke<HaloopRuntimeStatus>("openrindHaloopRestart");
+      if (isMountedRef.current) setHaloopStatus(status);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (isMountedRef.current) setActionError(message);
+      throw err;
+    } finally {
+      if (isMountedRef.current) setActionBusy(false);
+    }
+  }, []);
+
+  const restoreHaloopIncumbent = useCallback(
+    async (): Promise<HaloopIncumbentRollbackResult> => {
+      const route = haloopStatus?.activeRoute;
+      if (!route) {
+        throw new Error("Haloop has no active sandbox route to restore.");
+      }
+      setActionBusy(true);
+      setActionError(null);
+      try {
+        const result = await invoke<HaloopIncumbentRollbackResult>(
+          "openrindHaloopRollbackIncumbent",
+          {
+            expectedProfileId: route.profileId,
+            expectedSandboxName: route.sandboxName,
+          },
+        );
+        if (isMountedRef.current) setHaloopStatus(result.status);
+        return result;
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        if (isMountedRef.current) setActionError(message);
+        throw err;
+      } finally {
+        if (isMountedRef.current) setActionBusy(false);
+      }
+    },
+    [haloopStatus],
+  );
+
+  const rotateHaloopToken = useCallback(async (): Promise<HaloopTokenRotationResult> => {
+    const route = haloopStatus?.activeRoute;
+    if (!route) {
+      throw new Error("Haloop has no active sandbox route to rotate.");
+    }
+    setActionBusy(true);
+    setActionError(null);
+    try {
+      const result = await invoke<HaloopTokenRotationResult>("openrindHaloopRotateToken", {
+        expectedProfileId: route.profileId,
+        expectedSandboxName: route.sandboxName,
+      });
+      if (isMountedRef.current) setHaloopStatus(result.status);
+      return result;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (isMountedRef.current) setActionError(message);
+      throw err;
+    } finally {
+      if (isMountedRef.current) setActionBusy(false);
+    }
+  }, [haloopStatus]);
+
   const openPoliciesFolder = useCallback(async () => {
     setActionError(null);
     try {
@@ -309,6 +445,7 @@ export function useOpenShellState(options: { active: boolean } = { active: false
           }
         }
         if (isMountedRef.current) setCredentialStatus(status);
+        await refreshHaloopStatus();
         if (key === "openrindGatewayApiKey") {
           if (typeof window !== "undefined") {
             window.dispatchEvent(new CustomEvent("openrind-shell-credentials-changed"));
@@ -321,7 +458,7 @@ export function useOpenShellState(options: { active: boolean } = { active: false
         setActionBusy(false);
       }
     },
-    [],
+    [refreshHaloopStatus],
   );
 
   const clearCredential = useCallback(
@@ -338,6 +475,7 @@ export function useOpenShellState(options: { active: boolean } = { active: false
           }
         }
         if (isMountedRef.current) setCredentialStatus(status);
+        await refreshHaloopStatus();
         if (key === "openrindGatewayApiKey") {
           if (typeof window !== "undefined") {
             window.dispatchEvent(new CustomEvent("openrind-shell-credentials-changed"));
@@ -350,7 +488,7 @@ export function useOpenShellState(options: { active: boolean } = { active: false
         setActionBusy(false);
       }
     },
-    [],
+    [refreshHaloopStatus],
   );
 
   const startOpenrindShellSession = useCallback(
@@ -366,6 +504,7 @@ export function useOpenShellState(options: { active: boolean } = { active: false
           workspaceId,
           profile,
         });
+        await refreshHaloopStatus();
         return result;
       } catch (err) {
         setActionError(err instanceof Error ? err.message : String(err));
@@ -374,7 +513,7 @@ export function useOpenShellState(options: { active: boolean } = { active: false
         setActionBusy(false);
       }
     },
-    [],
+    [refreshHaloopStatus],
   );
 
   const deleteOpenrindShellSandbox = useCallback(async (sandboxName: string) => {
@@ -418,6 +557,8 @@ export function useOpenShellState(options: { active: boolean } = { active: false
         await refreshDoctor();
         await refreshInstallStatus();
         setProgressLog([]);
+        setSessionProgress([]);
+        setHaloopStatus(null);
       }
     } catch (err) {
       setActionError(err instanceof Error ? err.message : String(err));
@@ -436,10 +577,14 @@ export function useOpenShellState(options: { active: boolean } = { active: false
     actionBusy,
     actionError,
     credentialStatus,
+    haloopStatus,
     sessionProgress,
     startInstall,
     cancelInstall,
     restartGateway,
+    restartHaloop,
+    restoreHaloopIncumbent,
+    rotateHaloopToken,
     resetDistro,
     openPoliciesFolder,
     setCredential,
@@ -451,5 +596,6 @@ export function useOpenShellState(options: { active: boolean } = { active: false
     refreshInstallStatus,
     refreshPolicies,
     refreshCredentialStatus,
+    refreshHaloopStatus,
   };
 }
