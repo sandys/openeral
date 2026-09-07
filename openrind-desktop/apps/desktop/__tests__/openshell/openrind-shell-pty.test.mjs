@@ -61,6 +61,7 @@ let activeFake = null;
 test.beforeEach(() => {
   lastSpawnArgs = null;
   activeFake = null;
+  pty.__testing.installEnsureGatewayImpl(async () => undefined);
   pty.__testing.installSpawnImpl(async (opts) => {
     lastSpawnArgs = opts;
     activeFake = makeFakePty();
@@ -235,6 +236,44 @@ test("onExit handler fires with exit code + signal", async () => {
   });
   activeFake.exit(7, "SIGTERM");
   assert.deepEqual(exits, [{ code: 7, signal: "SIGTERM" }]);
+});
+
+test("host lifecycle exit capture survives renderer detach and fires once", async () => {
+  const lifecycle = [];
+  const { id } = await pty.openSession({
+    sandboxName: "x",
+    agentSessionId: "ses_capture",
+    onLifecycleExit: (event) => lifecycle.push(event),
+  });
+  pty.detachSession(id);
+  activeFake.exit(9, "SIGKILL");
+
+  assert.equal(lifecycle.length, 1);
+  assert.equal(lifecycle[0].id, id);
+  assert.equal(lifecycle[0].sandboxName, "x");
+  assert.equal(lifecycle[0].agentSessionId, "ses_capture");
+  assert.equal(lifecycle[0].exitCode, 9);
+  assert.equal(lifecycle[0].signal, "SIGKILL");
+  assert.equal(lifecycle[0].terminationCause, "process-exit");
+  assert.equal(lifecycle[0].closeRequestedAt, null);
+  assert.ok(lifecycle[0].endedAt >= lifecycle[0].openedAt);
+});
+
+test("explicit close is reported as Desktop cancellation to host lifecycle capture", async () => {
+  const lifecycle = [];
+  const { id } = await pty.openSession({
+    sandboxName: "x",
+    agentSessionId: "ses_cancel",
+    onLifecycleExit: (event) => lifecycle.push(event),
+  });
+
+  assert.equal(pty.closeSession(id), true);
+  activeFake.exit(null, "SIGTERM");
+
+  assert.equal(lifecycle.length, 1);
+  assert.equal(lifecycle[0].terminationCause, "desktop-close");
+  assert.equal(typeof lifecycle[0].closeRequestedAt, "number");
+  assert.equal(lifecycle[0].signal, "SIGTERM");
 });
 
 test("onExit RETAINS the session (marks exitInfo) so it can be replayed on re-attach", async () => {
@@ -576,9 +615,18 @@ test("openSession: reconnecting a session whose PTY died replaces only that PTY"
 });
 
 test("closeSessionsForSandbox: kills every PTY of one sandbox, leaves others", async () => {
-  await pty.openSession({ sandboxName: "x", agentSessionId: "ses_a" });
+  const lifecycle = [];
+  await pty.openSession({
+    sandboxName: "x",
+    agentSessionId: "ses_a",
+    onLifecycleExit: (event) => lifecycle.push(event),
+  });
   const fakeA = activeFake;
-  await pty.openSession({ sandboxName: "x", agentSessionId: "ses_b" });
+  await pty.openSession({
+    sandboxName: "x",
+    agentSessionId: "ses_b",
+    onLifecycleExit: (event) => lifecycle.push(event),
+  });
   const fakeB = activeFake;
   await pty.openSession({ sandboxName: "y", agentSessionId: "ses_c" });
   const fakeC = activeFake;
@@ -589,6 +637,76 @@ test("closeSessionsForSandbox: kills every PTY of one sandbox, leaves others", a
   assert.equal(fakeC.events.kills.length, 0);
   assert.equal(pty.listSessions().length, 1);
   assert.equal(pty.listSessions()[0].sandboxName, "y");
+
+  fakeA.exit(null, "SIGTERM");
+  fakeB.exit(null, "SIGTERM");
+  assert.equal(lifecycle.length, 2);
+  assert.ok(lifecycle.every((event) => event.terminationCause === "sandbox-delete"));
+  assert.ok(lifecycle.every((event) => typeof event.closeRequestedAt === "number"));
+});
+
+test("closeSessionsForSandbox records Haloop token rotation as the termination cause", async () => {
+  const lifecycle = [];
+  await pty.openSession({
+    sandboxName: "rotate-me",
+    agentSessionId: "ses_rotate",
+    onLifecycleExit: (event) => lifecycle.push(event),
+  });
+  const fake = activeFake;
+
+  assert.equal(
+    pty.closeSessionsForSandbox("rotate-me", "haloop-token-rotation"),
+    1,
+  );
+  fake.exit(null, "SIGTERM");
+
+  assert.equal(lifecycle.length, 1);
+  assert.equal(lifecycle[0].terminationCause, "haloop-token-rotation");
+});
+
+test("closeAllSessions records an OpenShell reset for every tracked agent", async () => {
+  const lifecycle = [];
+  await pty.openSession({
+    sandboxName: "reset-a",
+    agentSessionId: "ses_reset_a",
+    onLifecycleExit: (event) => lifecycle.push(event),
+  });
+  const fakeA = activeFake;
+  await pty.openSession({
+    sandboxName: "reset-b",
+    agentSessionId: "ses_reset_b",
+    onLifecycleExit: (event) => lifecycle.push(event),
+  });
+  const fakeB = activeFake;
+
+  assert.equal(pty.closeAllSessions("openshell-reset"), 2);
+  fakeA.exit(null, "SIGTERM");
+  fakeB.exit(null, "SIGTERM");
+
+  assert.equal(lifecycle.length, 2);
+  assert.ok(lifecycle.every((event) => event.terminationCause === "openshell-reset"));
+});
+
+test("openSession: preserves and enforces the host-issued Haloop conversation context", async () => {
+  const first = await pty.openSession({
+    sandboxName: "x",
+    agentSessionId: "ses_context",
+    haloopContextId: "12".repeat(16),
+  });
+  assert.equal(
+    pty.findSessionBySandboxAndAgent("x", "ses_context")?.haloopContextId,
+    "12".repeat(16),
+  );
+  await assert.rejects(
+    () =>
+      pty.openSession({
+        sandboxName: "x",
+        agentSessionId: "ses_context",
+        haloopContextId: "34".repeat(16),
+      }),
+    /Haloop conversation context mismatch/,
+  );
+  assert.equal(pty.__testing.getSession(first.id)?.haloopContextId, "12".repeat(16));
 });
 
 test("listSessions: reports agentSessionId (null when unspecified)", async () => {
@@ -657,14 +775,25 @@ test("attachHandlers: returns false for unknown session", () => {
 // ── closeAllSessions ───────────────────────────────────────────────────
 
 test("closeAllSessions: kills every live PTY", async () => {
-  await pty.openSession({ sandboxName: "a" });
+  const lifecycle = [];
+  await pty.openSession({
+    sandboxName: "a",
+    onLifecycleExit: (event) => lifecycle.push(event),
+  });
   const fakeA = activeFake;
-  await pty.openSession({ sandboxName: "b" });
+  await pty.openSession({
+    sandboxName: "b",
+    onLifecycleExit: (event) => lifecycle.push(event),
+  });
   const fakeB = activeFake;
   assert.equal(pty.listSessions().length, 2);
   pty.closeAllSessions();
   assert.deepEqual(fakeA.events.kills, ["SIGTERM"]);
   assert.deepEqual(fakeB.events.kills, ["SIGTERM"]);
+  fakeA.exit(null, "SIGTERM");
+  fakeB.exit(null, "SIGTERM");
+  assert.equal(lifecycle.length, 2);
+  assert.ok(lifecycle.every((event) => event.terminationCause === "app-shutdown"));
 });
 
 // ── multiple sessions don't cross-talk ────────────────────────────────

@@ -17,6 +17,7 @@
     "build": "node ./scripts/electron-build.mjs",
     "build:electron": "node ./scripts/electron-build.mjs",
     "build:openshell-rootfs": "node ./scripts/build-openshell-rootfs.mjs",
+    "build:openshell-runtime-images": "node ./scripts/build-openshell-runtime-images.mjs",
     "package:electron": "pnpm run build:electron && pnpm exec electron-builder --config electron-builder.yml",
     "package:electron:dir": "pnpm run build:electron && pnpm exec electron-builder --config electron-builder.yml --dir",
     "electron": "pnpm exec electron ./electron/main.mjs",

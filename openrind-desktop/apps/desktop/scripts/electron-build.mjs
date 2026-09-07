@@ -9,7 +9,8 @@ const repoRoot = resolve(desktopRoot, "../..");
 const electronSidecarDir = resolve(desktopRoot, "resources", "sidecars");
 const electronRoot = resolve(desktopRoot, "electron");
 
-const pnpmCmd = process.platform === "win32" ? "pnpm.cmd" : "pnpm";
+const pnpmCmd = process.platform === "win32" ? "corepack.cmd" : "pnpm";
+const pnpmArgs = process.platform === "win32" ? ["pnpm@10.27.0"] : [];
 const nodeCmd = process.execPath;
 
 function run(command, args, cwd, env) {
@@ -41,7 +42,7 @@ run(nodeCmd, [resolve(__dirname, "prepare-sidecar.mjs"), "--force", "--outdir", 
 // OPENRIND_DESKTOP_ELECTRON_BUILD tells Vite to emit relative asset paths so
 // index.html resolves /assets/* correctly when loaded via file:// from
 // inside the packaged .app bundle.
-run(pnpmCmd, ["--filter", "@openrind/app", "build"], repoRoot, {
+run(pnpmCmd, [...pnpmArgs, "--filter", "@openrind/app", "build"], repoRoot, {
   OPENRIND_DESKTOP_ELECTRON_BUILD: "1",
 });
 for (const fileName of readdirSync(electronRoot).filter((name) => name.endsWith(".mjs")).sort()) {

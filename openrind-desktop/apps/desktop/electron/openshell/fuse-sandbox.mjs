@@ -1,6 +1,13 @@
 import { createHash, randomUUID } from "node:crypto";
 
 import { getCredential } from "./openrind-shell-credentials.mjs";
+import {
+  ensureHaloopRuntime,
+  restoreHaloopIncumbentRoute,
+  revokeHaloopIntegration,
+  revokeHaloopSandboxProfiles,
+  rotateHaloopRuntime,
+} from "./haloop-runtime.mjs";
 import { createSandboxProvisioningCoordinator } from "./sandbox-provisioning-coordinator.mjs";
 import {
   ensureFuseRuntime,
@@ -12,7 +19,7 @@ import {
 } from "./fuse-runtime.mjs";
 import { DISTRO_NAME, ensureWslKeepalive, wslRun, wslSpawn } from "./wsl.mjs";
 
-const IMAGE_CONTRACT = "fuse-openclaw-identity-v22";
+const IMAGE_CONTRACT = "fuse-haloop-required-v24";
 const SESSION_MARKER = "/var/lib/openrind-shell/runtime/desktop-session";
 const CLAUDE_HOME_MOUNT = "/sandbox/claude-home";
 const CLAUDE_HOME_VOLUME_PREFIX = "openrind-claude-home-";
@@ -90,54 +97,58 @@ function normalizeProviderRows(stdout) {
     .filter((row) => row.name);
 }
 
-async function ensureClaudeProvider(anthropicApiKey, onProgress) {
-  const env = buildFuseWslEnv({ ANTHROPIC_API_KEY: anthropicApiKey });
+async function ensureHaloopProvider(providerName, clientToken, onProgress) {
+  // Claude and OpenClaw both look for ANTHROPIC_API_KEY. The value supplied
+  // here is the scoped Haloop client token, never the upstream Anthropic key.
+  // OpenShell exposes only its resolver placeholder to the sandbox process and
+  // materializes the token into x-api-key for this profile's exact endpoint.
+  const env = buildFuseWslEnv({ ANTHROPIC_API_KEY: clientToken });
   const listed = await runFuseOpenShell(
     ["provider", "list", "-o", "json"],
     { ensure: false, env, timeout: 20_000 },
   );
   if (listed.exitCode !== 0) {
     throw new Error(
-      `OpenShell Claude provider lookup failed: ${(listed.stderr || listed.stdout).trim() || `exit ${listed.exitCode}`}`,
+      `OpenShell Haloop provider lookup failed: ${(listed.stderr || listed.stdout).trim() || `exit ${listed.exitCode}`}`,
     );
   }
 
-  const current = normalizeProviderRows(listed.stdout).find((row) => row.name === "claude");
+  const current = normalizeProviderRows(listed.stdout).find((row) => row.name === providerName);
   let replaced = false;
-  if (current && current.type !== "claude-code") {
+  if (current && current.type !== "haloop-anthropic") {
     onProgress?.({
       phase: "provider",
-      message: "Replacing the incompatible Claude provider with the README claude-code profile...",
+      message: "Replacing an incompatible provider with the required Haloop profile...",
     });
     const removed = await runFuseOpenShell(
-      ["provider", "delete", "claude"],
+      ["provider", "delete", providerName],
       { ensure: false, env, timeout: 20_000 },
     );
     if (removed.exitCode !== 0) {
       throw new Error(
-        `OpenShell could not replace the incompatible Claude provider: ${(removed.stderr || removed.stdout).trim() || `exit ${removed.exitCode}`}`,
+        `OpenShell could not replace the incompatible Haloop provider: ${(removed.stderr || removed.stdout).trim() || `exit ${removed.exitCode}`}`,
       );
     }
     replaced = true;
   }
 
   const command = current && !replaced
-    ? ["provider", "update", "claude", "--credential", "ANTHROPIC_API_KEY"]
+    ? ["provider", "update", providerName, "--credential", "ANTHROPIC_API_KEY"]
     : [
         "provider",
         "create",
         "--name",
-        "claude",
+        providerName,
         "--type",
-        "claude-code",
+        "haloop-anthropic",
         "--credential",
         "ANTHROPIC_API_KEY",
       ];
   onProgress?.({
     phase: "provider",
     message: current && !replaced
-      ? "Refreshing the Anthropic credential..."
-      : "Creating the Claude provider...",
+      ? "Refreshing the scoped Haloop credential..."
+      : "Creating the required Haloop provider...",
   });
   const configured = await runFuseOpenShell(command, {
     ensure: false,
@@ -146,60 +157,176 @@ async function ensureClaudeProvider(anthropicApiKey, onProgress) {
   });
   if (configured.exitCode !== 0) {
     throw new Error(
-      `OpenShell Claude provider configuration failed: ${(configured.stderr || configured.stdout).trim() || `exit ${configured.exitCode}`}`,
+      `OpenShell Haloop provider configuration failed: ${(configured.stderr || configured.stdout).trim() || `exit ${configured.exitCode}`}`,
     );
   }
   return { replaced };
 }
 
-async function ensureGatewayProvider(openrindGatewayApiKey, onProgress) {
-  if (!openrindGatewayApiKey) return null;
-  const env = buildFuseWslEnv({ OPENRIND_GATEWAY_API_KEY: openrindGatewayApiKey });
-  const listed = await runFuseOpenShell(
-    ["provider", "list", "-o", "json"],
-    { ensure: false, env, timeout: 20_000 },
-  );
-  if (listed.exitCode !== 0) {
-    console.error(`[ensureGatewayProvider] provider list failed with exit code ${listed.exitCode}: ${listed.stderr}`);
-    return null;
+async function deleteHaloopProviders(providerNames, onProgress) {
+  for (const providerName of new Set(providerNames)) {
+    if (!/^haloop-[0-9a-f]{16}$/.test(providerName)) {
+      throw new Error("Haloop revocation produced an invalid OpenShell provider identity.");
+    }
+    onProgress?.({
+      phase: "provider",
+      message: `Removing revoked Haloop provider ${providerName}…`,
+    });
+    const removed = await runFuseOpenShell(
+      ["provider", "delete", providerName],
+      { ensure: false, timeout: 20_000 },
+    );
+    const detail = (removed.stderr || removed.stdout).trim();
+    if (removed.exitCode !== 0 && !/not found|does not exist|unknown provider/i.test(detail)) {
+      throw new Error(
+        `OpenShell could not remove the revoked Haloop provider: ${detail || `exit ${removed.exitCode}`}`,
+      );
+    }
   }
+}
 
-  const current = normalizeProviderRows(listed.stdout).find(
-    (row) => row.name === "openrind-gateway" || row.name === "stringcost",
-  );
-  const providerName = current?.name ?? "openrind-gateway";
-  const credentialKey = current?.name === "stringcost" ? "STRINGCOST_API_KEY" : "OPENRIND_GATEWAY_API_KEY";
-  const command = current
-    ? ["provider", "update", providerName, "--credential", credentialKey]
-    : [
-        "provider",
-        "create",
-        "--name",
-        "openrind-gateway",
-        "--type",
-        "generic",
-        "--credential",
-        "OPENRIND_GATEWAY_API_KEY",
-      ];
-  onProgress?.({
-    phase: "provider",
-    message: current
-      ? "Refreshing the Openrind Gateway credential..."
-      : "Configuring the Openrind Gateway provider...",
-  });
-  const configured = await runFuseOpenShell(command, {
-    ensure: false,
-    env: buildFuseWslEnv({
-      [credentialKey]: openrindGatewayApiKey,
-      OPENRIND_GATEWAY_API_KEY: openrindGatewayApiKey,
-    }),
-    timeout: 20_000,
-  });
-  if (configured.exitCode !== 0) {
-    console.error(`[ensureGatewayProvider] provider configuration failed with exit code ${configured.exitCode}: ${configured.stderr}`);
-    return null;
+async function prepareRequiredHaloop({
+  name,
+  workspaceId,
+  agent,
+  onProgress,
+  issueConversation = false,
+  agentSessionId = null,
+  haloopContextId,
+}) {
+  const anthropicApiKey = await getCredential("anthropicApiKey");
+  if (!anthropicApiKey) {
+    throw new Error("ANTHROPIC_API_KEY is required by Haloop. Configure it in Settings > Environment.");
   }
-  return providerName;
+  const runtime = await ensureHaloopRuntime({
+    anthropicApiKey,
+    sandboxName: name,
+    workspaceId,
+    agentId: agent.id,
+    issueConversation,
+    agentSessionId,
+    haloopContextId,
+    onProgress,
+  });
+  const provider = await ensureHaloopProvider(
+    runtime.providerName,
+    runtime.clientToken,
+    onProgress,
+  );
+  return { ...runtime, replaced: Boolean(provider.replaced) };
+}
+
+export async function ensureOpenrindShellHaloop(options = {}) {
+  const name = String(options.name ?? "").trim();
+  const workspaceId = String(options.workspaceId ?? "").trim();
+  const profile = String(options.profile ?? "").trim();
+  if (!name || !workspaceId) {
+    throw new Error("A sandbox name and workspace id are required for Haloop.");
+  }
+  const agent = agentForProfile(profile);
+  await ensureFuseRuntime({ onProgress: options.onProgress });
+  return prepareRequiredHaloop({
+    name,
+    workspaceId,
+    agent,
+    issueConversation: options.issueConversation === true,
+    agentSessionId: options.agentSessionId ?? null,
+    haloopContextId: options.haloopContextId,
+    onProgress: options.onProgress,
+  });
+}
+
+/**
+ * Rotate the exact active scoped client token, rebuild the mandatory edge, and
+ * update OpenShell's endpoint-bound provider before any affected session may
+ * relaunch. The upstream key and replacement token never cross IPC.
+ */
+export async function rotateOpenrindShellHaloop(options = {}) {
+  await ensureFuseRuntime({ onProgress: options.onProgress });
+  const anthropicApiKey = await getCredential("anthropicApiKey");
+  if (!anthropicApiKey) {
+    throw new Error("ANTHROPIC_API_KEY is required by Haloop. Configure it in Settings > Environment.");
+  }
+  const runtime = await rotateHaloopRuntime({
+    anthropicApiKey,
+    expectedProfileId: String(options.expectedProfileId ?? "").trim(),
+    expectedSandboxName: String(options.expectedSandboxName ?? "").trim(),
+    beforeRotate: options.beforeRotate,
+    onProgress: options.onProgress,
+  });
+  await ensureHaloopProvider(runtime.providerName, runtime.clientToken, options.onProgress);
+  return {
+    profileId: runtime.profileId,
+    providerName: runtime.providerName,
+    version: runtime.version,
+    affectedSessions: runtime.affectedSessions,
+    relaunchRequired: true,
+  };
+}
+
+/**
+ * Rebuild the server-owned route registry with the approved single incumbent
+ * target. Scoped tokens, signed session keys, the collector, and FUSE data are
+ * preserved; only the managed edge is replaced.
+ */
+export async function restoreOpenrindShellHaloopIncumbent(options = {}) {
+  await ensureFuseRuntime({ onProgress: options.onProgress });
+  const anthropicApiKey = await getCredential("anthropicApiKey");
+  if (!anthropicApiKey) {
+    throw new Error("ANTHROPIC_API_KEY is required by Haloop. Configure it in Settings > Environment.");
+  }
+  const runtime = await restoreHaloopIncumbentRoute({
+    anthropicApiKey,
+    expectedProfileId: String(options.expectedProfileId ?? "").trim(),
+    expectedSandboxName: String(options.expectedSandboxName ?? "").trim(),
+    beforeRollback: options.beforeRollback,
+    onProgress: options.onProgress,
+  });
+  await ensureHaloopProvider(runtime.providerName, runtime.clientToken, options.onProgress);
+  return {
+    profileId: runtime.profileId,
+    providerName: runtime.providerName,
+    version: runtime.version,
+    routePolicy: runtime.routePolicy,
+    sessionsPreserved: true,
+  };
+}
+
+/**
+ * Withdraw every scoped credential for a deleted sandbox. The gateway is down
+ * before endpoint-bound OpenShell provider credentials and encrypted Desktop
+ * records are removed; surviving profiles are then restored through Haloop.
+ */
+export async function revokeOpenrindShellHaloopForSandbox(options = {}) {
+  const sandboxName = String(options.sandboxName ?? "").trim().toLowerCase();
+  if (!sandboxName) throw new Error("A sandbox name is required for Haloop revocation.");
+  await ensureFuseRuntime({ onProgress: options.onProgress });
+  const anthropicApiKey = await getCredential("anthropicApiKey");
+  return revokeHaloopSandboxProfiles({
+    sandboxName,
+    anthropicApiKey,
+    beforeRevoke: options.beforeRevoke,
+    beforeCredentialsRemoved: async ({ providerNames }) => {
+      await deleteHaloopProviders(providerNames, options.onProgress);
+    },
+    onProgress: options.onProgress,
+  });
+}
+
+/**
+ * Remove every endpoint-bound provider and scoped token before the complete
+ * OpenShell integration is reset. The runtime withdraws the edge before this
+ * module asks OpenShell to delete provider records.
+ */
+export async function revokeOpenrindShellHaloopIntegration(options = {}) {
+  await ensureFuseRuntime({ onProgress: options.onProgress });
+  return revokeHaloopIntegration({
+    beforeRevoke: options.beforeRevoke,
+    beforeCredentialsRemoved: async ({ providerNames }) => {
+      await deleteHaloopProviders(providerNames, options.onProgress);
+    },
+    onProgress: options.onProgress,
+  });
 }
 
 export async function listSandboxes(options = {}) {
@@ -434,14 +561,8 @@ async function provisionOpenrindShellSandbox(options) {
   if (!databaseUrl) {
     throw new Error("DATABASE_URL is required. Configure the PostgreSQL session-mode URL in Settings → Environment.");
   }
-  const anthropicApiKey = await getCredential("anthropicApiKey");
-  if (!anthropicApiKey) {
-    throw new Error("ANTHROPIC_API_KEY is required. Configure it in Settings > Environment.");
-  }
-  const openrindGatewayApiKey = await getCredential("openrindGatewayApiKey");
-  const provider = await ensureClaudeProvider(anthropicApiKey, onProgress);
-  const gatewayProviderName = await ensureGatewayProvider(openrindGatewayApiKey, onProgress);
-  const replaced = Boolean(provider?.replaced);
+  const haloop = await prepareRequiredHaloop({ name, workspaceId, agent, onProgress });
+  const replaced = haloop.replaced;
   await requireFuseImage(onProgress);
   const agentHomeVolume = await ensureAgentHomeVolume(name, workspaceId, agent);
   const driverConfig = JSON.stringify({
@@ -464,7 +585,14 @@ async function provisionOpenrindShellSandbox(options) {
       (await existingFuseSandboxIsWritable(name, agent))
     ) {
       onProgress?.({ phase: "ready", message: `FUSE workspace ${name} is ready.` });
-      return { name, profile, imageRef: FUSE_IMAGE, existed: true };
+      return {
+        name,
+        profile,
+        imageRef: FUSE_IMAGE,
+        existed: true,
+        haloopProfileId: haloop.profileId,
+        haloopVersion: haloop.version,
+      };
     }
     onProgress?.({ phase: "recreate", message: `Replacing the unhealthy sandbox container; the PostgreSQL FUSE workspace is retained…` });
     await deleteIfPresent(name);
@@ -472,8 +600,7 @@ async function provisionOpenrindShellSandbox(options) {
 
   // This preserves the README one-shot create contract for testing:
   // "  --fuse"
-  // "  --provider claude"
-  // "  --auto-providers"
+  // "  --provider <scoped Haloop provider>"
   // "  --no-tty"
   // "  -- openrind-shell-init"
 
@@ -492,13 +619,9 @@ async function provisionOpenrindShellSandbox(options) {
     "--upload",
     `${dbPath}:/sandbox/db-url`,
     "--provider",
-    "claude",
+    haloop.providerName,
   ];
-  if (gatewayProviderName) {
-    sandboxArgs.push("--provider", gatewayProviderName);
-  }
   sandboxArgs.push(
-    "--auto-providers",
     "--env",
     `OPENRIND_SHELL_WORKSPACE_ID=${workspaceId}`,
     "--env",
@@ -520,10 +643,7 @@ async function provisionOpenrindShellSandbox(options) {
   onProgress?.({ phase: "create", message: `Creating ${name}, mounting /sandbox/work, and initializing it once…` });
   const result = await streamCreate({
     script: create,
-    env: buildFuseWslEnv({
-      ANTHROPIC_API_KEY: anthropicApiKey,
-      ...(openrindGatewayApiKey ? { OPENRIND_GATEWAY_API_KEY: openrindGatewayApiKey } : {}),
-    }),
+    env: buildFuseWslEnv(),
     databaseUrl,
     timeoutMs: options.createTimeoutMs ?? 5 * 60_000,
     onProgress,
@@ -537,7 +657,14 @@ async function provisionOpenrindShellSandbox(options) {
   }
 
   onProgress?.({ phase: "ready", message: `FUSE workspace ${name} is initialized; starting ${agent.label}…` });
-  return { name, profile, imageRef: FUSE_IMAGE, existed: false };
+  return {
+    name,
+    profile,
+    imageRef: FUSE_IMAGE,
+    existed: false,
+    haloopProfileId: haloop.profileId,
+    haloopVersion: haloop.version,
+  };
 }
 
 /**

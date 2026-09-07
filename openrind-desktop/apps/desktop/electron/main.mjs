@@ -628,10 +628,9 @@ async function dumpOpenrindShellPtyBuffer(sessionId) {
 }
 
 /**
- * Build the extra env forwarded into the Openrind Shell PTY at spawn time:
- * decrypted Anthropic / OpenrindGateway keys (so Claude Code auto-configures
- * its provider on first run without an interactive prompt) plus COLUMNS /
- * LINES belt-and-suspenders alongside the stty call in openrind-shell-pty.mjs.
+ * Build the non-secret env forwarded into the Openrind Shell PTY at spawn
+ * time. Inference credentials remain provider-managed; the host transport gets
+ * only the selected profile and terminal dimensions.
  * Shared by the openrindPtyOpen and openrindPtyAttachOrOpen handlers.
  *
  * @param {number} [cols]
@@ -640,21 +639,8 @@ async function dumpOpenrindShellPtyBuffer(sessionId) {
  * @returns {Promise<Record<string, string> | undefined>}
  */
 async function buildOpenrindShellPtyEnv(cols, rows, profile) {
+  /** @type {Record<string, string>} */
   const extraEnv = {};
-  try {
-    const anthropicApiKey =
-      await openrindCredentials.getCredential("anthropicApiKey");
-    if (anthropicApiKey) extraEnv.ANTHROPIC_API_KEY = anthropicApiKey;
-  } catch {
-    /* safeStorage may be unavailable in some test environments */
-  }
-  try {
-    const openrindGatewayApiKey =
-      await openrindCredentials.getCredential("openrindGatewayApiKey");
-    if (openrindGatewayApiKey) extraEnv.OPENRIND_GATEWAY_API_KEY = openrindGatewayApiKey;
-  } catch {
-    /* optional — OpenrindGateway tracking only */
-  }
   if (profile) {
     extraEnv.OPENRIND_DESKTOP_PROFILE = profile;
   }
@@ -675,9 +661,19 @@ async function buildOpenrindShellPtyEnv(cols, rows, profile) {
  * @param {string} sandboxName
  * @param {string} profile  "openrind-shell-claude" | "openrind-shell-openclaw"
  * @param {string | null} agentSessionId  Openrind Desktop session id, or null
+ * @param {string} haloopSessionAssertion Host-signed conversation assertion
  */
-async function writeOpenrindShellSessionMarker(sandboxName, profile, agentSessionId) {
-  const value = openrindShell.resolveAgentSessionValue(profile, agentSessionId);
+async function writeOpenrindShellSessionMarker(
+  sandboxName,
+  profile,
+  agentSessionId,
+  haloopSessionAssertion,
+) {
+  const value = openrindShell.resolveAgentSessionValue(
+    profile,
+    agentSessionId,
+    haloopSessionAssertion,
+  );
   await openrindShell.writeCurrentSessionMarker(sandboxName, value);
 }
 
@@ -691,6 +687,36 @@ async function writeOpenrindShellSessionMarker(sandboxName, profile, agentSessio
 // not been confirmed to consume its marker yet.
 const openrindFreshOpenChains = new Map();
 const openrindMarkerPending = new Set();
+const openrindHaloopCredentialMaintenanceSandboxes = new Set();
+const openrindHaloopOperations = new Set();
+let openrindHaloopIntegrationMaintenance = false;
+
+function assertHaloopCredentialNotChanging(sandboxName) {
+  if (
+    openrindHaloopIntegrationMaintenance ||
+    openrindHaloopCredentialMaintenanceSandboxes.has(sandboxName)
+  ) {
+    throw new Error(
+      "The required Haloop route is being rotated or revoked. Relaunch this agent after maintenance completes.",
+    );
+  }
+}
+
+function assertHaloopIntegrationNotResetting() {
+  if (openrindHaloopIntegrationMaintenance) {
+    throw new Error("OpenShell integration reset is in progress.");
+  }
+}
+
+function trackHaloopOperation(operation) {
+  const tracked = Promise.resolve(operation);
+  openrindHaloopOperations.add(tracked);
+  void tracked.then(
+    () => openrindHaloopOperations.delete(tracked),
+    () => openrindHaloopOperations.delete(tracked),
+  );
+  return tracked;
+}
 
 /**
  * Adopt-or-open an Openrind Shell PTY for a (sandbox, session) pair.
@@ -699,13 +725,25 @@ const openrindMarkerPending = new Set();
  *
  * @param {{ sandboxName: string, cols?: number, rows?: number,
  *           extraEnv?: Record<string, string>, agentSessionId: string | null,
- *           profile: string }} opts
+ *           profile: string, haloopCapture?: object,
+ *           haloopContextId?: string, haloopSessionAssertion?: string }} opts
  */
 function openOpenrindShellPtySession(opts) {
-  const { sandboxName, cols, rows, extraEnv, agentSessionId, profile } = opts;
+  const {
+    sandboxName,
+    cols,
+    rows,
+    extraEnv,
+    agentSessionId,
+    profile,
+    haloopCapture,
+    haloopContextId,
+    haloopSessionAssertion,
+  } = opts;
   if (profile !== "openrind-shell-claude" && profile !== "openrind-shell-openclaw") {
     throw new Error("The primary FUSE runtime supports the Claude and OpenClaw profiles only.");
   }
+  assertHaloopCredentialNotChanging(sandboxName);
   // Follow the README contract: Desktop writes one consume-on-read marker and
   // then opens `openshell sandbox connect`. The login hook installed by
   // setup-fuse.sh consumes that marker and replaces the manual shell with the
@@ -724,19 +762,26 @@ function openOpenrindShellPtySession(opts) {
       rows,
       extraEnv,
       agentSessionId,
+      haloopContextId,
     });
   }
   const prev = openrindFreshOpenChains.get(sandboxName) ?? Promise.resolve();
   const next = prev
     .catch(() => {})
     .then(async () => {
+      assertHaloopCredentialNotChanging(sandboxName);
       if (openrindMarkerPending.has(sandboxName)) {
         // Bounded wait — the previous connect's shell deletes the marker on
         // read. On timeout (connect died pre-shell) we proceed and overwrite.
         await openrindShell.waitCurrentSessionMarkerConsumed(sandboxName);
         openrindMarkerPending.delete(sandboxName);
       }
-      await writeOpenrindShellSessionMarker(sandboxName, profile, agentSessionId);
+      await writeOpenrindShellSessionMarker(
+        sandboxName,
+        profile,
+        agentSessionId,
+        haloopSessionAssertion,
+      );
       // Even a desktop launch without a session id writes the `auto` marker, so
       // every fresh connect must wait for this marker to be consumed.
       openrindMarkerPending.add(sandboxName);
@@ -746,6 +791,11 @@ function openOpenrindShellPtySession(opts) {
         rows,
         extraEnv,
         agentSessionId,
+        haloopContextId,
+        onLifecycleExit: (event) =>
+          openrindShell.recordHaloopApplicationSpans(haloopCapture, [
+            openrindShell.buildHaloopAgentLifecycleEvent(profile, event),
+          ]),
       });
     });
   openrindFreshOpenChains.set(sandboxName, next);
@@ -1107,6 +1157,7 @@ let runtimeBootstrapPromise = null;
 async function disposeRuntimeBeforeQuit() {
   if (runtimeDisposedForQuit) return;
   runtimeDisposedForQuit = true;
+  await openrindShell.stopHaloopRuntime().catch(() => undefined);
   await runtimeManager.dispose().catch(() => undefined);
 }
 
@@ -2389,16 +2440,131 @@ async function handleDesktopInvoke(event, command, ...args) {
     }
     case "openrindCredentialStatus":
       return openrindCredentials.getCredentialStatus();
+    case "openrindHaloopStatus":
+      return openrindShell.getHaloopRuntimeStatus();
+    case "openrindHaloopRestart": {
+      assertHaloopIntegrationNotResetting();
+      const anthropicApiKey = await openrindCredentials.getCredential("anthropicApiKey");
+      assertHaloopIntegrationNotResetting();
+      if (!anthropicApiKey) {
+        throw new Error(
+          "ANTHROPIC_API_KEY is required to restart the managed Haloop route.",
+        );
+      }
+      await trackHaloopOperation(
+        openrindShell.restartHaloopRuntime({ anthropicApiKey }),
+      );
+      return openrindShell.getHaloopRuntimeStatus();
+    }
+    case "openrindHaloopRollbackIncumbent": {
+      assertHaloopIntegrationNotResetting();
+      const input = args[0] ?? {};
+      const expectedProfileId = String(input.expectedProfileId ?? "").trim();
+      const expectedSandboxName = String(input.expectedSandboxName ?? "").trim();
+      if (!expectedProfileId || !expectedSandboxName) {
+        throw new Error("The active Haloop route identity is required for incumbent rollback.");
+      }
+      const activeRoute = openrindShell.getHaloopRuntimeActiveRoute();
+      if (
+        !activeRoute ||
+        activeRoute.profileId !== expectedProfileId ||
+        activeRoute.sandboxName !== expectedSandboxName
+      ) {
+        throw new Error(
+          "The active Haloop route changed before incumbent rollback began. Refresh the route status and retry.",
+        );
+      }
+      if (openrindHaloopCredentialMaintenanceSandboxes.has(expectedSandboxName)) {
+        throw new Error("The sandbox already has Haloop credential maintenance in progress.");
+      }
+      openrindHaloopCredentialMaintenanceSandboxes.add(expectedSandboxName);
+      try {
+        const rollback = await trackHaloopOperation(
+          openrindShell.restoreOpenrindShellHaloopIncumbent({
+            expectedProfileId,
+            expectedSandboxName,
+            beforeRollback: async (route) => {
+              // Let a launch that already passed the maintenance gate finish
+              // binding its marker before the shared edge is replaced. Existing
+              // PTYs remain alive because their token and assertion stay valid.
+              await openrindFreshOpenChains.get(route.sandboxName)?.catch(() => undefined);
+            },
+          }),
+        );
+        return {
+          status: await openrindShell.getHaloopRuntimeStatus(),
+          routePolicy: rollback.routePolicy,
+          sessionsPreserved: true,
+        };
+      } finally {
+        openrindHaloopCredentialMaintenanceSandboxes.delete(expectedSandboxName);
+      }
+    }
+    case "openrindHaloopRotateToken": {
+      assertHaloopIntegrationNotResetting();
+      const input = args[0] ?? {};
+      const expectedProfileId = String(input.expectedProfileId ?? "").trim();
+      const expectedSandboxName = String(input.expectedSandboxName ?? "").trim();
+      if (!expectedProfileId || !expectedSandboxName) {
+        throw new Error("The active Haloop route identity is required for token rotation.");
+      }
+      const activeRoute = openrindShell.getHaloopRuntimeActiveRoute();
+      if (
+        !activeRoute ||
+        activeRoute.profileId !== expectedProfileId ||
+        activeRoute.sandboxName !== expectedSandboxName
+      ) {
+        throw new Error(
+          "The active Haloop route changed before token rotation began. Refresh the route status and retry.",
+        );
+      }
+      if (openrindHaloopCredentialMaintenanceSandboxes.has(expectedSandboxName)) {
+        throw new Error("The scoped Haloop token is already being rotated.");
+      }
+      openrindHaloopCredentialMaintenanceSandboxes.add(expectedSandboxName);
+      try {
+        const rotation = await trackHaloopOperation(
+          openrindShell.rotateOpenrindShellHaloop({
+            expectedProfileId,
+            expectedSandboxName,
+            beforeRotate: async (route) => {
+              // A fresh PTY may have passed its route check just before the user
+              // confirmed rotation. Let that bounded open settle, then terminate
+              // every tracked session before withdrawing the old edge token.
+              await openrindFreshOpenChains.get(route.sandboxName)?.catch(() => undefined);
+              openrindMarkerPending.delete(route.sandboxName);
+              return openrindPty.closeSessionsForSandbox(
+                route.sandboxName,
+                "haloop-token-rotation",
+              );
+            },
+          }),
+        );
+        return {
+          status: await openrindShell.getHaloopRuntimeStatus(),
+          affectedSessions: rotation.affectedSessions,
+          relaunchRequired: true,
+        };
+      } finally {
+        openrindHaloopCredentialMaintenanceSandboxes.delete(expectedSandboxName);
+      }
+    }
     case "openrindSetCredential": {
       const input = args[0] ?? {};
       const key = String(input.key ?? "").trim();
       const value = String(input.value ?? "");
       await openrindCredentials.setCredential(key, value);
+      if (key === "anthropicApiKey") {
+        await openrindShell.stopHaloopRuntime();
+      }
       return openrindCredentials.getCredentialStatus();
     }
     case "openrindClearCredential": {
       const key = String(args[0] ?? "").trim();
       await openrindCredentials.clearCredential(key);
+      if (key === "anthropicApiKey") {
+        await openrindShell.stopHaloopRuntime();
+      }
       return openrindCredentials.getCredentialStatus();
     }
     case "voiceTranscribe": {
@@ -2471,21 +2637,25 @@ async function handleDesktopInvoke(event, command, ...args) {
       }
       await assertOpenShellReady();
       const sandboxName = deriveOpenrindShellSandboxName(workspaceId);
+      assertHaloopCredentialNotChanging(sandboxName);
       emitOpenrindShellSessionProgress({
         sandboxName,
         phase: "starting",
         message: "Preparing Openrind Shell sandbox...",
       });
-      const result = await openrindShell.createOpenrindShellSandbox({
-        name: sandboxName,
-        profile,
-        onProgress: (evt) =>
-          emitOpenrindShellSessionProgress({
-            sandboxName,
-            phase: evt.phase,
-            message: evt.message,
-          }),
-      });
+      const result = await trackHaloopOperation(
+        openrindShell.createOpenrindShellSandbox({
+          name: sandboxName,
+          workspaceId,
+          profile,
+          onProgress: (evt) =>
+            emitOpenrindShellSessionProgress({
+              sandboxName,
+              phase: evt.phase,
+              message: evt.message,
+            }),
+        }),
+      );
       emitOpenrindShellSessionProgress({
         sandboxName,
         phase: "launching-terminal",
@@ -2551,27 +2721,35 @@ async function handleDesktopInvoke(event, command, ...args) {
       // confirmation in Phase O8 docs; here we just execute.
       const name = String(args[0] ?? "").trim();
       if (!name) throw new Error("sandboxName is required");
-      // Sessions are concurrent — several PTYs may target this sandbox
-      // (the renderer only closes its own). Kill them all up front so no
-      // orphaned wsl child lingers on a tunnel to a deleted container, and
-      // drop any queued fresh-open bookkeeping for the name.
-      openrindPty.closeSessionsForSandbox(name);
-      openrindFreshOpenChains.delete(name);
-      openrindMarkerPending.delete(name);
+      assertHaloopCredentialNotChanging(name);
+      openrindHaloopCredentialMaintenanceSandboxes.add(name);
       try {
-        await openrindShell.deleteOpenrindShellSandbox(name);
-      } catch (error) {
-        console.warn(
-          "[openrindDeleteSandbox] OpenShell delete reported an error:",
-          error?.message || String(error),
-        );
+        const revocation = await trackHaloopOperation((async () => {
+          const result = await openrindShell.revokeOpenrindShellHaloopForSandbox({
+            sandboxName: name,
+            beforeRevoke: async () => {
+              await openrindFreshOpenChains.get(name)?.catch(() => undefined);
+              openrindFreshOpenChains.delete(name);
+              openrindMarkerPending.delete(name);
+              return openrindPty.closeSessionsForSandbox(name, "sandbox-delete");
+            },
+          });
+          await openrindShell.deleteOpenrindShellSandbox(name);
+          return result;
+        })());
+        emitOpenrindShellSessionProgress({
+          sandboxName: name,
+          phase: "deleted",
+          message: "Sandbox deleted and its scoped Haloop credentials were revoked.",
+        });
+        return {
+          status: "deleted",
+          sandboxName: name,
+          revokedHaloopProfiles: revocation.revokedProfiles,
+        };
+      } finally {
+        openrindHaloopCredentialMaintenanceSandboxes.delete(name);
       }
-      emitOpenrindShellSessionProgress({
-        sandboxName: name,
-        phase: "deleted",
-        message: "Sandbox deleted.",
-      });
-      return { status: "deleted", sandboxName: name };
     }
     case "openrindDeriveSandboxName": {
       const workspaceId = String(args[0] ?? "").trim();
@@ -2599,12 +2777,27 @@ async function handleDesktopInvoke(event, command, ...args) {
       // Optional: absent ⇒ the agent's default conversation (legacy behavior).
       const agentSessionId = String(input.sessionId ?? "").trim() || null;
       const profile = String(input.profile ?? "").trim();
+      const workspaceId = String(input.workspaceId ?? "").trim();
+      if (!workspaceId) throw new Error("workspaceId is required");
+      assertHaloopCredentialNotChanging(sandboxName);
+      const existingHaloopSession = openrindPty.findSessionBySandboxAndAgent(
+        sandboxName,
+        agentSessionId,
+      );
 
-      // Read credentials from safeStorage and forward them into the sandbox
-      // via WSLENV. This is essential so the `openrind-shell` entrypoint can
-      // auto-configure Claude Code's Anthropic provider on first run without
-      // showing an interactive "enter API key" prompt that the user can't
-      // see or respond to (especially when the terminal is still sizing up).
+      const haloop = await trackHaloopOperation(
+        openrindShell.ensureOpenrindShellHaloop({
+          name: sandboxName,
+          workspaceId,
+          profile,
+          issueConversation: true,
+          agentSessionId,
+          haloopContextId: existingHaloopSession?.haloopContextId,
+        }),
+      );
+      assertHaloopCredentialNotChanging(sandboxName);
+      assertHaloopCredentialNotChanging(sandboxName);
+
       const extraEnv = await buildOpenrindShellPtyEnv(cols, rows, profile);
 
       // Adopt-or-open via the per-sandbox serial chain: fresh connects bind
@@ -2617,6 +2810,9 @@ async function handleDesktopInvoke(event, command, ...args) {
         extraEnv,
         agentSessionId,
         profile,
+        haloopCapture: haloop.capture,
+        haloopContextId: haloop.haloopContextId,
+        haloopSessionAssertion: haloop.sessionAssertion,
       });
       return result;
     }
@@ -2634,15 +2830,30 @@ async function handleDesktopInvoke(event, command, ...args) {
       const rows = Number.isFinite(input.rows) ? input.rows : undefined;
       const agentSessionId = String(input.sessionId ?? "").trim() || null;
       const profile = String(input.profile ?? "").trim();
+      const workspaceId = String(input.workspaceId ?? "").trim();
+      if (!workspaceId) throw new Error("workspaceId is required");
+      assertHaloopCredentialNotChanging(sandboxName);
+      const existing = openrindPty.findSessionBySandboxAndAgent(
+        sandboxName,
+        agentSessionId,
+      );
+
+      const haloop = await trackHaloopOperation(
+        openrindShell.ensureOpenrindShellHaloop({
+          name: sandboxName,
+          workspaceId,
+          profile,
+          issueConversation: true,
+          agentSessionId,
+          haloopContextId: existing?.haloopContextId,
+        }),
+      );
+      assertHaloopCredentialNotChanging(sandboxName);
 
       // Sessions are concurrent — look up by (sandbox, session) so another
       // session's live PTY is never grabbed (or disturbed). A different
       // session's work keeps running in the background; this session gets
       // its own PTY via the fresh-open path below when it has none.
-      const existing = openrindPty.findSessionBySandboxAndAgent(
-        sandboxName,
-        agentSessionId,
-      );
       if (existing) {
         // Do NOT call attachHandlers here — the renderer hasn't set
         // sessionIdRef yet, so any pty-data events emitted now would be
@@ -2675,6 +2886,9 @@ async function handleDesktopInvoke(event, command, ...args) {
         extraEnv,
         agentSessionId,
         profile,
+        haloopCapture: haloop.capture,
+        haloopContextId: haloop.haloopContextId,
+        haloopSessionAssertion: haloop.sessionAssertion,
       });
       return { id: result.id, buffered: "", reused: false, exited: false };
     }
@@ -2834,6 +3048,7 @@ async function handleDesktopInvoke(event, command, ...args) {
       });
       const result = await openrindShell.createOpenrindShellSandbox({
         name: sandboxName,
+        workspaceId,
         profile,
         onProgress: (evt) =>
           emitOpenrindShellSessionProgress({
@@ -2860,15 +3075,28 @@ async function handleDesktopInvoke(event, command, ...args) {
         : { sandboxName: args[0], profile: "openrind-shell-claude" };
       const sandboxName = String(input.sandboxName ?? "").trim();
       const profile = String(input.profile ?? "").trim();
+      const workspaceId = String(input.workspaceId ?? "").trim();
       if (!sandboxName) throw new Error("sandboxName is required");
+      if (!workspaceId) throw new Error("workspaceId is required");
       if (!["openrind-shell-claude", "openrind-shell-openclaw"].includes(profile)) {
         throw new Error(`Unsupported Openrind Shell profile: ${profile}`);
       }
+      assertHaloopCredentialNotChanging(sandboxName);
       try {
+        const haloop = await trackHaloopOperation(
+          openrindShell.ensureOpenrindShellHaloop({
+            name: sandboxName,
+            workspaceId,
+            profile,
+            issueConversation: true,
+          }),
+        );
+        assertHaloopCredentialNotChanging(sandboxName);
         await writeOpenrindShellSessionMarker(
           sandboxName,
           profile,
           null,
+          haloop.sessionAssertion,
         );
         const terminal = await launchExternalTerminalToSandbox(sandboxName);
         return terminal;
@@ -2888,7 +3116,9 @@ async function handleDesktopInvoke(event, command, ...args) {
           "This wipes the openrind-desktop-openshell WSL distro and clears installer state.",
         detail:
           "Any data inside the distro (Docker images, OpenShell sandboxes, downloaded packages) " +
-          "is lost. Your Openrind Desktop workspaces on the Windows side are untouched. " +
+          "and locally stored Haloop traces is lost. Running agents are closed, and every scoped " +
+          "Haloop token and endpoint-bound provider is revoked before the reset. Your Openrind " +
+          "Desktop workspaces on the Windows side are untouched. " +
           "The next launch will re-run the setup wizard from scratch.",
         buttons: ["Reset distro", "Cancel"],
         defaultId: 1,
@@ -2897,34 +3127,112 @@ async function handleDesktopInvoke(event, command, ...args) {
       if (choice.response !== 0) {
         return { status: "cancelled" };
       }
-      // Terminate then unregister. --terminate is required first because
-      // --unregister refuses to act on a running distro.
-      try {
-        await wslRun(["-t", OPENSHELL_DISTRO_NAME], { timeout: 15_000 });
-      } catch {
-        // Distro may already be stopped.
+      if (openrindHaloopIntegrationMaintenance) {
+        throw new Error("OpenShell integration reset is already in progress.");
       }
+      openrindHaloopIntegrationMaintenance = true;
       try {
-        await wslRun(["--unregister", OPENSHELL_DISTRO_NAME], {
-          timeout: 30_000,
-        });
-      } catch (err) {
-        throw new Error(
-          `Could not unregister distro: ${err instanceof Error ? err.message : String(err)}`,
+        await Promise.allSettled(Array.from(openrindHaloopOperations));
+        let affectedSessions = 0;
+        const quiesceAgents = async () => {
+          // A launch may have passed the global maintenance gate immediately
+          // before reset began. Let its bounded marker handshake settle, then
+          // close every tracked agent before the public edge is withdrawn.
+          await Promise.allSettled(Array.from(openrindFreshOpenChains.values()));
+          openrindFreshOpenChains.clear();
+          openrindMarkerPending.clear();
+          affectedSessions += openrindPty.closeAllSessions("openshell-reset");
+          return affectedSessions;
+        };
+        const terminateDistro = async () => {
+          const terminated = await wslRun(["-t", OPENSHELL_DISTRO_NAME], {
+            timeout: 15_000,
+          });
+          if (
+            terminated.exitCode !== 0 &&
+            !/not running|not found|does not exist|wsl_e_distro_not_found/i.test(
+              `${terminated.stderr}\n${terminated.stdout}`,
+            )
+          ) {
+            throw new Error(
+              `Could not terminate distro: ${(terminated.stderr || terminated.stdout).trim() || `exit ${terminated.exitCode}`}`,
+            );
+          }
+        };
+
+        let cleanupMode = "managed";
+        let distroTerminated = false;
+        let revocation;
+        try {
+          revocation = await openrindShell.revokeOpenrindShellHaloopIntegration({
+            beforeRevoke: quiesceAgents,
+          });
+        } catch {
+          // Reset is also the recovery path for a corrupt OpenShell runtime. If
+          // online provider/container cleanup cannot run, stop the entire
+          // dedicated distro first so no edge can serve, then erase every host
+          // scoped token. Provider records disappear with unregister below.
+          await quiesceAgents();
+          await terminateDistro();
+          distroTerminated = true;
+          let offlineRevocation;
+          try {
+            offlineRevocation = await openrindCredentials.revokeAllHaloopClientProfiles();
+          } catch (err) {
+            throw new Error(
+              `OpenShell was stopped, but its Haloop client profiles could not be revoked: ${err instanceof Error ? err.message : String(err)}`,
+            );
+          }
+          cleanupMode = "stopped-distro-quarantine";
+          revocation = {
+            revokedProfiles: Array.isArray(offlineRevocation.revoked)
+              ? offlineRevocation.revoked.length
+              : 0,
+            affectedSessions,
+          };
+        }
+
+        // Unregister only after every Haloop client identity is unusable. The
+        // normal path deletes provider records explicitly; corrupt-runtime
+        // recovery stops the distro before erasing host tokens, and unregister
+        // then destroys the inaccessible provider store.
+        if (!distroTerminated) await terminateDistro();
+        try {
+          const unregistered = await wslRun(["--unregister", OPENSHELL_DISTRO_NAME], {
+            timeout: 30_000,
+          });
+          if (unregistered.exitCode !== 0) {
+            throw new Error(
+              (unregistered.stderr || unregistered.stdout).trim() ||
+                `exit ${unregistered.exitCode}`,
+            );
+          }
+        } catch (err) {
+          throw new Error(
+            `Could not unregister distro: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+        // Wipe installer state so the next run re-executes every phase.
+        const stateFile = path.join(
+          os.homedir(),
+          ".openrind-desktop",
+          "openshell-install.json",
         );
+        try {
+          await rm(stateFile, { force: true });
+        } catch {
+          // Best-effort.
+        }
+        return {
+          status: "reset",
+          path: stateFile,
+          revokedHaloopProfiles: revocation.revokedProfiles,
+          affectedSessions: revocation.affectedSessions,
+          cleanupMode,
+        };
+      } finally {
+        openrindHaloopIntegrationMaintenance = false;
       }
-      // Wipe installer state so the next run re-executes every phase.
-      const stateFile = path.join(
-        os.homedir(),
-        ".openrind-desktop",
-        "openshell-install.json",
-      );
-      try {
-        await rm(stateFile, { force: true });
-      } catch {
-        // Best-effort.
-      }
-      return { status: "reset", path: stateFile };
     }
     default:
       throw new Error(
