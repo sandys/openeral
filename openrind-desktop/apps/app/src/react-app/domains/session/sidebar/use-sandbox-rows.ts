@@ -28,6 +28,14 @@ function getBridge(): ElectronBridge | null {
 
 type RawSandboxRow = { name: string; created?: string; phase?: string };
 
+function userFacingDesktopError(error: unknown): string {
+  const raw = error instanceof Error ? error.message : String(error);
+  return raw
+    .replace(/^Error invoking remote method '[^']+':\s*/i, "")
+    .replace(/^Error:\s*/i, "")
+    .trim();
+}
+
 export type SandboxListRow = {
   /** OpenShell sandbox name — the stable identity. */
   name: string;
@@ -187,7 +195,7 @@ export function useSandboxRows(options?: {
         onDeletedRef.current?.(name);
         await refresh();
       } catch (err) {
-        setError(err instanceof Error ? err.message : String(err));
+        setError(userFacingDesktopError(err));
       } finally {
         setBusyName(null);
       }
