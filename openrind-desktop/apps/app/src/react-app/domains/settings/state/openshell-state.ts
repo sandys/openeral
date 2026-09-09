@@ -79,6 +79,7 @@ export type HaloopRuntimeState =
 export type HaloopRuntimeStatus = {
   required: true;
   routePolicy: "incumbent-only";
+  upstreamMode: "anthropic" | "openrouter-test";
   state: HaloopRuntimeState;
   endpoint: string;
   version: string | null;
@@ -114,6 +115,75 @@ export type HaloopIncumbentRollbackResult = {
   status: HaloopRuntimeStatus;
   routePolicy: "incumbent-only";
   sessionsPreserved: true;
+};
+
+export type HaloopAnalysisState =
+  | "unavailable"
+  | "no-traces"
+  | "ready"
+  | "queued"
+  | "running"
+  | "done"
+  | "error";
+
+export type HaloopAnalysisStatus = {
+  state: HaloopAnalysisState;
+  project: string | null;
+  detail: string;
+  stats: {
+    spans: number;
+    errors: number;
+    byObservationKind: Record<string, number>;
+    byModel: Record<
+      string,
+      {
+        count?: number;
+        latency_ms?: { p50?: number; p95?: number; p99?: number; n?: number };
+      }
+    >;
+  } | null;
+  run: {
+    runId: string;
+    status: string;
+    provider: string;
+    model: string;
+    startedAt: number | null;
+    finishedAt: number | null;
+    reportAvailable: boolean;
+    citations: {
+      valid: boolean;
+      traceCitations: number;
+      spanCitations: number;
+      missing: number;
+    } | null;
+    error: string | null;
+  } | null;
+  evalArtifact: HaloopEvalArtifact | null;
+  retention: { days: number; reports: number };
+};
+
+export type HaloopEvalArtifact = {
+  artifactId: string;
+  haloRunId: string;
+  createdAt: number | null;
+  cases: number;
+  byTag: Record<string, number>;
+  sourceProviders: string[];
+  sourceModels: string[];
+  sourceSurfaces: string[];
+  replaySurface: "chat-completions";
+  containsSensitiveContent: true;
+};
+
+export type HaloopAnalysisReport = {
+  runId: string;
+  report: string;
+  citations: {
+    valid: true;
+    traceCitations: number;
+    spanCitations: number;
+    missing: 0;
+  };
 };
 
 export type OpenrindShellSessionProgress = {
@@ -160,6 +230,8 @@ export function useOpenShellState(
   const [policies, setPolicies] = useState<string[]>([]);
   const [credentialStatus, setCredentialStatus] = useState<OpenrindShellCredentialStatus | null>(null);
   const [haloopStatus, setHaloopStatus] = useState<HaloopRuntimeStatus | null>(null);
+  const [haloopAnalysisStatus, setHaloopAnalysisStatus] = useState<HaloopAnalysisStatus | null>(null);
+  const [haloopAnalysisReport, setHaloopAnalysisReport] = useState<HaloopAnalysisReport | null>(null);
   const [sessionProgress, setSessionProgress] = useState<OpenrindShellSessionProgress[]>([]);
   const [actionError, setActionError] = useState<string | null>(null);
   const [actionBusy, setActionBusy] = useState(false);
@@ -232,6 +304,26 @@ export function useOpenShellState(
     }
   }, []);
 
+  const refreshHaloopAnalysisStatus = useCallback(async () => {
+    if (!isElectronRuntime()) return;
+    try {
+      const status = await invoke<HaloopAnalysisStatus>("openrindHaloopAnalysisStatus");
+      if (isMountedRef.current) {
+        setHaloopAnalysisStatus(status);
+        if (
+          haloopAnalysisReport &&
+          (!status.run || status.run.runId !== haloopAnalysisReport.runId)
+        ) {
+          setHaloopAnalysisReport(null);
+        }
+      }
+    } catch (err) {
+      if (isMountedRef.current && actionBusy) {
+        setActionError(err instanceof Error ? err.message : String(err));
+      }
+    }
+  }, [actionBusy, haloopAnalysisReport]);
+
   // Listen for external credential changes (e.g., from gateway billing deep link)
   useEffect(() => {
     const handler = () => {
@@ -296,9 +388,13 @@ export function useOpenShellState(
   useEffect(() => {
     if (!haloopActive || !isElectronRuntime()) return;
     void refreshHaloopStatus();
-    const id = setInterval(() => void refreshHaloopStatus(), DOCTOR_POLL_INTERVAL_MS);
+    void refreshHaloopAnalysisStatus();
+    const id = setInterval(() => {
+      void refreshHaloopStatus();
+      void refreshHaloopAnalysisStatus();
+    }, DOCTOR_POLL_INTERVAL_MS);
     return () => clearInterval(id);
-  }, [haloopActive, refreshHaloopStatus]);
+  }, [haloopActive, refreshHaloopAnalysisStatus, refreshHaloopStatus]);
 
   // Poll doctor + install status on a steady cadence while the user is
   // looking at the sandbox tab. Outside the tab we don't waste cycles.
@@ -418,6 +514,63 @@ export function useOpenShellState(
       if (isMountedRef.current) setActionBusy(false);
     }
   }, [haloopStatus]);
+
+  const startHaloopAnalysis = useCallback(async (): Promise<HaloopAnalysisStatus> => {
+    setActionBusy(true);
+    setActionError(null);
+    setHaloopAnalysisReport(null);
+    try {
+      const status = await invoke<HaloopAnalysisStatus>("openrindHaloopAnalysisStart");
+      if (isMountedRef.current) setHaloopAnalysisStatus(status);
+      return status;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (isMountedRef.current) setActionError(message);
+      throw err;
+    } finally {
+      if (isMountedRef.current) setActionBusy(false);
+    }
+  }, []);
+
+  const loadHaloopAnalysisReport = useCallback(async (): Promise<HaloopAnalysisReport> => {
+    const runId = haloopAnalysisStatus?.run?.runId;
+    if (!runId) throw new Error("No completed HALO analysis report is available.");
+    setActionBusy(true);
+    setActionError(null);
+    try {
+      const report = await invoke<HaloopAnalysisReport>("openrindHaloopAnalysisReport", {
+        runId,
+      });
+      if (isMountedRef.current) setHaloopAnalysisReport(report);
+      return report;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (isMountedRef.current) setActionError(message);
+      throw err;
+    } finally {
+      if (isMountedRef.current) setActionBusy(false);
+    }
+  }, [haloopAnalysisStatus]);
+
+  const generateHaloopEvalCases = useCallback(async (): Promise<HaloopEvalArtifact> => {
+    const runId = haloopAnalysisStatus?.run?.runId;
+    if (!runId) throw new Error("No completed HALO analysis is available for eval generation.");
+    setActionBusy(true);
+    setActionError(null);
+    try {
+      const artifact = await invoke<HaloopEvalArtifact>("openrindHaloopEvalGenerate", {
+        runId,
+      });
+      await refreshHaloopAnalysisStatus();
+      return artifact;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (isMountedRef.current) setActionError(message);
+      throw err;
+    } finally {
+      if (isMountedRef.current) setActionBusy(false);
+    }
+  }, [haloopAnalysisStatus, refreshHaloopAnalysisStatus]);
 
   const openPoliciesFolder = useCallback(async () => {
     setActionError(null);
@@ -559,6 +712,8 @@ export function useOpenShellState(
         setProgressLog([]);
         setSessionProgress([]);
         setHaloopStatus(null);
+        setHaloopAnalysisStatus(null);
+        setHaloopAnalysisReport(null);
       }
     } catch (err) {
       setActionError(err instanceof Error ? err.message : String(err));
@@ -578,6 +733,8 @@ export function useOpenShellState(
     actionError,
     credentialStatus,
     haloopStatus,
+    haloopAnalysisStatus,
+    haloopAnalysisReport,
     sessionProgress,
     startInstall,
     cancelInstall,
@@ -585,6 +742,9 @@ export function useOpenShellState(
     restartHaloop,
     restoreHaloopIncumbent,
     rotateHaloopToken,
+    startHaloopAnalysis,
+    loadHaloopAnalysisReport,
+    generateHaloopEvalCases,
     resetDistro,
     openPoliciesFolder,
     setCredential,
@@ -597,5 +757,6 @@ export function useOpenShellState(
     refreshPolicies,
     refreshCredentialStatus,
     refreshHaloopStatus,
+    refreshHaloopAnalysisStatus,
   };
 }

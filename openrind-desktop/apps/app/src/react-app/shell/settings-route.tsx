@@ -1198,12 +1198,22 @@ export function SettingsRoute() {
         return (
           <HaloopView
             status={openshellState.haloopStatus}
+            analysisStatus={openshellState.haloopAnalysisStatus}
+            analysisReport={openshellState.haloopAnalysisReport}
             busy={openshellState.actionBusy}
             onStatusMessage={setConfigActionStatus}
-            onRefresh={() => openshellState.refreshHaloopStatus()}
+            onRefresh={async () => {
+              await Promise.all([
+                openshellState.refreshHaloopStatus(),
+                openshellState.refreshHaloopAnalysisStatus(),
+              ]);
+            }}
             onRestart={() => openshellState.restartHaloop()}
             onRestoreIncumbent={() => openshellState.restoreHaloopIncumbent()}
             onRotateToken={() => openshellState.rotateHaloopToken()}
+            onStartAnalysis={() => openshellState.startHaloopAnalysis()}
+            onLoadAnalysisReport={() => openshellState.loadHaloopAnalysisReport()}
+            onGenerateEvalCases={() => openshellState.generateHaloopEvalCases()}
           />
         );
       case "billing":
