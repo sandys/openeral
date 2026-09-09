@@ -110,6 +110,86 @@ test("packaged Haloop images are version-pinned as a matched pair", () => {
   });
 });
 
+test("private collector control bridge only permits fixed analysis routes", async () => {
+  let calls = 0;
+  await assert.rejects(
+    __testing.requestPrivateCollector(async () => {
+      calls += 1;
+      return { exitCode: 0, stdout: "", stderr: "" };
+    }, { requestPath: "http://attacker.invalid/halo/runs" }),
+    /request path is invalid/i,
+  );
+  assert.equal(calls, 0);
+  await assert.rejects(
+    __testing.requestPrivateCollector(async () => {
+      calls += 1;
+      return { exitCode: 0, stdout: "", stderr: "" };
+    }, { method: "GET", requestPath: "/evals/extract" }),
+    /request path is invalid/i,
+  );
+  assert.equal(calls, 0);
+
+  let invocation = null;
+  const response = await __testing.requestPrivateCollector(async (args, options) => {
+    invocation = { args, options };
+    return {
+      exitCode: 0,
+      stdout: '{"status":200,"body":{"runs":[]}}',
+      stderr: "",
+    };
+  }, { requestPath: "/halo/runs" });
+  assert.deepEqual(response, { status: 200, body: { runs: [] } });
+  assert.ok(invocation.args.includes(HALOOP_COLLECTOR_CONTAINER_NAME));
+  assert.doesNotMatch(invocation.args.join(" "), /attacker\.invalid/);
+  assert.deepEqual(JSON.parse(invocation.options.stdin), {
+    method: "GET",
+    path: "/halo/runs",
+    body: null,
+  });
+});
+
+test("trace and report validation payloads stay on stdin", async () => {
+  const project = `openrind-${"c".repeat(24)}`;
+  const report = `trace_id ${"1".repeat(32)} span_id ${"2".repeat(16)} secret-marker`;
+  const invocations = [];
+  const run = async (args, options) => {
+    invocations.push({ args, options });
+    const script = args.at(-1);
+    if (script.includes("trace_citations")) {
+      return {
+        exitCode: 0,
+        stdout: '{"valid":true,"trace_citations":1,"span_citations":1,"missing":0}',
+        stderr: "",
+      };
+    }
+    return {
+      exitCode: 0,
+      stdout: '{"valid":true,"spans":2,"reason":null}',
+      stderr: "",
+    };
+  };
+
+  assert.deepEqual(await __testing.validateHaloopTraceProject(run, project), {
+    valid: true,
+    spans: 2,
+    reason: null,
+  });
+  assert.deepEqual(await __testing.validateHaloopReportCitations(run, project, report), {
+    valid: true,
+    traceCitations: 1,
+    spanCitations: 1,
+    missing: 0,
+  });
+  assert.equal(invocations.length, 2);
+  for (const invocation of invocations) {
+    assert.ok(invocation.args.includes(HALOOP_COLLECTOR_CONTAINER_NAME));
+    assert.doesNotMatch(invocation.args.join(" "), new RegExp(project));
+    assert.doesNotMatch(invocation.args.join(" "), /secret-marker/);
+    assert.equal(JSON.parse(invocation.options.stdin).project, project);
+  }
+  assert.equal(JSON.parse(invocations[1].options.stdin).report, report);
+});
+
 test("signed conversation contexts isolate sessions and preserve resumed trace identity", () => {
   const first = issueHaloopConversationContext(scopedProfile, {
     agentSessionId: "desktop-session-a",
@@ -144,6 +224,13 @@ test("managed lifecycle stages profiles through stdin and requires authenticated
   let profileRegistry = [scopedProfile, survivingProfile];
   let revocationActive = false;
   const revocationOrder = [];
+  let analysisRun = null;
+  let traceValidationValid = true;
+  let reportCitationsValid = true;
+  let analysisStarts = 0;
+  let reportPrunes = 0;
+  let evalArtifact = null;
+  let evalExtractions = 0;
   const run = async (args, options = {}) => {
     calls.push({ args, options });
     const command = args.join(" ");
@@ -164,10 +251,14 @@ test("managed lifecycle stages profiles through stdin and requires authenticated
     if (command.includes("bash -lc")) {
       assert.equal(options.user, "root");
       assert.match(options.stdin, /sk-ant-upstream/);
-      assert.match(options.stdin, /halo\.mark/);
-      assert.match(options.stdin, /halo\.export/);
-      assert.match(options.stdin, new RegExp(`http:\\/\\/${HALOOP_COLLECTOR_CONTAINER_NAME}:8788`));
-      assert.doesNotMatch(options.stdin, /orh_v1_scoped-token/);
+      if (options.stdin.startsWith("ANTHROPIC_API_KEY=")) {
+        assert.equal(options.stdin, "ANTHROPIC_API_KEY=sk-ant-upstream\n");
+      } else {
+        assert.match(options.stdin, /halo\.mark/);
+        assert.match(options.stdin, /halo\.export/);
+        assert.match(options.stdin, new RegExp(`http:\\/\\/${HALOOP_COLLECTOR_CONTAINER_NAME}:8788`));
+        assert.doesNotMatch(options.stdin, /orh_v1_scoped-token/);
+      }
       return { exitCode: 0, stdout: "", stderr: "" };
     }
     if (command.includes("docker network inspect")) {
@@ -187,7 +278,7 @@ test("managed lifecycle stages profiles through stdin and requires authenticated
         if (!collector) return { exitCode: 1, stdout: "", stderr: "not found" };
         return {
           exitCode: 0,
-          stdout: "true|healthy||sha256:collector-a|true\n",
+          stdout: `true|healthy||sha256:collector-a|true|${__testing.COLLECTOR_ANALYSIS_CONTRACT}\n`,
           stderr: "",
         };
       }
@@ -200,9 +291,11 @@ test("managed lifecycle stages profiles through stdin and requires authenticated
     }
     if (command.includes("docker run")) {
       if (args.includes(HALOOP_COLLECTOR_IMAGE)) {
+        assert.equal(options.user, "root");
         collector = true;
         return { exitCode: 0, stdout: "collector-id", stderr: "" };
       }
+      assert.equal(options.user, undefined);
       const label = args.find((value) =>
         value.startsWith("com.openrind.desktop.haloop-profile-sha256="),
       );
@@ -282,6 +375,101 @@ test("managed lifecycle stages profiles through stdin and requires authenticated
       }
       return { revoked, profiles: [...profileRegistry], unreadableProfiles: 0 };
     },
+    collectorRequest: async (_run, request) => {
+      if (request.requestPath.startsWith("/stats?project=")) {
+        return {
+          status: 200,
+          body: {
+            spans: 6,
+            errors: 1,
+            by_observation_kind: { AGENT: 1, LLM: 3, TOOL: 2 },
+            by_model: { "claude-sonnet": { count: 3 } },
+          },
+        };
+      }
+      if (request.requestPath === "/halo/runs") {
+        return { status: 200, body: { runs: analysisRun ? [analysisRun] : [] } };
+      }
+      if (request.requestPath === "/halo/analyze") {
+        analysisStarts += 1;
+        assert.equal(request.method, "POST");
+        assert.equal(request.body.project, buildHaloopCaptureIdentity(scopedProfile, CONTEXT_ID).project);
+        assert.equal(Object.hasOwn(request.body, "api_key"), false);
+        assert.equal(Object.hasOwn(request.body, "base_url"), false);
+        assert.equal(Object.hasOwn(request.body, "model"), false);
+        analysisRun = {
+          run_id: "a".repeat(12),
+          status: "created",
+          provider: "anthropic",
+          model: "claude-haiku-4-5",
+          project: request.body.project,
+          started_at: 1_900_000_000,
+          finished_at: null,
+          report_available: false,
+          error: null,
+        };
+        return {
+          status: 202,
+          body: {
+            run_id: analysisRun.run_id,
+            project: analysisRun.project,
+            provider: analysisRun.provider,
+            model: analysisRun.model,
+          },
+        };
+      }
+      if (request.requestPath.startsWith("/evals/artifacts?project=")) {
+        return { status: 200, body: { artifacts: evalArtifact ? [evalArtifact] : [] } };
+      }
+      if (request.requestPath === "/evals/extract") {
+        evalExtractions += 1;
+        assert.equal(request.method, "POST");
+        assert.equal(request.body.project, buildHaloopCaptureIdentity(scopedProfile, CONTEXT_ID).project);
+        assert.equal(request.body.run_id, "a".repeat(12));
+        assert.deepEqual(Object.keys(request.body).sort(), ["project", "run_id"]);
+        evalArtifact = {
+          artifact_id: `eval-cases-${"a".repeat(12)}.jsonl`,
+          project: request.body.project,
+          halo_run_id: request.body.run_id,
+          created_at: 1_900_000_200,
+          cases: 4,
+          by_tag: { "halo-cited": 2, golden: 2 },
+          source_providers: ["anthropic"],
+          source_models: ["claude-sonnet"],
+          source_surfaces: ["anthropic-messages"],
+          replay_surface: "chat-completions",
+          contains_sensitive_content: true,
+        };
+        return { status: 201, body: evalArtifact };
+      }
+      if (request.requestPath === `/halo/runs/${"a".repeat(12)}?report=true`) {
+        return {
+          status: 200,
+          body: {
+            ...analysisRun,
+            report: `# HALO analysis\n\ntrace_id ${"1".repeat(32)} span_id ${"2".repeat(16)}`,
+          },
+        };
+      }
+      throw new Error(`unexpected collector request ${request.requestPath}`);
+    },
+    validateTraceProject: async () => ({
+      valid: traceValidationValid,
+      spans: traceValidationValid ? 6 : 0,
+      reason: traceValidationValid ? null : "invalid",
+    }),
+    validateReportCitations: async (_run, _project, report) => {
+      assert.match(report, /trace_id/);
+      return {
+        valid: reportCitationsValid,
+        traceCitations: 1,
+        spanCitations: 1,
+        missing: reportCitationsValid ? 0 : 1,
+      };
+    },
+    pruneReports: async () => {
+      reportPrunes += 1;
+    },
   });
 
   const result = await manager.ensure({
@@ -314,6 +502,9 @@ test("managed lifecycle stages profiles through stdin and requires authenticated
   assert.match(commandText, new RegExp(`--network ${HALOOP_NETWORK_NAME}`));
   assert.match(commandText, /W8_KEEP_RAW=0/);
   assert.match(commandText, /collector-data/);
+  assert.match(commandText, /analysis\.env/);
+  assert.match(commandText, /W8_REPORTS_DIR/);
+  assert.match(commandText, /haloop-analysis-contract/);
   assert.match(commandText, /W8_OPENRIND_PROFILES_FILE/);
   assert.deepEqual(progress.at(-1), {
     phase: "haloop",
@@ -346,6 +537,49 @@ test("managed lifecycle stages profiles through stdin and requires authenticated
   });
   assert.equal(status.lastConnectionError, null);
   assert.doesNotMatch(JSON.stringify(status), /sk-ant-upstream|orh_v1_scoped-token/);
+
+  const analysisReady = await manager.analysisStatus();
+  assert.equal(analysisReady.state, "ready");
+  assert.equal(analysisReady.stats.spans, 6);
+  assert.equal(analysisReady.stats.byObservationKind.LLM, 3);
+  assert.equal(analysisReady.run, null);
+
+  const analysisQueued = await manager.startAnalysis();
+  assert.equal(analysisQueued.state, "queued");
+  assert.equal(analysisStarts, 1);
+  assert.equal(reportPrunes, 1);
+  analysisRun = {
+    ...analysisRun,
+    status: "done",
+    finished_at: 1_900_000_100,
+    report_available: true,
+  };
+  const analysisDone = await manager.analysisStatus();
+  assert.equal(analysisDone.state, "done");
+  assert.deepEqual(analysisDone.run.citations, {
+    valid: true,
+    traceCitations: 1,
+    spanCitations: 1,
+    missing: 0,
+  });
+  reportCitationsValid = false;
+  await assert.rejects(
+    manager.loadAnalysisReport("a".repeat(12)),
+    /cited trace evidence outside the active project/i,
+  );
+  reportCitationsValid = true;
+  const report = await manager.loadAnalysisReport("a".repeat(12));
+  assert.match(report.report, /HALO analysis/);
+  const generatedEval = await manager.generateEvalCases("a".repeat(12));
+  assert.equal(generatedEval.cases, 4);
+  assert.equal(generatedEval.replaySurface, "chat-completions");
+  assert.deepEqual(generatedEval.sourceProviders, ["anthropic"]);
+  assert.equal(evalExtractions, 1);
+  const analysisWithEval = await manager.analysisStatus();
+  assert.deepEqual(analysisWithEval.evalArtifact, generatedEval);
+  traceValidationValid = false;
+  await assert.rejects(manager.startAnalysis(), /failed contract validation/i);
+  assert.equal(analysisStarts, 1);
 
   collector = null;
   const degradedStatus = await manager.status();
@@ -711,6 +945,8 @@ test("shutdown is a no-op when this Desktop process never started Haloop", async
   });
   await manager.stop();
   assert.equal(calls, 0);
+  assert.equal((await manager.analysisStatus()).state, "unavailable");
+  await assert.rejects(manager.startAnalysis(), /no active trace project/i);
   await assert.rejects(
     manager.restart({ anthropicApiKey: "sk-ant-upstream" }),
     /no active Desktop route to restart/,
@@ -831,6 +1067,7 @@ test("container inspection recognizes a managed container that never reached hea
     profileHash: "profile-a",
     imageId: "sha256:image-a",
     managed: true,
+    analysisContract: null,
   });
 });
 
@@ -862,7 +1099,7 @@ test("managed lifecycle reports a fixed-port conflict without choosing another e
       if (args.includes(HALOOP_COLLECTOR_CONTAINER_NAME) && collectorRunning) {
         return {
           exitCode: 0,
-          stdout: "true|healthy||sha256:collector-a|true\n",
+          stdout: `true|healthy||sha256:collector-a|true|${__testing.COLLECTOR_ANALYSIS_CONTRACT}\n`,
           stderr: "",
         };
       }
@@ -940,7 +1177,7 @@ test("managed lifecycle blocks launch when the gateway cannot reach the collecto
         return collectorRunning
           ? {
               exitCode: 0,
-              stdout: "true|healthy||sha256:collector-a|true\n",
+              stdout: `true|healthy||sha256:collector-a|true|${__testing.COLLECTOR_ANALYSIS_CONTRACT}\n`,
               stderr: "",
             }
           : { exitCode: 1, stdout: "", stderr: "not found" };
@@ -1038,7 +1275,7 @@ test("a failed new launch does not interrupt an already-running Haloop route", a
       return args.includes(HALOOP_COLLECTOR_CONTAINER_NAME)
         ? {
             exitCode: 0,
-            stdout: "true|healthy||sha256:collector-a|true\n",
+            stdout: `true|healthy||sha256:collector-a|true|${__testing.COLLECTOR_ANALYSIS_CONTRACT}\n`,
             stderr: "",
           }
         : {

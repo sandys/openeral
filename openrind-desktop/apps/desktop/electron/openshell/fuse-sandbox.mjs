@@ -3,6 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { getCredential } from "./openrind-shell-credentials.mjs";
 import {
   ensureHaloopRuntime,
+  resolveHaloopUpstreamApiKey,
   restoreHaloopIncumbentRoute,
   revokeHaloopIntegration,
   revokeHaloopSandboxProfiles,
@@ -19,7 +20,7 @@ import {
 } from "./fuse-runtime.mjs";
 import { DISTRO_NAME, ensureWslKeepalive, wslRun, wslSpawn } from "./wsl.mjs";
 
-const IMAGE_CONTRACT = "fuse-haloop-required-v26";
+const IMAGE_CONTRACT = "fuse-haloop-required-v27";
 const SESSION_MARKER = "/var/lib/openrind-shell/runtime/desktop-session";
 const CLAUDE_HOME_MOUNT = "/sandbox/claude-home";
 const CLAUDE_HOME_VOLUME_PREFIX = "openrind-claude-home-";
@@ -28,6 +29,16 @@ const OPENCLAW_HOME_VOLUME_PREFIX = "openrind-openclaw-home-";
 const CLAUDE_SESSION_NAMESPACE = "6f9b1e2a-0c3d-4b7a-9e21-8a4c1d5f7b30";
 const MAX_CAPTURE_BYTES = 2 * 1024 * 1024;
 const sandboxProvisioning = createSandboxProvisioningCoordinator();
+
+async function requiredHaloopUpstreamApiKey() {
+  const anthropicApiKey = await getCredential("anthropicApiKey");
+  return resolveHaloopUpstreamApiKey(anthropicApiKey);
+}
+
+async function optionalHaloopUpstreamApiKey() {
+  const anthropicApiKey = await getCredential("anthropicApiKey");
+  return resolveHaloopUpstreamApiKey(anthropicApiKey, { optional: true });
+}
 
 const AGENTS = {
   "openrind-shell-claude": {
@@ -163,6 +174,34 @@ async function ensureHaloopProvider(providerName, clientToken, onProgress) {
   return { replaced };
 }
 
+async function detachHaloopProvidersFromSandbox(sandboxName, providerNames, onProgress) {
+  if (!/^[a-z0-9][a-z0-9_.-]{0,127}$/.test(sandboxName)) {
+    throw new Error("Haloop revocation produced an invalid sandbox identity.");
+  }
+  for (const providerName of new Set(providerNames)) {
+    if (!/^haloop-[0-9a-f]{16}$/.test(providerName)) {
+      throw new Error("Haloop revocation produced an invalid OpenShell provider identity.");
+    }
+    onProgress?.({
+      phase: "provider",
+      message: `Detaching revoked Haloop provider ${providerName}…`,
+    });
+    const detached = await runFuseOpenShell(
+      ["sandbox", "provider", "detach", sandboxName, providerName],
+      { ensure: false, timeout: 20_000 },
+    );
+    const detail = (detached.stderr || detached.stdout).trim();
+    if (
+      detached.exitCode !== 0 &&
+      !/sandbox.*(?:not found|does not exist|unknown)|provider.*not attached/i.test(detail)
+    ) {
+      throw new Error(
+        `OpenShell could not detach the revoked Haloop provider from the sandbox: ${detail || `exit ${detached.exitCode}`}`,
+      );
+    }
+  }
+}
+
 async function deleteHaloopProviders(providerNames, onProgress) {
   for (const providerName of new Set(providerNames)) {
     if (!/^haloop-[0-9a-f]{16}$/.test(providerName)) {
@@ -194,10 +233,7 @@ async function prepareRequiredHaloop({
   agentSessionId = null,
   haloopContextId,
 }) {
-  const anthropicApiKey = await getCredential("anthropicApiKey");
-  if (!anthropicApiKey) {
-    throw new Error("ANTHROPIC_API_KEY is required by Haloop. Configure it in Settings > Environment.");
-  }
+  const anthropicApiKey = await requiredHaloopUpstreamApiKey();
   const runtime = await ensureHaloopRuntime({
     anthropicApiKey,
     sandboxName: name,
@@ -243,10 +279,7 @@ export async function ensureOpenrindShellHaloop(options = {}) {
  */
 export async function rotateOpenrindShellHaloop(options = {}) {
   await ensureFuseRuntime({ onProgress: options.onProgress });
-  const anthropicApiKey = await getCredential("anthropicApiKey");
-  if (!anthropicApiKey) {
-    throw new Error("ANTHROPIC_API_KEY is required by Haloop. Configure it in Settings > Environment.");
-  }
+  const anthropicApiKey = await requiredHaloopUpstreamApiKey();
   const runtime = await rotateHaloopRuntime({
     anthropicApiKey,
     expectedProfileId: String(options.expectedProfileId ?? "").trim(),
@@ -271,10 +304,7 @@ export async function rotateOpenrindShellHaloop(options = {}) {
  */
 export async function restoreOpenrindShellHaloopIncumbent(options = {}) {
   await ensureFuseRuntime({ onProgress: options.onProgress });
-  const anthropicApiKey = await getCredential("anthropicApiKey");
-  if (!anthropicApiKey) {
-    throw new Error("ANTHROPIC_API_KEY is required by Haloop. Configure it in Settings > Environment.");
-  }
+  const anthropicApiKey = await requiredHaloopUpstreamApiKey();
   const runtime = await restoreHaloopIncumbentRoute({
     anthropicApiKey,
     expectedProfileId: String(options.expectedProfileId ?? "").trim(),
@@ -294,19 +324,28 @@ export async function restoreOpenrindShellHaloopIncumbent(options = {}) {
 
 /**
  * Withdraw every scoped credential for a deleted sandbox. The gateway is down
- * before endpoint-bound OpenShell provider credentials and encrypted Desktop
- * records are removed; surviving profiles are then restored through Haloop.
+ * before endpoint-bound OpenShell providers are detached and removed, then the
+ * encrypted Desktop records are erased; surviving profiles are restored
+ * through Haloop.
  */
 export async function revokeOpenrindShellHaloopForSandbox(options = {}) {
   const sandboxName = String(options.sandboxName ?? "").trim().toLowerCase();
   if (!sandboxName) throw new Error("A sandbox name is required for Haloop revocation.");
   await ensureFuseRuntime({ onProgress: options.onProgress });
-  const anthropicApiKey = await getCredential("anthropicApiKey");
+  const anthropicApiKey = await optionalHaloopUpstreamApiKey();
   return revokeHaloopSandboxProfiles({
     sandboxName,
     anthropicApiKey,
     beforeRevoke: options.beforeRevoke,
-    beforeCredentialsRemoved: async ({ providerNames }) => {
+    beforeCredentialsRemoved: async ({ sandboxName: revokedSandboxName, providerNames }) => {
+      // OpenShell intentionally refuses to delete an attached provider. The
+      // edge is already down when this callback runs, so detach first; a
+      // partially completed retry remains fail-closed and can safely resume.
+      await detachHaloopProvidersFromSandbox(
+        revokedSandboxName,
+        providerNames,
+        options.onProgress,
+      );
       await deleteHaloopProviders(providerNames, options.onProgress);
     },
     onProgress: options.onProgress,

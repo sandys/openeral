@@ -35,14 +35,19 @@ export {
 } from "./fuse-management.mjs";
 export {
   buildHaloopAgentLifecycleEvent,
+  generateHaloopEvalCases,
+  getHaloopAnalysisStatus,
   getHaloopRuntimeActiveRoute,
   getHaloopRuntimeStatus,
+  loadHaloopAnalysisReport,
   recordHaloopApplicationSpans,
+  resolveHaloopUpstreamApiKey,
   restartHaloopRuntime,
   restoreHaloopIncumbentRoute,
   revokeHaloopIntegration,
   revokeHaloopSandboxProfiles,
   rotateHaloopRuntime,
+  startHaloopAnalysis,
   stopHaloopRuntime,
 } from "./haloop-runtime.mjs";
 export { shellQuote };

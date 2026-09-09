@@ -1,9 +1,9 @@
 // Desktop-owned lifecycle for the required Openrind Haloop inference edge.
 //
-// The upstream Anthropic key is written only to a mode-0600 registry in the
-// dedicated OpenShell WSL distro and mounted read-only into the managed Haloop
-// container. Sandboxes receive a scoped client token through OpenShell's
-// endpoint-bound provider; they never receive the upstream credential.
+// The upstream provider key is written only to mode-0600 files in the dedicated
+// OpenShell WSL distro and mounted into the managed Haloop services. Sandboxes
+// receive a scoped client token through OpenShell's endpoint-bound provider;
+// they never receive the upstream credential.
 
 import { createHash, createHmac, randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
@@ -27,11 +27,16 @@ export const HALOOP_NETWORK_NAME = "openrind-desktop-haloop";
 export const HALOOP_EDGE_PORT = 8787;
 export const HALOOP_SANDBOX_ENDPOINT = `http://host.openshell.internal:${HALOOP_EDGE_PORT}`;
 export const HALOOP_ROUTE_POLICY = "incumbent-only";
+export const HALOOP_TEMPORARY_OPENROUTER_TEST_ENV =
+  "OPENRIND_DESKTOP_HALOOP_TEST_OPENROUTER";
+export const HALOOP_TEMPORARY_OPENROUTER_MODEL = "openrouter/free";
+
+const HALOOP_TEMPORARY_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1";
 
 const MODULE_DIR = path.dirname(fileURLToPath(import.meta.url));
 const REPOSITORY_ROOT = path.resolve(MODULE_DIR, "../../../../../");
 const SOURCE_CHECKOUT = existsSync(path.join(REPOSITORY_ROOT, "Dockerfile.openrind-shell"));
-export const HALOOP_IMAGE_VERSION = "w8-haloop-openrind-v3-managed-collector";
+export const HALOOP_IMAGE_VERSION = "w8-haloop-openrind-v4-eval-export";
 export const HALOOP_PACKAGED_IMAGE =
   `ghcr.io/openrind/openrind-shell/haloop-gateway:${HALOOP_IMAGE_VERSION}`;
 export const HALOOP_PACKAGED_COLLECTOR_IMAGE =
@@ -60,7 +65,10 @@ export const HALOOP_IMAGE_PULL_POLICY = HALOOP_IMAGE_CONFIG.pullPolicy;
 
 const HALOOP_STATE_DIR = "/var/lib/openrind-desktop/haloop";
 const HALOOP_COLLECTOR_DATA_DIR = `${HALOOP_STATE_DIR}/collector-data`;
+const HALOOP_REPORTS_DIR = `${HALOOP_STATE_DIR}/reports`;
+const HALOOP_ANALYSIS_ENV_FILE = `${HALOOP_STATE_DIR}/analysis.env`;
 const HALOOP_COLLECTOR_CONTAINER_DATA_DIR = "/app/halo-loop/data";
+const HALOOP_COLLECTOR_CONTAINER_REPORTS_DIR = "/app/halo-loop/reports";
 const HALOOP_COLLECTOR_URL = `http://${HALOOP_COLLECTOR_CONTAINER_NAME}:8788`;
 const HALOOP_PROFILES_FILE = `${HALOOP_STATE_DIR}/openrind-profiles.json`;
 const HALOOP_CONTAINER_PROFILES_FILE = "/run/openrind/openrind-profiles.json";
@@ -68,6 +76,10 @@ const OPENSHELL_SANDBOX_NETWORK_NAME = "openshell-docker";
 const PROFILE_HASH_LABEL = "com.openrind.desktop.haloop-profile-sha256";
 const MANAGED_LABEL = "com.openrind.desktop.managed-haloop";
 const MANAGED_NETWORK_LABEL = "com.openrind.desktop.managed-haloop-network";
+const COLLECTOR_ANALYSIS_LABEL = "com.openrind.desktop.haloop-analysis-contract";
+const COLLECTOR_ANALYSIS_CONTRACT = "openrind-halo-analysis-v2";
+const COLLECTOR_ANALYSIS_CONFIG_HASH_LABEL =
+  "com.openrind.desktop.haloop-analysis-config-sha256";
 const STARTUP_TIMEOUT_MS = 60_000;
 const SHUTDOWN_TIMEOUT_SECONDS = 45;
 const IMAGE_VERSION_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
@@ -78,8 +90,16 @@ const MAX_APP_SPANS_PER_BATCH = 64;
 const MAX_APP_SPAN_BYTES = 64 * 1024;
 const MAX_APP_BATCH_BYTES = 256 * 1024;
 const MAX_APP_CAPTURE_BYTES_PER_TRACE = 4 * 1024 * 1024;
+const MAX_COLLECTOR_RESPONSE_BYTES = 1024 * 1024;
+const MAX_HALOOP_REPORT_BYTES = 512 * 1024;
+const HALOOP_REPORT_RETENTION_DAYS = 30;
+const HALOOP_REPORT_RETENTION_COUNT = 20;
 const HALOOP_SESSION_ASSERTION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const HALOOP_CONTEXT_ID_PATTERN = /^[0-9a-f]{32}$/;
+const HALOOP_RUN_ID_PATTERN = /^[0-9a-f]{12}$/;
+const HALOOP_EVAL_ARTIFACT_PATTERN = /^eval-cases-[0-9a-f]{12}\.jsonl$/;
+const HALOOP_ANALYSIS_PROMPT =
+  "Diagnose recurring tool-use failures, invalid tool arguments, refusal loops, empty outputs, and wasted retries in these Openrind agent traces. Compare only models actually present in the trace data. Cite the exact trace_id and span_id for every finding, and treat citations as evidence rather than automatic failure labels.";
 
 function requiredSecret(value, label) {
   const normalized = String(value ?? "").trim();
@@ -87,6 +107,39 @@ function requiredSecret(value, label) {
     throw new Error(`${label} is required for Haloop.`);
   }
   return normalized;
+}
+
+export function isTemporaryOpenRouterHaloopTestEnabled(env = process.env) {
+  return String(env?.[HALOOP_TEMPORARY_OPENROUTER_TEST_ENV] ?? "").trim() === "1";
+}
+
+function resolveHaloopUpstream(anthropicApiKey, env = process.env, { optional = false } = {}) {
+  const openrouterTest = isTemporaryOpenRouterHaloopTestEnabled(env);
+  const label = openrouterTest ? "OPENROUTER_API_KEY" : "ANTHROPIC_API_KEY";
+  const candidate = openrouterTest ? env?.OPENROUTER_API_KEY : anthropicApiKey;
+  const normalized = String(candidate ?? "").trim();
+  if (optional && !normalized) {
+    return { apiKey: "", mode: openrouterTest ? "openrouter-test" : "anthropic" };
+  }
+  const apiKey = requiredSecret(normalized, label);
+  return {
+    apiKey,
+    mode: openrouterTest ? "openrouter-test" : "anthropic",
+  };
+}
+
+export function resolveHaloopUpstreamApiKey(
+  anthropicApiKey,
+  { env = process.env, optional = false } = {},
+) {
+  return resolveHaloopUpstream(anthropicApiKey, env, { optional }).apiKey;
+}
+
+function buildHaloopAnalysisEnvironment(upstream) {
+  if (upstream.mode === "openrouter-test") {
+    return `OPENROUTER_API_KEY=${upstream.apiKey}\nHALO_MODEL=${HALOOP_TEMPORARY_OPENROUTER_MODEL}\n`;
+  }
+  return `ANTHROPIC_API_KEY=${upstream.apiKey}\n`;
 }
 
 function safeDiagnosticMessage(error) {
@@ -98,6 +151,10 @@ function stableHex(label, ...values) {
   const hash = createHash("sha256").update(label);
   for (const value of values) hash.update("\0").update(String(value));
   return hash.digest("hex");
+}
+
+export function haloopProjectForWorkspace(workspaceId) {
+  return `openrind-${stableHex("project", requiredSecret(workspaceId, "Openrind workspace id")).slice(0, 24)}`;
 }
 
 function deriveHaloopSessionHmacKey(profile) {
@@ -112,7 +169,7 @@ export function buildHaloopCaptureIdentity(profile, contextId) {
   if (!HALOOP_CONTEXT_ID_PATTERN.test(canonicalContextId)) {
     throw new Error("A canonical Haloop conversation context id is required.");
   }
-  const project = `openrind-${stableHex("project", profile.workspaceId).slice(0, 24)}`;
+  const project = haloopProjectForWorkspace(profile.workspaceId);
   return {
     profileId: requiredSecret(profile.id, "Haloop profile id"),
     project,
@@ -168,15 +225,19 @@ export function issueHaloopConversationContext(profile, options = {}) {
   };
 }
 
-export function buildHaloopProfilesDocument(profiles, anthropicApiKey) {
-  const upstreamKey = requiredSecret(anthropicApiKey, "ANTHROPIC_API_KEY");
+export function buildHaloopProfilesDocument(
+  profiles,
+  anthropicApiKey,
+  { env = process.env } = {},
+) {
+  const upstream = resolveHaloopUpstream(anthropicApiKey, env);
   if (!Array.isArray(profiles) || profiles.length === 0) {
     throw new Error("At least one scoped Haloop client profile is required.");
   }
   return {
     version: 1,
     profiles: profiles.map((profile) => {
-      const project = `openrind-${stableHex("project", profile.workspaceId).slice(0, 24)}`;
+      const project = haloopProjectForWorkspace(profile.workspaceId);
       return {
         id: profile.id,
         client_token_sha256: createHash("sha256")
@@ -184,7 +245,15 @@ export function buildHaloopProfilesDocument(profiles, anthropicApiKey) {
           .digest("hex"),
         config: {
           provider: "anthropic",
-          api_key: upstreamKey,
+          api_key: upstream.apiKey,
+          // TEMPORARY OPENROUTER TEST WORKAROUND: remove these two fields and
+          // the matching env-gated resolver after the live integration proof.
+          ...(upstream.mode === "openrouter-test"
+            ? {
+                custom_host: HALOOP_TEMPORARY_OPENROUTER_BASE_URL,
+                override_params: { model: HALOOP_TEMPORARY_OPENROUTER_MODEL },
+              }
+            : {}),
           input_guardrails: [
             {
               "halo.mark": { collectorURL: HALOOP_COLLECTOR_URL },
@@ -390,6 +459,219 @@ async function postPrivateCollectorSpans(run, spans) {
   };
 }
 
+async function requestPrivateCollector(run, { method = "GET", requestPath, body = null }) {
+  const normalizedMethod = String(method).toUpperCase();
+  if (!new Set(["GET", "POST"]).has(normalizedMethod)) {
+    throw new Error("The private Haloop collector request method is invalid.");
+  }
+  const allowedRequest =
+    (normalizedMethod === "GET" &&
+      /^\/(?:stats\?project=openrind-[0-9a-f]{24}|halo\/runs(?:\/[0-9a-f]{12}(?:\?report=true)?)?|evals\/artifacts\?project=openrind-[0-9a-f]{24})$/.test(
+        requestPath,
+      )) ||
+    (normalizedMethod === "POST" &&
+      /^\/(?:halo\/analyze|evals\/extract)$/.test(requestPath));
+  if (!allowedRequest) {
+    throw new Error("The private Haloop collector request path is invalid.");
+  }
+  const requestScript = [
+    "import json,sys,urllib.error,urllib.request",
+    `limit=${MAX_COLLECTOR_RESPONSE_BYTES}`,
+    "request=json.load(sys.stdin)",
+    "payload=None if request['body'] is None else json.dumps(request['body'],separators=(',',':')).encode('utf-8')",
+    "headers={'content-type':'application/json'} if payload is not None else {}",
+    "query=urllib.request.Request('http://127.0.0.1:8788'+request['path'],data=payload,headers=headers,method=request['method'])",
+    "try:\n response=urllib.request.urlopen(query,timeout=15)\nexcept urllib.error.HTTPError as error:\n response=error",
+    "raw=response.read(limit+1)",
+    "assert len(raw)<=limit,'collector response too large'",
+    "decoded=json.loads(raw.decode('utf-8'))",
+    "sys.stdout.write(json.dumps({'status':response.status,'body':decoded},separators=(',',':'))) ",
+  ].join("\n");
+  const result = await run(
+    dockerArgs(
+      "exec",
+      "-i",
+      HALOOP_COLLECTOR_CONTAINER_NAME,
+      "python",
+      "-c",
+      requestScript,
+    ),
+    {
+      stdin: JSON.stringify({ method: normalizedMethod, path: requestPath, body }),
+      timeout: normalizedMethod === "POST" ? 30_000 : 20_000,
+    },
+  );
+  if (result.exitCode !== 0) {
+    throw new Error(
+      `The private Haloop collector request failed: ${(result.stderr || result.stdout).trim() || `exit ${result.exitCode}`}`,
+    );
+  }
+  try {
+    const response = JSON.parse(result.stdout);
+    if (!Number.isInteger(response.status) || !response.body || typeof response.body !== "object") {
+      throw new Error("invalid response envelope");
+    }
+    return response;
+  } catch {
+    throw new Error("The private Haloop collector returned an invalid control response.");
+  }
+}
+
+async function validateHaloopTraceProject(run, project) {
+  if (!/^openrind-[0-9a-f]{24}$/.test(project)) {
+    throw new Error("The active Haloop trace project is invalid.");
+  }
+  const validationScript = [
+    "import contextlib,io,json,os,sys",
+    "from services.collector.store import TraceStore",
+    "from services.collector.trace_validation import verify",
+    "project=json.load(sys.stdin)['project']",
+    "path=TraceStore(os.environ['W8_DATA_DIR']).trace_path(project)",
+    "result={'valid':False,'spans':0,'reason':'missing'}",
+    "if path.is_file() and not path.is_symlink():\n try:\n  with contextlib.redirect_stdout(io.StringIO()): count=verify(str(path))\n  result={'valid':count>0,'spans':count,'reason':None if count>0 else 'empty'}\n except (AssertionError,ValueError,KeyError,json.JSONDecodeError):\n  result={'valid':False,'spans':0,'reason':'invalid'}",
+    "sys.stdout.write(json.dumps(result,separators=(',',':')))",
+  ].join("\n");
+  const result = await run(
+    dockerArgs(
+      "exec",
+      "-i",
+      HALOOP_COLLECTOR_CONTAINER_NAME,
+      "python",
+      "-c",
+      validationScript,
+    ),
+    { stdin: JSON.stringify({ project }), timeout: 30_000 },
+  );
+  if (result.exitCode !== 0) {
+    throw new Error(
+      `Haloop trace validation could not run: ${(result.stderr || result.stdout).trim() || `exit ${result.exitCode}`}`,
+    );
+  }
+  try {
+    const validation = JSON.parse(result.stdout);
+    return {
+      valid: validation.valid === true,
+      spans: Number(validation.spans) || 0,
+      reason: typeof validation.reason === "string" ? validation.reason : null,
+    };
+  } catch {
+    throw new Error("Haloop trace validation returned an invalid result.");
+  }
+}
+
+async function validateHaloopReportCitations(run, project, report) {
+  if (!/^openrind-[0-9a-f]{24}$/.test(project)) {
+    throw new Error("The active Haloop trace project is invalid.");
+  }
+  if (typeof report !== "string" || Buffer.byteLength(report, "utf8") > MAX_HALOOP_REPORT_BYTES) {
+    throw new Error("The HALO report exceeds the safe Desktop display limit.");
+  }
+  const validationScript = [
+    "import json,os,re,sys",
+    "from services.collector.store import TraceStore",
+    "request=json.load(sys.stdin)",
+    "path=TraceStore(os.environ['W8_DATA_DIR']).trace_path(request['project'])",
+    "allowed_traces=set(); allowed_spans=set()",
+    "with path.open('rt',encoding='utf-8') as handle:\n for raw in handle:\n  if raw.strip():\n   span=json.loads(raw)\n   allowed_traces.add(str(span.get('trace_id') or '').lower())\n   allowed_spans.add(str(span.get('span_id') or '').lower())",
+    "cited_traces={value.lower() for value in re.findall(r'(?i)\\btrace[_ -]?id\\b[^0-9a-f]{0,16}([0-9a-f]{32})\\b',request['report'])}",
+    "cited_spans={value.lower() for value in re.findall(r'(?i)\\bspan[_ -]?id\\b[^0-9a-f]{0,16}([0-9a-f]{16})\\b',request['report'])}",
+    "missing_traces=cited_traces-allowed_traces; missing_spans=cited_spans-allowed_spans",
+    "result={'valid':bool(cited_traces) and not missing_traces and not missing_spans,'trace_citations':len(cited_traces),'span_citations':len(cited_spans),'missing':len(missing_traces)+len(missing_spans)}",
+    "sys.stdout.write(json.dumps(result,separators=(',',':')))",
+  ].join("\n");
+  const result = await run(
+    dockerArgs(
+      "exec",
+      "-i",
+      HALOOP_COLLECTOR_CONTAINER_NAME,
+      "python",
+      "-c",
+      validationScript,
+    ),
+    { stdin: JSON.stringify({ project, report }), timeout: 30_000 },
+  );
+  if (result.exitCode !== 0) {
+    throw new Error(
+      `HALO citation validation could not run: ${(result.stderr || result.stdout).trim() || `exit ${result.exitCode}`}`,
+    );
+  }
+  try {
+    const validation = JSON.parse(result.stdout);
+    return {
+      valid: validation.valid === true,
+      traceCitations: Number(validation.trace_citations) || 0,
+      spanCitations: Number(validation.span_citations) || 0,
+      missing: Number(validation.missing) || 0,
+    };
+  } catch {
+    throw new Error("HALO citation validation returned an invalid result.");
+  }
+}
+
+function normalizeHaloopEvalArtifact(payload, project, runId) {
+  if (
+    !payload ||
+    typeof payload !== "object" ||
+    payload.project !== project ||
+    payload.halo_run_id !== runId ||
+    !HALOOP_EVAL_ARTIFACT_PATTERN.test(payload.artifact_id) ||
+    !Number.isInteger(payload.cases) ||
+    payload.cases < 1 ||
+    payload.cases > 5000 ||
+    payload.replay_surface !== "chat-completions" ||
+    payload.contains_sensitive_content !== true
+  ) {
+    throw new Error("The private Haloop collector returned an invalid eval artifact summary.");
+  }
+  const identities = (value) =>
+    Array.isArray(value)
+      ? value
+          .filter((entry) => typeof entry === "string" && entry.length > 0)
+          .slice(0, 32)
+          .map((entry) => safeDiagnosticMessage(entry).slice(0, 128))
+      : [];
+  const byTag = {};
+  if (payload.by_tag && typeof payload.by_tag === "object" && !Array.isArray(payload.by_tag)) {
+    for (const [key, value] of Object.entries(payload.by_tag).slice(0, 64)) {
+      if (/^[a-z0-9:_-]{1,64}$/i.test(key) && Number.isInteger(value) && value >= 0) {
+        byTag[key] = value;
+      }
+    }
+  }
+  return {
+    artifactId: payload.artifact_id,
+    haloRunId: runId,
+    createdAt: Number(payload.created_at) || null,
+    cases: payload.cases,
+    byTag,
+    sourceProviders: identities(payload.source_providers),
+    sourceModels: identities(payload.source_models),
+    sourceSurfaces: identities(payload.source_surfaces),
+    replaySurface: "chat-completions",
+    containsSensitiveContent: true,
+  };
+}
+
+async function pruneHaloopReports(run) {
+  const retentionScript = [
+    "import json,os,time",
+    "from pathlib import Path",
+    `days=${HALOOP_REPORT_RETENTION_DAYS}; keep=${HALOOP_REPORT_RETENTION_COUNT}`,
+    "root=Path(os.environ['W8_REPORTS_DIR']).resolve()",
+    "files=sorted((path for pattern in ('halo-report-*.md','eval-cases-*.jsonl') for path in root.glob(pattern) if path.is_file() and not path.is_symlink()),key=lambda path:path.stat().st_mtime,reverse=True)",
+    "cutoff=time.time()-days*86400; removed=0",
+    "for index,path in enumerate(files):\n if index>=keep or path.stat().st_mtime<cutoff:\n  path.unlink(); removed+=1",
+    "print(json.dumps({'removed':removed},separators=(',',':')))",
+  ].join("\n");
+  const result = await run(
+    dockerArgs("exec", HALOOP_COLLECTOR_CONTAINER_NAME, "python", "-c", retentionScript),
+    { timeout: 20_000 },
+  );
+  if (result.exitCode !== 0) {
+    throw new Error("HALO report retention cleanup failed; analysis was not started.");
+  }
+}
+
 function dockerArgs(...args) {
   return ["-d", DISTRO_NAME, "--", "docker", ...args];
 }
@@ -479,6 +761,7 @@ async function stageProfiles(run, serialized) {
     "umask 077",
     `install -d -m 0700 ${HALOOP_STATE_DIR}`,
     `install -d -o 10001 -g 10001 -m 0700 ${HALOOP_COLLECTOR_DATA_DIR}`,
+    `install -d -o 10001 -g 10001 -m 0700 ${HALOOP_REPORTS_DIR}`,
     `install -m 0600 /dev/stdin ${HALOOP_PROFILES_FILE}.tmp`,
     `mv -f ${HALOOP_PROFILES_FILE}.tmp ${HALOOP_PROFILES_FILE}`,
   ].join("\n");
@@ -493,6 +776,25 @@ async function stageProfiles(run, serialized) {
   }
 }
 
+async function stageAnalysisEnvironment(run, serialized) {
+  const script = [
+    "set -euo pipefail",
+    "umask 077",
+    `install -d -m 0700 ${HALOOP_STATE_DIR}`,
+    `install -m 0600 /dev/stdin ${HALOOP_ANALYSIS_ENV_FILE}.tmp`,
+    `mv -f ${HALOOP_ANALYSIS_ENV_FILE}.tmp ${HALOOP_ANALYSIS_ENV_FILE}`,
+  ].join("\n");
+  const result = await run(
+    ["-d", DISTRO_NAME, "--", "bash", "-lc", script],
+    { stdin: serialized, timeout: 20_000, user: "root" },
+  );
+  if (result.exitCode !== 0) {
+    throw new Error(
+      `Could not stage the private HALO analysis credential: ${(result.stderr || result.stdout).trim() || `exit ${result.exitCode}`}`,
+    );
+  }
+}
+
 async function inspectContainer(run, name) {
   const result = await run(
     dockerArgs(
@@ -500,18 +802,21 @@ async function inspectContainer(run, name) {
       "inspect",
       name,
       "--format",
-      `{{.State.Running}}|{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}|{{ index .Config.Labels "${PROFILE_HASH_LABEL}" }}|{{.Image}}|{{ index .Config.Labels "${MANAGED_LABEL}" }}`,
+      `{{.State.Running}}|{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}|{{ index .Config.Labels "${PROFILE_HASH_LABEL}" }}|{{.Image}}|{{ index .Config.Labels "${MANAGED_LABEL}" }}|{{ index .Config.Labels "${COLLECTOR_ANALYSIS_LABEL}" }}|{{ index .Config.Labels "${COLLECTOR_ANALYSIS_CONFIG_HASH_LABEL}" }}`,
     ),
     { timeout: 15_000 },
   );
   if (result.exitCode !== 0) return null;
-  const [running, health, profileHash, imageId, managed] = result.stdout.trim().split("|");
+  const [running, health, profileHash, imageId, managed, analysisContract, analysisConfigHash] =
+    result.stdout.trim().split("|");
   return {
     running: running === "true",
     health,
     profileHash,
     imageId,
     managed: managed === "true",
+    analysisContract: analysisContract || null,
+    analysisConfigHash: analysisConfigHash || null,
   };
 }
 
@@ -617,7 +922,7 @@ async function removeManagedNetwork(run) {
   }
 }
 
-async function createCollectorContainer(run) {
+async function createCollectorContainer(run, analysisConfigHash) {
   const result = await run(
     dockerArgs(
       "run",
@@ -637,17 +942,31 @@ async function createCollectorContainer(run) {
       String(SHUTDOWN_TIMEOUT_SECONDS),
       "--label",
       `${MANAGED_LABEL}=true`,
+      "--label",
+      `${COLLECTOR_ANALYSIS_LABEL}=${COLLECTOR_ANALYSIS_CONTRACT}`,
+      "--label",
+      `${COLLECTOR_ANALYSIS_CONFIG_HASH_LABEL}=${analysisConfigHash}`,
       "--mount",
       `type=bind,source=${HALOOP_COLLECTOR_DATA_DIR},target=${HALOOP_COLLECTOR_CONTAINER_DATA_DIR}`,
+      "--mount",
+      `type=bind,source=${HALOOP_REPORTS_DIR},target=${HALOOP_COLLECTOR_CONTAINER_REPORTS_DIR}`,
+      "--env-file",
+      HALOOP_ANALYSIS_ENV_FILE,
       "--env",
       `W8_DATA_DIR=${HALOOP_COLLECTOR_CONTAINER_DATA_DIR}`,
+      "--env",
+      `W8_REPORTS_DIR=${HALOOP_COLLECTOR_CONTAINER_REPORTS_DIR}`,
       "--env",
       "W8_DEFAULT_PROJECT=openrind-desktop",
       "--env",
       "W8_KEEP_RAW=0",
       HALOOP_COLLECTOR_IMAGE,
     ),
-    { timeout: 60_000 },
+    // Docker's CLI opens --env-file before it contacts the daemon. The
+    // analysis credential is deliberately root-owned and mode 0600, so run
+    // only this container-creation command as root instead of weakening the
+    // credential file or its parent directory permissions.
+    { timeout: 60_000, user: "root" },
   );
   if (result.exitCode !== 0) {
     throw new Error(
@@ -771,12 +1090,18 @@ export function createHaloopRuntimeManager({
   revokeProfiles = revokeHaloopClientProfilesForSandbox,
   rotateProfile = rotateHaloopClientProfile,
   postSpans = postPrivateCollectorSpans,
+  collectorRequest = requestPrivateCollector,
+  validateTraceProject = validateHaloopTraceProject,
+  validateReportCitations = validateHaloopReportCitations,
+  pruneReports = pruneHaloopReports,
+  env = process.env,
 } = {}) {
   let queue = Promise.resolve();
   let managedThisProcess = false;
   let lastReadyRoute = null;
   let lastConnectionError = null;
   const capturedBytesByTrace = new Map();
+  const analysisAudits = new Map();
   const captureStatus = {
     written: 0,
     duplicates: 0,
@@ -844,8 +1169,289 @@ export function createHaloopRuntimeManager({
     });
   }
 
+  async function requireAnalysisCollector() {
+    if (!lastReadyRoute?.workspaceId) {
+      throw new Error(
+        "Haloop has no active trace project. Launch a Claude or OpenClaw sandbox first.",
+      );
+    }
+    const collector = await inspectContainer(run, HALOOP_COLLECTOR_CONTAINER_NAME);
+    if (!collector?.managed || !collector.running || collector.health !== "healthy") {
+      throw new Error(
+        "The private Haloop collector must be healthy before trace analysis can run.",
+      );
+    }
+    if (collector.analysisContract !== COLLECTOR_ANALYSIS_CONTRACT) {
+      throw new Error(
+        "The private Haloop collector is not analysis-ready. Restart Haloop, then retry.",
+      );
+    }
+    return { project: haloopProjectForWorkspace(lastReadyRoute.workspaceId) };
+  }
+
+  async function readAuditedAnalysisReport(project, runId) {
+    if (!HALOOP_RUN_ID_PATTERN.test(runId)) {
+      throw new Error("The HALO analysis run identity is invalid.");
+    }
+    const response = await collectorRequest(run, {
+      requestPath: `/halo/runs/${runId}?report=true`,
+    });
+    if (response.status !== 200) {
+      throw new Error("The requested HALO analysis report is unavailable.");
+    }
+    const payload = response.body;
+    if (payload.project !== project || payload.run_id !== runId || payload.status !== "done") {
+      throw new Error("The HALO analysis report does not belong to the active trace project.");
+    }
+    if (typeof payload.report !== "string") {
+      throw new Error("The HALO analysis report is not ready yet.");
+    }
+    const citations = await validateReportCitations(run, project, payload.report);
+    if (!citations.valid) {
+      throw new Error(
+        citations.missing > 0
+          ? "The HALO report cited trace evidence outside the active project, so Desktop blocked it."
+          : "The HALO report did not contain a verifiable trace_id, so Desktop blocked it.",
+      );
+    }
+    return { runId, report: payload.report, citations };
+  }
+
+  async function analysisSnapshot() {
+    if (!lastReadyRoute?.workspaceId) {
+      return {
+        state: "unavailable",
+        project: null,
+        detail: "Launch a Claude or OpenClaw sandbox to create an active trace project.",
+        stats: null,
+        run: null,
+        evalArtifact: null,
+        retention: {
+          days: HALOOP_REPORT_RETENTION_DAYS,
+          reports: HALOOP_REPORT_RETENTION_COUNT,
+        },
+      };
+    }
+    const project = haloopProjectForWorkspace(lastReadyRoute.workspaceId);
+    const collector = await inspectContainer(run, HALOOP_COLLECTOR_CONTAINER_NAME);
+    if (
+      !collector?.managed ||
+      !collector.running ||
+      collector.health !== "healthy" ||
+      collector.analysisContract !== COLLECTOR_ANALYSIS_CONTRACT
+    ) {
+      return {
+        state: "unavailable",
+        project,
+        detail: "Restart Haloop to make the private collector ready for analysis.",
+        stats: null,
+        run: null,
+        evalArtifact: null,
+        retention: {
+          days: HALOOP_REPORT_RETENTION_DAYS,
+          reports: HALOOP_REPORT_RETENTION_COUNT,
+        },
+      };
+    }
+
+    const statsResponse = await collectorRequest(run, {
+      requestPath: `/stats?project=${project}`,
+    });
+    if (statsResponse.status !== 200) {
+      throw new Error("The private Haloop collector could not summarize the active trace project.");
+    }
+    const rawStats = statsResponse.body;
+    const stats = {
+      spans: Number(rawStats.spans) || 0,
+      errors: Number(rawStats.errors) || 0,
+      byObservationKind:
+        rawStats.by_observation_kind && typeof rawStats.by_observation_kind === "object"
+          ? rawStats.by_observation_kind
+          : {},
+      byModel:
+        rawStats.by_model && typeof rawStats.by_model === "object" ? rawStats.by_model : {},
+    };
+    const runsResponse = await collectorRequest(run, { requestPath: "/halo/runs" });
+    if (runsResponse.status !== 200 || !Array.isArray(runsResponse.body.runs)) {
+      throw new Error("The private Haloop collector could not list HALO analysis runs.");
+    }
+    const latest = runsResponse.body.runs.find(
+      (entry) => entry && entry.project === project && HALOOP_RUN_ID_PATTERN.test(entry.run_id),
+    );
+    if (!latest) {
+      return {
+        state: stats.spans > 0 ? "ready" : "no-traces",
+        project,
+        detail:
+          stats.spans > 0
+            ? "Validated trace analysis is ready to run."
+            : "No captured spans are available yet. Use Claude or OpenClaw, then refresh.",
+        stats,
+        run: null,
+        evalArtifact: null,
+        retention: {
+          days: HALOOP_REPORT_RETENTION_DAYS,
+          reports: HALOOP_REPORT_RETENTION_COUNT,
+        },
+      };
+    }
+
+    const knownRunStates = new Set(["created", "running", "done", "error"]);
+    let state = latest.status === "created"
+      ? "queued"
+      : knownRunStates.has(latest.status)
+        ? latest.status
+        : "error";
+    let detail =
+      state === "queued" || state === "running"
+        ? "HALO is analyzing the validated trace project. This can take several minutes."
+        : state === "done"
+          ? "HALO analysis completed."
+          : "HALO analysis failed. Inspect the managed collector logs for sanitized diagnostics.";
+    let citations = analysisAudits.get(latest.run_id) ?? null;
+    if (state === "done" && latest.report_available === true && !citations) {
+      try {
+        const audited = await readAuditedAnalysisReport(project, latest.run_id);
+        citations = audited.citations;
+        analysisAudits.set(latest.run_id, citations);
+        detail = "HALO analysis completed and all report citations match the active trace project.";
+      } catch (error) {
+        state = "error";
+        detail = safeDiagnosticMessage(error);
+        citations = { valid: false, traceCitations: 0, spanCitations: 0, missing: 0 };
+      }
+    }
+    let evalArtifact = null;
+    if (state === "done" && citations?.valid) {
+      const artifactsResponse = await collectorRequest(run, {
+        requestPath: `/evals/artifacts?project=${project}`,
+      });
+      if (
+        artifactsResponse.status !== 200 ||
+        !Array.isArray(artifactsResponse.body.artifacts)
+      ) {
+        throw new Error("The private Haloop collector could not list eval artifacts.");
+      }
+      const matchingArtifact = artifactsResponse.body.artifacts.find(
+        (artifact) => artifact?.halo_run_id === latest.run_id,
+      );
+      if (matchingArtifact) {
+        evalArtifact = normalizeHaloopEvalArtifact(matchingArtifact, project, latest.run_id);
+      }
+    }
+    return {
+      state,
+      project,
+      detail,
+      stats,
+      run: {
+        runId: latest.run_id,
+        status: latest.status,
+        provider: String(latest.provider ?? "unknown").slice(0, 64),
+        model: String(latest.model ?? "unknown").slice(0, 128),
+        startedAt: Number(latest.started_at) || null,
+        finishedAt: Number(latest.finished_at) || null,
+        reportAvailable: latest.report_available === true,
+        citations,
+        error: typeof latest.error === "string" ? safeDiagnosticMessage(latest.error) : null,
+      },
+      evalArtifact,
+      retention: {
+        days: HALOOP_REPORT_RETENTION_DAYS,
+        reports: HALOOP_REPORT_RETENTION_COUNT,
+      },
+    };
+  }
+
+  function analysisStatus() {
+    return serialize(() => analysisSnapshot());
+  }
+
+  function startAnalysis() {
+    return serialize(async () => {
+      const { project } = await requireAnalysisCollector();
+      const existing = await collectorRequest(run, { requestPath: "/halo/runs" });
+      if (existing.status !== 200 || !Array.isArray(existing.body?.runs)) {
+        throw new Error("The private Haloop collector could not list HALO analysis runs.");
+      }
+      const activeRun = Array.isArray(existing.body.runs)
+        ? existing.body.runs.find(
+            (entry) =>
+              entry?.project === project &&
+              (entry.status === "created" || entry.status === "running"),
+          )
+        : null;
+      if (activeRun) {
+        throw new Error("HALO analysis is already running for the active trace project.");
+      }
+      const validation = await validateTraceProject(run, project);
+      if (!validation.valid) {
+        if (validation.reason === "missing" || validation.reason === "empty") {
+          throw new Error(
+            "No valid Haloop trace is available yet. Use Claude or OpenClaw, then retry analysis.",
+          );
+        }
+        throw new Error(
+          "The active Haloop trace failed contract validation. Analysis was not started.",
+        );
+      }
+      await pruneReports(run);
+      const response = await collectorRequest(run, {
+        method: "POST",
+        requestPath: "/halo/analyze",
+        body: {
+          project,
+          prompt: HALOOP_ANALYSIS_PROMPT,
+          max_depth: 1,
+          max_turns: 12,
+          max_parallel: 3,
+        },
+      });
+      if (response.status !== 202 || !HALOOP_RUN_ID_PATTERN.test(response.body.run_id)) {
+        const reason = typeof response.body?.error === "string"
+          ? safeDiagnosticMessage(response.body.error)
+          : "The private collector rejected the analysis request.";
+        throw new Error(reason);
+      }
+      analysisAudits.delete(response.body.run_id);
+      return analysisSnapshot();
+    });
+  }
+
+  function loadAnalysisReport(runId) {
+    return serialize(async () => {
+      const { project } = await requireAnalysisCollector();
+      return readAuditedAnalysisReport(project, String(runId ?? "").trim());
+    });
+  }
+
+  function generateEvalCases(runId) {
+    return serialize(async () => {
+      const { project } = await requireAnalysisCollector();
+      const normalizedRunId = String(runId ?? "").trim();
+      if (!HALOOP_RUN_ID_PATTERN.test(normalizedRunId)) {
+        throw new Error("The HALO analysis run identity is invalid.");
+      }
+      // Re-read and re-audit the report immediately before creating a sensitive
+      // eval artifact. The collector receives no renderer-controlled paths.
+      await readAuditedAnalysisReport(project, normalizedRunId);
+      const response = await collectorRequest(run, {
+        method: "POST",
+        requestPath: "/evals/extract",
+        body: { project, run_id: normalizedRunId },
+      });
+      if (response.status !== 201) {
+        const reason = typeof response.body?.error === "string"
+          ? safeDiagnosticMessage(response.body.error)
+          : "The private collector rejected the eval extraction request.";
+        throw new Error(reason);
+      }
+      return normalizeHaloopEvalArtifact(response.body, project, normalizedRunId);
+    });
+  }
+
   async function ensureOperation(options = {}) {
-      const upstreamKey = requiredSecret(options.anthropicApiKey, "ANTHROPIC_API_KEY");
+      const upstream = resolveHaloopUpstream(options.anthropicApiKey, env);
       await ensureDistro();
       options.onProgress?.({
         phase: "haloop",
@@ -860,10 +1466,17 @@ export function createHaloopRuntimeManager({
       if (!registration.current) {
         throw new Error("The scoped Haloop client profile could not be registered.");
       }
-      const document = buildHaloopProfilesDocument(registration.profiles, upstreamKey);
+      const document = buildHaloopProfilesDocument(registration.profiles, options.anthropicApiKey, {
+        env,
+      });
       const serialized = `${JSON.stringify(document, null, 2)}\n`;
       const profileHash = createHash("sha256").update(serialized).digest("hex");
+      const analysisEnvironment = buildHaloopAnalysisEnvironment(upstream);
+      const analysisConfigHash = createHash("sha256")
+        .update(analysisEnvironment)
+        .digest("hex");
       await stageProfiles(run, serialized);
+      await stageAnalysisEnvironment(run, analysisEnvironment);
 
       let gatewayStartedThisOperation = false;
       let collectorStartedThisOperation = false;
@@ -881,27 +1494,24 @@ export function createHaloopRuntimeManager({
             `A container named ${HALOOP_CONTAINER_NAME} already exists but is not managed by Openrind Desktop. Remove or rename it, then retry.`,
           );
         }
-        if (collector && collector.imageId !== images.collector.imageId) {
+        if (
+          collector &&
+          (
+            collector.imageId !== images.collector.imageId ||
+            collector.analysisContract !== COLLECTOR_ANALYSIS_CONTRACT ||
+            collector.analysisConfigHash !== analysisConfigHash ||
+            !collector.running
+          )
+        ) {
           options.onProgress?.({
             phase: "haloop",
-            message: "Applying the updated private Haloop collector…",
+            message: "Applying the analysis-ready private Haloop collector…",
           });
           await removeManagedContainer(run, HALOOP_COLLECTOR_CONTAINER_NAME, "collector");
           collector = null;
         }
         if (!collector) {
-          await createCollectorContainer(run);
-          collectorStartedThisOperation = true;
-        } else if (!collector.running) {
-          const started = await run(
-            dockerArgs("container", "start", HALOOP_COLLECTOR_CONTAINER_NAME),
-            { timeout: 60_000 },
-          );
-          if (started.exitCode !== 0) {
-            throw new Error(
-              `Could not restart the private Haloop collector: ${(started.stderr || started.stdout).trim() || `exit ${started.exitCode}`}`,
-            );
-          }
+          await createCollectorContainer(run, analysisConfigHash);
           collectorStartedThisOperation = true;
         }
         await waitForHealthyContainer(run, HALOOP_COLLECTOR_CONTAINER_NAME, "collector");
@@ -961,7 +1571,9 @@ export function createHaloopRuntimeManager({
         managedThisProcess = true;
         options.onProgress?.({
           phase: "haloop",
-          message: `Haloop ${images.gateway.version} routing and private trace capture are healthy.`,
+          message: upstream.mode === "openrouter-test"
+            ? `Haloop ${images.gateway.version} is healthy on the temporary OpenRouter test upstream.`
+            : `Haloop ${images.gateway.version} routing and private trace capture are healthy.`,
         });
         const result = {
           endpoint: HALOOP_SANDBOX_ENDPOINT,
@@ -970,6 +1582,7 @@ export function createHaloopRuntimeManager({
           clientToken: registration.current.clientToken,
           profileId: registration.current.id,
           version: images.gateway.version,
+          upstreamMode: upstream.mode,
           ...(conversation
             ? {
                 capture: conversation.capture,
@@ -985,6 +1598,8 @@ export function createHaloopRuntimeManager({
           sandboxName: options.sandboxName,
           workspaceId: options.workspaceId,
           agentId: options.agentId,
+          upstreamMode: upstream.mode,
+          analysisConfigHash,
         };
         lastConnectionError = null;
         return result;
@@ -1002,7 +1617,15 @@ export function createHaloopRuntimeManager({
           ).catch(() => undefined);
         }
         await run(
-          ["-d", DISTRO_NAME, "--", "rm", "-f", HALOOP_PROFILES_FILE],
+          [
+            "-d",
+            DISTRO_NAME,
+            "--",
+            "rm",
+            "-f",
+            HALOOP_PROFILES_FILE,
+            HALOOP_ANALYSIS_ENV_FILE,
+          ],
           { timeout: 10_000, user: "root" },
         ).catch(() => undefined);
         throw error;
@@ -1027,6 +1650,9 @@ export function createHaloopRuntimeManager({
         return {
           required: true,
           routePolicy: HALOOP_ROUTE_POLICY,
+          upstreamMode: isTemporaryOpenRouterHaloopTestEnabled(env)
+            ? "openrouter-test"
+            : "anthropic",
           state: "unavailable",
           endpoint: HALOOP_SANDBOX_ENDPOINT,
           version: null,
@@ -1060,6 +1686,9 @@ export function createHaloopRuntimeManager({
       } else if (collector && collector.imageId !== images.collector.imageId) {
         state = "degraded";
         detail = "The private Haloop collector does not match the required Desktop image.";
+      } else if (collector && collector.analysisContract !== COLLECTOR_ANALYSIS_CONTRACT) {
+        state = "degraded";
+        detail = "The private Haloop collector must be restarted to enable validated trace analysis.";
       } else if (
         gateway?.running &&
         gateway.health === "healthy" &&
@@ -1082,6 +1711,8 @@ export function createHaloopRuntimeManager({
       return {
         required: true,
         routePolicy: HALOOP_ROUTE_POLICY,
+        upstreamMode: lastReadyRoute?.upstreamMode ??
+          (isTemporaryOpenRouterHaloopTestEnabled(env) ? "openrouter-test" : "anthropic"),
         state,
         endpoint: HALOOP_SANDBOX_ENDPOINT,
         version: images.gateway.version,
@@ -1122,11 +1753,20 @@ export function createHaloopRuntimeManager({
         stopErrors.push("collector");
       }
       await run(
-        ["-d", DISTRO_NAME, "--", "rm", "-f", HALOOP_PROFILES_FILE],
+        [
+          "-d",
+          DISTRO_NAME,
+          "--",
+          "rm",
+          "-f",
+          HALOOP_PROFILES_FILE,
+          HALOOP_ANALYSIS_ENV_FILE,
+        ],
         { timeout: 10_000, user: "root" },
       ).catch(() => undefined);
       lastReadyRoute = null;
       capturedBytesByTrace.clear();
+      analysisAudits.clear();
       if (stopErrors.length > 0) {
         throw new Error(
           `The managed Haloop ${stopErrors.join(" and ")} service${stopErrors.length === 1 ? "" : "s"} did not stop cleanly.`,
@@ -1136,7 +1776,7 @@ export function createHaloopRuntimeManager({
   }
 
   async function restart(options = {}) {
-    const upstreamKey = requiredSecret(options.anthropicApiKey, "ANTHROPIC_API_KEY");
+    const upstreamKey = resolveHaloopUpstreamApiKey(options.anthropicApiKey, { env });
     const route = lastReadyRoute ? { ...lastReadyRoute } : null;
     if (!route) {
       throw new Error(
@@ -1159,7 +1799,7 @@ export function createHaloopRuntimeManager({
 
   function restoreIncumbent(options = {}) {
     const operation = serialize(async () => {
-      const upstreamKey = requiredSecret(options.anthropicApiKey, "ANTHROPIC_API_KEY");
+      const upstreamKey = resolveHaloopUpstreamApiKey(options.anthropicApiKey, { env });
       const route = lastReadyRoute ? { ...lastReadyRoute } : null;
       if (!route) {
         throw new Error(
@@ -1248,7 +1888,7 @@ export function createHaloopRuntimeManager({
 
   function rotate(options = {}) {
     const operation = serialize(async () => {
-      const upstreamKey = requiredSecret(options.anthropicApiKey, "ANTHROPIC_API_KEY");
+      const upstreamKey = resolveHaloopUpstreamApiKey(options.anthropicApiKey, { env });
       const route = lastReadyRoute ? { ...lastReadyRoute } : null;
       if (!route) {
         throw new Error(
@@ -1316,7 +1956,10 @@ export function createHaloopRuntimeManager({
       if (!/^[a-z0-9][a-z0-9_.-]{0,127}$/.test(sandboxName)) {
         throw new Error("A valid sandbox name is required for Haloop revocation.");
       }
-      const upstreamKey = String(options.anthropicApiKey ?? "").trim();
+      const upstreamKey = resolveHaloopUpstreamApiKey(options.anthropicApiKey, {
+        env,
+        optional: true,
+      });
       await ensureDistro();
 
       const network = await inspectNetwork(run);
@@ -1387,7 +2030,15 @@ export function createHaloopRuntimeManager({
           await removeManagedContainer(run, HALOOP_COLLECTOR_CONTAINER_NAME, "collector");
         }
         await run(
-          ["-d", DISTRO_NAME, "--", "rm", "-f", HALOOP_PROFILES_FILE],
+          [
+            "-d",
+            DISTRO_NAME,
+            "--",
+            "rm",
+            "-f",
+            HALOOP_PROFILES_FILE,
+            HALOOP_ANALYSIS_ENV_FILE,
+          ],
           { timeout: 10_000, user: "root" },
         ).catch(() => undefined);
         managedThisProcess = false;
@@ -1476,7 +2127,15 @@ export function createHaloopRuntimeManager({
         await removeManagedContainer(run, HALOOP_COLLECTOR_CONTAINER_NAME, "collector");
       }
       const removedRegistry = await run(
-        ["-d", DISTRO_NAME, "--", "rm", "-f", HALOOP_PROFILES_FILE],
+        [
+          "-d",
+          DISTRO_NAME,
+          "--",
+          "rm",
+          "-f",
+          HALOOP_PROFILES_FILE,
+          HALOOP_ANALYSIS_ENV_FILE,
+        ],
         { timeout: 10_000, user: "root" },
       );
       if (removedRegistry.exitCode !== 0) {
@@ -1492,6 +2151,7 @@ export function createHaloopRuntimeManager({
       managedThisProcess = false;
       lastConnectionError = null;
       capturedBytesByTrace.clear();
+      analysisAudits.clear();
       return {
         revokedProfiles,
         affectedSessions,
@@ -1507,13 +2167,17 @@ export function createHaloopRuntimeManager({
 
   return {
     activeRoute,
+    analysisStatus,
     ensure,
+    generateEvalCases,
+    loadAnalysisReport,
     recordApplicationSpans,
     restart,
     restoreIncumbent,
     revokeIntegration,
     revokeSandbox,
     rotate,
+    startAnalysis,
     status,
     stop,
   };
@@ -1527,6 +2191,22 @@ export function ensureHaloopRuntime(options) {
 
 export function getHaloopRuntimeStatus() {
   return runtimeManager.status();
+}
+
+export function getHaloopAnalysisStatus() {
+  return runtimeManager.analysisStatus();
+}
+
+export function generateHaloopEvalCases(runId) {
+  return runtimeManager.generateEvalCases(runId);
+}
+
+export function startHaloopAnalysis() {
+  return runtimeManager.startAnalysis();
+}
+
+export function loadHaloopAnalysisReport(runId) {
+  return runtimeManager.loadAnalysisReport(runId);
 }
 
 export function recordHaloopApplicationSpans(capture, events) {
@@ -1562,8 +2242,12 @@ export function stopHaloopRuntime() {
 }
 
 export const __testing = {
+  COLLECTOR_ANALYSIS_CONTRACT,
+  COLLECTOR_ANALYSIS_LABEL,
+  HALOOP_ANALYSIS_ENV_FILE,
   HALOOP_CONTAINER_PROFILES_FILE,
   HALOOP_COLLECTOR_DATA_DIR,
+  HALOOP_REPORTS_DIR,
   HALOOP_COLLECTOR_URL,
   HALOOP_PROFILES_FILE,
   MANAGED_NETWORK_LABEL,
@@ -1571,5 +2255,8 @@ export const __testing = {
   PROFILE_HASH_LABEL,
   STARTUP_TIMEOUT_MS,
   inspectContainer,
+  requestPrivateCollector,
   resolveOpenShellBridgeAddress,
+  validateHaloopReportCitations,
+  validateHaloopTraceProject,
 };
