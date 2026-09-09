@@ -19,6 +19,10 @@ filesystem_policy:
   read_write:
     - /sandbox
     - /tmp
+    # configure-haloop.mjs atomically maintains the required shell export here.
+    # Keep the grant limited to this Desktop-owned directory rather than making
+    # all of /home/agent writable outside the FUSE workspace.
+    - /home/agent/.openrind-shell
     - /var/lib/openrind-shell/runtime
     - /var/lib/openeral/runtime
     - /dev/null

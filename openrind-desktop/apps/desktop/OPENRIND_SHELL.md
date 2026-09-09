@@ -27,9 +27,9 @@ Source checkouts use `openrind-shell-fuse:local`, `haloop-gateway:local`, and
 dedicated OpenShell WSL Docker daemon, not only in the host Docker Desktop daemon.
 Packaged builds use `ghcr.io/openrind/openrind-shell/sandbox:fuse` plus the
 version-pinned
-`ghcr.io/openrind/openrind-shell/haloop-gateway:w8-haloop-openrind-v3-managed-collector`
+`ghcr.io/openrind/openrind-shell/haloop-gateway:w8-haloop-openrind-v4-eval-export`
 and
-`ghcr.io/openrind/openrind-shell/haloop-collector:w8-haloop-openrind-v3-managed-collector`
+`ghcr.io/openrind/openrind-shell/haloop-collector:w8-haloop-openrind-v4-eval-export`
 images. They are pulled into the dedicated daemon only when absent; mutable
 `latest` tags are never selected.
 The FUSE image must expose the desktop contract recorded in
@@ -59,7 +59,7 @@ node openrind-desktop/apps/desktop/scripts/build-openshell-runtime-images.mjs --
 ```
 
 The production tags are accepted only when both images report
-`w8-haloop-openrind-v3-managed-collector`. A pull-only release verification is
+`w8-haloop-openrind-v4-eval-export`. A pull-only release verification is
 available through the desktop package's
 `verify:openshell-haloop-images:production` script.
 
@@ -88,7 +88,8 @@ second initializer or a parallel upload/poll loop.
 - `DATABASE_URL` is read from Electron `safeStorage`, sent to the WSL helper on
   stdin, written to a temporary mode-0600 file, and uploaded only for init.
 - `ANTHROPIC_API_KEY` is read in the Electron main process and written only to
-  the protected host-side Haloop route registry. The sandbox receives a
+  the protected host-side Haloop route registry and private collector analysis
+  environment. The sandbox receives a
   workspace/sandbox/agent-scoped client token through an endpoint-bound
   OpenShell provider. Neither the upstream key nor the raw scoped token is
   placed in terminal environment variables or persisted in `/sandbox/work`.
@@ -96,6 +97,18 @@ second initializer or a parallel upload/poll loop.
   `halo.export` hooks. Desktop starts the collector as an unprivileged private
   service with no published port, disables raw hook retention, and persists
   JSONL traces under `/var/lib/openrind-desktop/haloop/collector-data`.
+- The private collector persists verified HALO reports and generated eval cases under
+  `/var/lib/openrind-desktop/haloop/reports`, outside every Git checkout. Before
+  a run, Desktop validates the complete active project trace, removes managed
+  report/eval artifacts older than 30 days or beyond the newest 20, and starts
+  analysis with a fixed server-owned prompt. Reports are displayed only after
+  every cited trace/span ID resolves to the selected project. Citations identify
+  evidence; they are not automatic failure labels. **Settings -> Haloop ->
+  Generate eval cases** revalidates that evidence and creates a mode-0600 JSONL
+  artifact without returning its prompts, outputs, tool schemas, or tool results
+  to the renderer. Anthropic Messages inputs retain their exact source evidence
+  and use a bounded chat-completions replay projection. Generation calls no model
+  and enables no candidate traffic.
 - Gateway port `8787` is published only on the IPv4 gateway address of the
   OpenShell `openshell-docker` bridge—the address mapped to
   `host.openshell.internal` inside sandboxes. It is not published on every WSL
@@ -104,18 +117,18 @@ second initializer or a parallel upload/poll loop.
   assertion. The edge validates and removes it, then derives the canonical
   trace, route-root parent, and session IDs from its opaque context. Raw Desktop
   session IDs are not exposed to the edge or persisted trace metadata.
-- **Settings -> Environment -> Rotate token** replaces the exact active
+- **Settings -> Haloop -> Rotate token** replaces the exact active
   workspace/sandbox/agent token. Desktop ends tracked in-app agents before
   withdrawing the old edge credential, rebuilds the server-owned registry, and
   refreshes the endpoint-bound OpenShell provider. The renderer never receives
   either token.
 - Deleting a sandbox in Desktop first blocks new launches and ends tracked
-  agents, then withdraws the edge before deleting every matching OpenShell
-  provider and encrypted scoped token. Surviving profiles are rebuilt with
-  unchanged tokens. If cleanup fails, Desktop does not delete the sandbox; the
-  operation stays fail-closed and can be retried.
+  agents, then withdraws the edge, detaches every matching OpenShell provider
+  from the target sandbox, and deletes the provider and encrypted scoped token
+  before removing the sandbox. Surviving profiles are rebuilt with unchanged
+  tokens. If cleanup fails, the operation stays fail-closed and can be retried.
 - The active route policy is `incumbent-only`: one direct Anthropic target with
-  no candidate weight or model override. **Settings -> Environment -> Restore
+  no candidate weight or model override. **Settings -> Haloop -> Restore
   incumbent** atomically reapplies that approved registry and replaces only the
   gateway. Tokens, signed conversation keys, agent processes, collector data,
   and the FUSE workspace stay unchanged.
@@ -124,7 +137,8 @@ second initializer or a parallel upload/poll loop.
   and performs the final `flush-all`.
 - The Haloop configurator updates only the `ANTHROPIC_BASE_URL` assignment in
   `/home/agent/.openrind-shell/env.sh`, preserving unrelated shell exports. The
-  sandbox login hook sources this file before its agent-specific session file.
+  sandbox policy grants write access only to that Desktop-owned directory, and
+  the login hook sources it before its agent-specific session file.
 - OpenClaw keeps the required `openrind-gateway` provider ID, an explicit model
   array, and the `anthropic-messages` API shape while its base URL points at the
   local Haloop edge.
@@ -195,7 +209,7 @@ traffic that is already in flight.
   `openrind-shell-fuse:local`, `haloop-gateway:local`, and
   `haloop-collector:local` in the dedicated OpenShell WSL Docker daemon. Source
   mode intentionally never pulls these local images.
-- **Haloop unavailable:** open **Settings -> Environment** and inspect the
+- **Haloop unavailable:** open **Settings -> Haloop** and inspect the
   required Haloop route status. If an active route is shown, use **Restart
   Haloop** to restart only the Desktop-managed gateway and private collector;
   the FUSE sandbox and its workspace are not recreated. Resolve any reported
@@ -213,7 +227,13 @@ traffic that is already in flight.
   the sandbox directly to Anthropic.
 - **Trace capture incomplete:** model routing never switches to a direct
   provider. Inspect the collector status and trusted-span counters in
-  **Settings -> Environment**, restart Haloop, and launch a new agent request.
+  **Settings -> Haloop**, restart Haloop, and launch a new agent request.
+- **HALO analysis unavailable:** first launch Claude or OpenClaw and complete
+  at least one model request so the active project contains spans. Open
+  **Settings -> Haloop**, confirm the collector is healthy, and select **Run
+  analysis**. Analysis is billable and explicit; Desktop never starts it in the
+  background. An invalid trace or an out-of-project report citation blocks the
+  report instead of weakening the evidence boundary.
 - **Conversation context expired:** close the affected agent process and launch
   it again from Desktop. Signed contexts are intentionally bounded to seven
   days; reattaching preserves an existing process and does not refresh the

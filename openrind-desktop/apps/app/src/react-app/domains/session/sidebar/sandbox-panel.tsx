@@ -342,19 +342,6 @@ export function SandboxPanel(props: SandboxPanelProps) {
           </div>
         ) : null}
 
-        {error ? (
-          <div className="mb-1.5 flex items-start gap-2 rounded-[15px] border border-red-7/35 bg-red-1/40 px-3 py-2 text-left text-[11px] text-red-11">
-            <span className="min-w-0 flex-1 break-words">{error}</span>
-            <button
-              type="button"
-              className="shrink-0 text-red-11/70 underline-offset-2 hover:underline"
-              onClick={props.state.clearError}
-            >
-              {t("common.dismiss")}
-            </button>
-          </div>
-        ) : null}
-
         {!loaded ? (
           <div className="space-y-1.5 px-1">
             {[0, 1, 2].map((idx) => (
@@ -433,7 +420,38 @@ export function SandboxPanel(props: SandboxPanelProps) {
           }}
         />
       ) : null}
+
+      {error ? (
+        <ErrorDialog message={error} onDismiss={props.state.clearError} />
+      ) : null}
     </div>
+  );
+}
+
+function ErrorDialog(props: { message: string; onDismiss: () => void }) {
+  return (
+    <DialogShell>
+      <div role="alertdialog" aria-modal="true" aria-labelledby="sandbox-error-title">
+        <div className="flex items-start gap-3">
+          <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-red-3/50 text-red-11">
+            <TriangleAlert size={18} />
+          </div>
+          <div className="min-w-0 flex-1">
+            <h3 id="sandbox-error-title" className="text-base font-semibold text-gray-12">
+              Sandbox action failed
+            </h3>
+            <p className="mt-2 max-h-[45vh] overflow-y-auto whitespace-pre-wrap break-words text-sm text-gray-11">
+              {props.message}
+            </p>
+          </div>
+        </div>
+        <div className="mt-6 flex justify-end">
+          <Button autoFocus onClick={props.onDismiss}>
+            {t("common.dismiss")}
+          </Button>
+        </div>
+      </div>
+    </DialogShell>
   );
 }
 

@@ -47,10 +47,16 @@ describe('proxy policy (PROXY-PLAN compliance)', () => {
   });
 
   it('keeps the writable filesystem rooted at current OpenShell paths', () => {
-    expect(policy).toContain('- /sandbox');
-    expect(policy).toContain('- /tmp');
-    expect(policy).not.toMatch(/- \/home(?:\/|\*|$)/m);
-    expect(policy).not.toMatch(/- \/mnt(?:\/|\*|$)/m);
+    const readWritePolicy = policy.slice(
+      policy.indexOf('  read_write:'),
+      policy.indexOf('\nlandlock:'),
+    );
+    expect(readWritePolicy).toContain('- /sandbox');
+    expect(readWritePolicy).toContain('- /tmp');
+    expect(
+      (readWritePolicy.match(/^\s*- \/home[^\s#]*\s*$/gm) ?? []).map((line) => line.trim()),
+    ).toEqual(['- /home/agent/.openrind-shell']);
+    expect(readWritePolicy).not.toMatch(/- \/mnt(?:\/|\*|$)/m);
   });
 
   it('keeps retired presign policy and JSON credential rewrite removed', () => {

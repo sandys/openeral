@@ -11,14 +11,14 @@ import { fileURLToPath } from "node:url";
 
 const DISTRO_NAME = "openrind-desktop-openshell";
 const FUSE_IMAGE = "openrind-shell-fuse:local";
-const FUSE_CONTRACT = "fuse-haloop-required-v26";
+const FUSE_CONTRACT = "fuse-haloop-required-v27";
 const OPENSHELL_BASE_IMAGE = "ghcr.io/nvidia/openshell-community/sandboxes/base:latest";
 const CLAUDE_CODE_PACKAGE = "@anthropic-ai/claude-code";
 const HALOOP_LOCAL_IMAGE = "haloop-gateway:local";
 const HALOOP_CONTRACT = "openrind-haloop-v2";
 const HALOOP_LOCAL_COLLECTOR_IMAGE = "haloop-collector:local";
 const HALOOP_COLLECTOR_CONTRACT = "openrind-haloop-collector-v1";
-const HALOOP_VERSION = "w8-haloop-openrind-v3-managed-collector";
+const HALOOP_VERSION = "w8-haloop-openrind-v4-eval-export";
 const HALOOP_PRODUCTION_IMAGE =
   `ghcr.io/openrind/openrind-shell/haloop-gateway:${HALOOP_VERSION}`;
 const HALOOP_PRODUCTION_COLLECTOR_IMAGE =

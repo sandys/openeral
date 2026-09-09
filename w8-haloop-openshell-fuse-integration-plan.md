@@ -22,6 +22,75 @@
 
 ## Implementation log
 
+### 2026-09-09 — operator-reviewed rollout proposals
+
+- Removed the rollout helper's in-place write mode. A passing gate can now
+  create only a separate `*.next.json` proposal and explicitly refuses an
+  output path that resolves to the active source configuration.
+- The helper still does not call a routing control plane, edit the active
+  profile registry, create a pull request, or send candidate traffic. Applying
+  a proposal remains a separate, explicit operator-reviewed change.
+- The proposal-only overwrite guard passed in Ubuntu WSL; focused Desktop
+  Haloop and integration-contract tests pass 41/41. Candidate activation remains
+  open until the candidate model, starting weight, and gates are reviewed.
+
+### 2026-09-09 — private Anthropic-safe eval generation
+
+- Chose the existing chat-completions eval surface for replay. Anthropic
+  Messages traces now keep their exact request/output as non-executable source
+  evidence and generate a separate bounded replay projection preserving system
+  text, message order, tool schemas, tool-use IDs, tool results, stop settings,
+  source provider/model, and source session identity.
+- Added deterministic Claude/OpenClaw fixtures for valid tool use, invalid tool
+  names, invalid arguments, refusals, empty output, and token-limit truncation.
+  Deterministic structure checks remain distinct from semantic task-success
+  evaluation.
+- Added a private collector eval-extraction endpoint that accepts only the
+  server-owned project and a completed HALO run ID. It revalidates the trace and
+  report citations, writes a mode-0600 JSONL artifact in managed WSL state, and
+  returns only a sanitized summary.
+- Added **Global > Haloop > Generate eval cases**. Raw cases never cross the
+  Electron renderer or enter tracked source, the action calls no model, and it
+  does not enable candidate traffic.
+- Replay result rows now record the configured target provider, requested
+  target, provider-returned actual model, response ID, and source
+  provider/model/surface. The matched image version is
+  `w8-haloop-openrind-v4-eval-export`.
+
+### 2026-09-08 — validated Desktop HALO analysis
+
+- Added a private Desktop-to-collector analysis bridge. The renderer can select
+  only the active server-owned project; it cannot supply a trace path, model,
+  base URL, provider key, or arbitrary collector endpoint.
+- The collector receives the host-owned Anthropic analysis credential through
+  a protected WSL environment file. The credential is absent from sandbox
+  state, renderer responses, Docker command arguments, and logs.
+- Desktop validates every span in the active project against the HALO trace
+  contract before starting analysis. Invalid, empty, or missing trace input
+  fails closed and no analysis request is made.
+- Added on-demand analysis controls and polling to **Global > Haloop**. The UI
+  shows captured span/model counts, the actual analysis provider/model, and the
+  run state. Analysis remains an explicit billable action rather than a
+  background side effect of routing.
+- HALO reports persist under `/var/lib/openrind-desktop/haloop/reports`, outside
+  tracked source. Desktop keeps at most 20 reports for 30 days and verifies
+  every labeled `trace_id`/`span_id` against the selected project before
+  allowing the report to be displayed. The UI explicitly describes citations
+  as evidence rather than failure labels.
+
+### 2026-09-08 — provisioning and deletion recovery
+
+- Granted the sandbox runtime narrowly scoped write access to
+  `/home/agent/.openrind-shell`, allowing the Haloop configurator to atomically
+  maintain the required `env.sh` export under Landlock.
+- Changed sandbox deletion to withdraw the edge and detach its scoped provider
+  before deleting the provider record, avoiding OpenShell's attached-provider
+  protection while keeping retry failures fail-closed.
+- Moved sandbox action failures out of the sidebar list and into a dismissible
+  application popup, with Electron IPC wrapper text removed from the message.
+- Bumped the FUSE image contract to `fuse-haloop-required-v27` so existing
+  sandboxes cannot reuse an image missing the corrected filesystem policy.
+
 ### 2026-09-07 — PR security and packaging review
 
 - Added version-pinned packaged gateway and collector image references. Source
@@ -152,7 +221,7 @@
   `W8_KEEP_RAW=0`.
 - Extended the source-checkout builder to build and verify both version-matched
   Haloop images in the dedicated OpenShell WSL Docker daemon. The verified
-  runtime version is `w8-haloop-openrind-v3-managed-collector`.
+  runtime version is `w8-haloop-openrind-v4-eval-export`.
 - Extended the Desktop lifecycle to create a labeled private Docker network,
   persist collector JSONL data under
   `/var/lib/openrind-desktop/haloop/collector-data`, and manage the gateway and
@@ -187,7 +256,7 @@
   latency fields, confirms raw hook retention is disabled, and recreates the
   collector against the same named volume to prove persistence.
 - The acceptance passes with runtime version
-  `w8-haloop-openrind-v3-managed-collector`. It is a provider simulation and
+  `w8-haloop-openrind-v4-eval-export`. It is a provider simulation and
   does not close the separate real Claude/OpenClaw validation gates.
 - Ten traffic-fixture/acceptance contract assertions pass, the merged Compose
   configuration confirms that neither acceptance service has a port binding,
@@ -733,19 +802,19 @@ These are the proposed defaults. Any change should be documented in this issue b
 
 ### Trace analysis
 
-- [ ] Run HALO only after trace validation passes.
-- [ ] Confirm the analysis entrypoint continues to use the chat-completions surface required by the vendored engine.
-- [ ] Confirm reports cite only trace/span IDs present in the selected project input.
-- [ ] Treat HALO citations as interesting evidence, not automatic failure labels.
-- [ ] Store reports outside tracked source and apply the retention policy.
+- [x] Run HALO only after trace validation passes.
+- [x] Confirm the analysis entrypoint continues to use the chat-completions surface required by the vendored engine.
+- [x] Confirm reports cite only trace/span IDs present in the selected project input.
+- [x] Treat HALO citations as interesting evidence, not automatic failure labels.
+- [x] Store reports outside tracked source and apply the retention policy.
 
 ### Eval generation and replay
 
-- [ ] Decide whether Anthropic Messages traces are replayed through `/v1/messages` or normalized to the existing chat-completions eval surface.
-- [ ] Preserve complete message prefixes, tool schemas, tool IDs, and provider/model identity.
-- [ ] Add Claude/OpenClaw cases for valid tool use, invalid tool name, invalid tool arguments, refusals, empty output, and truncated streams.
-- [ ] Separate deterministic structural checks from semantic task-success evaluation.
-- [ ] Record which model/provider produced each replay result.
+- [x] Decide whether Anthropic Messages traces are replayed through `/v1/messages` or normalized to the existing chat-completions eval surface.
+- [x] Preserve complete message prefixes, tool schemas, tool IDs, and provider/model identity.
+- [x] Add Claude/OpenClaw cases for valid tool use, invalid tool name, invalid tool arguments, refusals, empty output, and truncated streams.
+- [x] Separate deterministic structural checks from semantic task-success evaluation.
+- [x] Record which model/provider produced each replay result.
 
 ### Controlled routing
 
@@ -755,7 +824,7 @@ These are the proposed defaults. Any change should be documented in this issue b
 - [ ] Define pass-rate, p99 latency, trace-completeness, and optional cost thresholds.
 - [ ] Require a human-reviewed configuration change before increasing traffic.
 - [x] Preserve immediate manual rollback to the incumbent route.
-- [ ] Do not automatically deploy `*.next.json` output from the rollout script.
+- [x] Do not automatically deploy `*.next.json` output from the rollout script.
 
 ### Phase 4 acceptance criteria
 
@@ -926,7 +995,7 @@ These are the proposed defaults. Any change should be documented in this issue b
 
 ## Open questions
 
-- [x] Packaged Desktop selects the fixed GHCR gateway/collector tags for `w8-haloop-openrind-v3-managed-collector`; release scripts build, verify, and publish both together.
+- [x] Packaged Desktop selects the fixed GHCR gateway/collector tags for `w8-haloop-openrind-v4-eval-export`; release scripts build, verify, and publish both together.
 - [x] The initial routing-only deployment is a Desktop-managed local container.
 - [x] Rotation is an explicit confirmed action on the active route; it ends
   tracked in-app sessions and requires all affected agents to relaunch.

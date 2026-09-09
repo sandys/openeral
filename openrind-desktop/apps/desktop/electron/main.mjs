@@ -2455,17 +2455,29 @@ async function handleDesktopInvoke(event, command, ...args) {
       return openrindCredentials.getCredentialStatus();
     case "openrindHaloopStatus":
       return openrindShell.getHaloopRuntimeStatus();
+    case "openrindHaloopAnalysisStatus":
+      return openrindShell.getHaloopAnalysisStatus();
+    case "openrindHaloopAnalysisStart": {
+      assertHaloopIntegrationNotResetting();
+      return trackHaloopOperation(openrindShell.startHaloopAnalysis());
+    }
+    case "openrindHaloopAnalysisReport": {
+      assertHaloopIntegrationNotResetting();
+      const runId = String(args[0]?.runId ?? "").trim();
+      return openrindShell.loadHaloopAnalysisReport(runId);
+    }
+    case "openrindHaloopEvalGenerate": {
+      assertHaloopIntegrationNotResetting();
+      const runId = String(args[0]?.runId ?? "").trim();
+      return trackHaloopOperation(openrindShell.generateHaloopEvalCases(runId));
+    }
     case "openrindHaloopRestart": {
       assertHaloopIntegrationNotResetting();
       const anthropicApiKey = await openrindCredentials.getCredential("anthropicApiKey");
       assertHaloopIntegrationNotResetting();
-      if (!anthropicApiKey) {
-        throw new Error(
-          "ANTHROPIC_API_KEY is required to restart the managed Haloop route.",
-        );
-      }
+      const upstreamApiKey = openrindShell.resolveHaloopUpstreamApiKey(anthropicApiKey);
       await trackHaloopOperation(
-        openrindShell.restartHaloopRuntime({ anthropicApiKey }),
+        openrindShell.restartHaloopRuntime({ anthropicApiKey: upstreamApiKey }),
       );
       return openrindShell.getHaloopRuntimeStatus();
     }

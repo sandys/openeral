@@ -141,6 +141,24 @@ export function SandboxView(props: SandboxViewProps) {
           ? "Reinstall / repair"
           : "Install OpenShell";
 
+  const doctorStateLabel = props.doctor?.status
+    ? {
+        ready: "Ready",
+        degraded: "Needs attention",
+        missing: "Not installed",
+        unsupported: "Unsupported",
+      }[props.doctor.status]
+    : "Checking";
+
+  const doctorStateClass =
+    props.doctor?.status === "ready"
+      ? "border-green-7/60 bg-green-3/30 text-green-12"
+      : props.doctor?.status === "degraded"
+        ? "border-amber-7/60 bg-amber-3/30 text-amber-12"
+        : props.doctor?.status === "missing" || !props.doctor
+          ? "border-gray-7/50 bg-gray-2/40 text-gray-10"
+          : "border-red-7/60 bg-red-3/30 text-red-12";
+
   return (
     <div className="space-y-6">
       <div className={`${settingsPanelClass} space-y-3`}>
@@ -207,8 +225,15 @@ export function SandboxView(props: SandboxViewProps) {
       {showOpenShellPanel ? (
         <div className={`${settingsPanelClass} space-y-4`}>
           <div className="flex items-start justify-between gap-3">
-            <div>
-              <div className="text-sm font-medium text-gray-12">OpenShell health</div>
+            <div className="space-y-1">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-sm font-semibold text-gray-12">OpenShell health</span>
+                <span
+                  className={`rounded-full border px-2 py-0.5 text-[10px] font-medium uppercase tracking-wider ${doctorStateClass}`}
+                >
+                  {doctorStateLabel}
+                </span>
+              </div>
               <div className="text-xs text-gray-10">
                 The Doctor checks each layer of the WSL2 / Docker / OpenShell stack. Status updates
                 automatically every five seconds while this page is open.
@@ -216,7 +241,7 @@ export function SandboxView(props: SandboxViewProps) {
             </div>
             <Button
               variant="outline"
-              className="h-8 rounded-full px-3 text-xs"
+              className="h-8 shrink-0 rounded-full px-3 text-xs"
               onClick={props.onRefreshDoctor}
               disabled={props.doctorLoading}
               title="Refresh now"
@@ -236,21 +261,27 @@ export function SandboxView(props: SandboxViewProps) {
             </div>
           ) : null}
 
-          <div
-            className={`rounded-xl border p-3 text-sm ${doctorBannerClasses(props.doctor?.status)}`}
-          >
-            <div className="font-medium">{doctorBannerLabel(props.doctor?.status)}</div>
-            {props.doctor?.fatal?.length ? (
-              <ul className="mt-1 list-disc pl-4 text-xs">
-                {props.doctor.fatal.map((line, idx) => (
-                  <li key={idx}>{line}</li>
-                ))}
-              </ul>
-            ) : null}
-            {props.doctorError ? (
-              <div className="mt-1 text-xs">Doctor error: {props.doctorError}</div>
-            ) : null}
-          </div>
+          {props.doctor && props.doctor.status !== "ready" ? (
+            <div
+              className={`rounded-xl border p-3 text-sm ${doctorBannerClasses(props.doctor.status)}`}
+            >
+              <div className="font-medium">{doctorBannerLabel(props.doctor.status)}</div>
+              {props.doctor.fatal?.length ? (
+                <ul className="mt-1 list-disc pl-4 text-xs">
+                  {props.doctor.fatal.map((line, idx) => (
+                    <li key={idx}>{line}</li>
+                  ))}
+                </ul>
+              ) : null}
+              {props.doctorError ? (
+                <div className="mt-1 text-xs">Doctor error: {props.doctorError}</div>
+              ) : null}
+            </div>
+          ) : props.doctorError ? (
+            <div className="rounded-xl border border-red-7/50 bg-red-2/30 p-3 text-xs text-red-12">
+              Doctor error: {props.doctorError}
+            </div>
+          ) : null}
 
           {props.doctor?.components?.length ? (
             <div className="rounded-2xl border border-dls-border">
